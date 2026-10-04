@@ -123,6 +123,52 @@ func TestAccFile(t *testing.T) {
 	})
 }
 
+func TestAccFileCreatesParentDirectories(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useTestDirectory()
+	// A restrictive mode on the existing directory shows that the apply
+	// does not change it.
+	guest.mustRun("chmod", "0700", "--", testDirectory)
+	firstLevel := testDirectory + "/missing"
+	secondLevel := firstLevel + "/nested"
+	path := secondLevel + "/file.conf"
+	content := "nested = 1\n"
+	config := guest.fileConfig(path, content, "")
+	expectStatus := func(target string, want string) error {
+		status := strings.TrimSpace(guest.mustRun("stat", "-c", "%a %U %G", "--", target))
+		if status != want {
+			return fmt.Errorf("stat of %s reports %q, want %q", target, status, want)
+		}
+		return nil
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: config,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					checkGuest(guest.expectFileContent(path, content)),
+					checkGuest(func() error { return expectStatus(firstLevel, "755 root root") }),
+					checkGuest(func() error { return expectStatus(secondLevel, "755 root root") }),
+					checkGuest(func() error { return expectStatus(testDirectory, "700 root root") }),
+				),
+			},
+			{
+				// Read removes the file from state after the directories are
+				// deleted, and the next apply creates both again.
+				PreConfig:        func() { guest.mustRun("rm", "-rf", "--", firstLevel) },
+				Config:           config,
+				ConfigPlanChecks: expectAction("pveguest_file.test", plancheck.ResourceActionCreate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					checkGuest(guest.expectFileContent(path, content)),
+					checkGuest(func() error { return expectStatus(secondLevel, "755 root root") }),
+				),
+			},
+		},
+	})
+}
+
 func TestAccFileValidate(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()

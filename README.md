@@ -103,14 +103,14 @@ container, a stopped VM, and a VM without a running guest agent.
 A regular file. Read runs `stat` and `sha256sum`. Read removes a missing file
 from state, and the next plan creates it. Destroy deletes the file.
 
-An apply writes a temporary file in the directory of `path`, sets mode and
-owner, runs `validate`, and renames the temporary file to `path`. A failed
+An apply runs `mkdir -p` for the directory of `path`, writes a temporary file
+in that directory, sets mode and owner, runs `validate`, and renames the temporary file to `path`. A failed
 `validate` command fails the apply, deletes the temporary file, and does not
 replace the file at `path`.
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `path` | string | yes | | Absolute path. The parent directory must exist. A change replaces the resource. |
+| `path` | string | yes | | Absolute path. An apply creates each missing parent directory with mode `0755` and owner `root:root` and changes no existing directory. Destroy deletes the file and no directory. A change replaces the resource. |
 | `content` | string | one of `content`, `content_wo` | | File content. |
 | `content_wo` | string, write-only | one of `content`, `content_wo` | | File content that OpenTofu stores in neither the plan nor the state. |
 | `content_wo_version` | number | with `content_wo` | | A changed value writes `content_wo` again. |

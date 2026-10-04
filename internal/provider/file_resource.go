@@ -93,7 +93,7 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"path": schema.StringAttribute{
 				Required:    true,
-				Description: "Absolute path of the file. The parent directory must exist.",
+				Description: "Absolute path of the file. An apply creates missing parent directories with mode 0755 and owner root:root.",
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path without a trailing slash"),
 				},
@@ -365,6 +365,14 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	destination := plan.Path.ValueString()
 	temporaryPath, err := temporaryPathFor(destination)
 	if err != nil {
+		return err
+	}
+
+	// mkdir -m sets the mode of the last directory only. The umask gives
+	// every new directory in the path mode 0755. The command runs as root,
+	// and mkdir -p changes no existing directory.
+	directoryCommand := guestCommand("sh", "-c", `umask 022 && mkdir -p -- "$1"`, "sh", path.Dir(destination))
+	if _, err := runChecked(ctx, r.data.pool, guest, directoryCommand); err != nil {
 		return err
 	}
 
