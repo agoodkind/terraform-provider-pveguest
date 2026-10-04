@@ -8,6 +8,8 @@ GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 MIRROR_DIRECTORY := $(HOME)/.terraform.d/plugins/$(PROVIDER_ADDRESS)/$(VERSION)/$(GOOS)_$(GOARCH)
 LDFLAGS := -X main.version=$(VERSION)
+# Extra go test arguments for testacc, for example TESTARGS="-run TestAccLink".
+TESTARGS ?=
 
 .PHONY: build test testacc check install
 
@@ -25,7 +27,7 @@ testacc: install
 	TF_ACC_TERRAFORM_PATH="$$(command -v tofu)" \
 	TF_ACC_PROVIDER_HOST=$(PROVIDER_HOST) \
 	TF_ACC_PROVIDER_NAMESPACE=$(PROVIDER_NAMESPACE) \
-	go test ./internal/acceptance/... -count=1 -p 1 -v -timeout 30m
+	go test ./internal/acceptance/... -count=1 -p 1 -v -timeout 30m $(TESTARGS)
 
 check:
 	go vet ./...

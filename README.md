@@ -226,6 +226,10 @@ items at the end:
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 
+The last test, `TestAccGuestIsClean`, fails when one of these items is still
+in the guest. `TESTARGS` passes extra arguments to `go test`, for example
+`TESTARGS="-run TestAccLink"`.
+
 One test runs the `tofu` binary against the installed provider in a temporary
 directory and reads the raw state file and the saved plan. The other tests use
 `terraform-plugin-testing` with the provider in the test process.
