@@ -1,0 +1,287 @@
+package provider
+
+import (
+	"context"
+	"fmt"
+	"regexp"
+	"strings"
+
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/resource"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
+)
+
+const (
+	systemctlTimeoutSeconds = 300
+
+	// systemd 253 and later print this state for a unit without a unit
+	// file. Earlier versions print only an error message.
+	unitNotFoundState = "not-found"
+)
+
+var (
+	unitNamePattern = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+\.[a-z]+$`)
+
+	missingUnitMessages = []string{missingFileMessage, "does not exist", "not found"}
+)
+
+// enablement classifies the output of systemctl is-enabled.
+type enablement int
+
+const (
+	enablementDisabled enablement = iota
+	enablementEnabled
+	// A fixed unit has no install information or is created at runtime.
+	// systemctl enable and disable do not change it, and every declared
+	// value of enabled is satisfied.
+	enablementFixed
+)
+
+type unitStatus struct {
+	Found        bool
+	EnabledState string
+	ActiveState  string
+}
+
+type systemdUnitResource struct {
+	data *providerData
+}
+
+type systemdUnitModel struct {
+	Node      types.String `tfsdk:"node"`
+	VMID      types.Int64  `tfsdk:"vmid"`
+	Kind      types.String `tfsdk:"kind"`
+	Name      types.String `tfsdk:"name"`
+	Enabled   types.Bool   `tfsdk:"enabled"`
+	Active    types.Bool   `tfsdk:"active"`
+	RestartOn types.Map    `tfsdk:"restart_on"`
+}
+
+func newSystemdUnitResource() resource.Resource {
+	return &systemdUnitResource{}
+}
+
+func (r *systemdUnitResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+	resp.TypeName = req.ProviderTypeName + "_systemd_unit"
+}
+
+func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+	resp.Schema = schema.Schema{
+		Description: "The enabled state and the active state of a systemd unit inside a guest. " +
+			"The unit file must exist. Destroy changes nothing in the guest.",
+		Attributes: withGuestAttributes(map[string]schema.Attribute{
+			"name": schema.StringAttribute{
+				Required:    true,
+				Description: "Full unit name with suffix, for example ssh.service.",
+				Validators: []validator.String{
+					stringvalidator.RegexMatches(unitNamePattern, "must be a unit name with a suffix"),
+				},
+				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
+			},
+			"enabled": schema.BoolAttribute{
+				Required:    true,
+				Description: "Whether the unit is enabled. A static unit satisfies both values.",
+			},
+			"active": schema.BoolAttribute{
+				Required:    true,
+				Description: "Whether the unit is active.",
+			},
+			"restart_on": schema.MapAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				Description: "Arbitrary values, usually the write_id of each file that the unit reads. " +
+					"A changed map restarts an active unit during apply.",
+			},
+		}),
+	}
+}
+
+func (r *systemdUnitResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+	r.data = providerDataFrom(req, resp)
+}
+
+func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	var plan systemdUnitModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	// The files behind a new restart_on map may have changed before this
+	// resource existed, and an active unit has not read them yet.
+	restart := len(plan.RestartOn.Elements()) > 0
+	if err := r.apply(ctx, plan, restart); err != nil {
+		resp.Diagnostics.AddError("Create systemd unit state", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+	var state systemdUnitModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	guest := guestOf(state.Node, state.VMID, state.Kind)
+	status, err := readUnitStatus(ctx, r.data.pool, guest, state.Name.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Read systemd unit", err.Error())
+		return
+	}
+	if !status.Found {
+		resp.State.RemoveResource(ctx)
+		return
+	}
+
+	switch classifyEnabledState(status.EnabledState) {
+	case enablementEnabled:
+		state.Enabled = types.BoolValue(true)
+	case enablementDisabled:
+		state.Enabled = types.BoolValue(false)
+	case enablementFixed:
+		// The value from the last apply stays in state.
+	}
+	state.Active = types.BoolValue(isActiveState(status.ActiveState))
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+}
+
+func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+	var plan systemdUnitModel
+	var state systemdUnitModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	restart := !plan.RestartOn.Equal(state.RestartOn)
+	if err := r.apply(ctx, plan, restart); err != nil {
+		resp.Diagnostics.AddError("Update systemd unit state", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// Delete runs no command in the guest. The framework removes the resource
+// from state, and the unit stays in its current state.
+func (r *systemdUnitResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
+}
+
+func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, restart bool) error {
+	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
+	name := plan.Name.ValueString()
+
+	// A unit file written earlier in the same apply is unknown to the
+	// manager until this reload.
+	if _, err := runChecked(ctx, r.data.pool, guest, systemctlCommand("daemon-reload")); err != nil {
+		return err
+	}
+	status, err := readUnitStatus(ctx, r.data.pool, guest, name)
+	if err != nil {
+		return err
+	}
+	if !status.Found {
+		return fmt.Errorf("%s: unit %s has no unit file", guest, name)
+	}
+
+	current := classifyEnabledState(status.EnabledState)
+	wantEnabled := plan.Enabled.ValueBool()
+	if current == enablementDisabled && wantEnabled {
+		if _, err := runChecked(ctx, r.data.pool, guest, systemctlCommand("enable", "--", name)); err != nil {
+			return err
+		}
+	}
+	if current == enablementEnabled && !wantEnabled {
+		if _, err := runChecked(ctx, r.data.pool, guest, systemctlCommand("disable", "--", name)); err != nil {
+			return err
+		}
+	}
+
+	isActive := isActiveState(status.ActiveState)
+	wantActive := plan.Active.ValueBool()
+	var action string
+	switch {
+	case wantActive && !isActive:
+		action = "start"
+	case wantActive && restart:
+		action = "restart"
+	case !wantActive && isActive:
+		action = "stop"
+	default:
+		return nil
+	}
+	_, err = runChecked(ctx, r.data.pool, guest, systemctlCommand(action, "--", name))
+	return err
+}
+
+func systemctlCommand(arguments ...string) transport.Command {
+	command := guestCommand(append([]string{"systemctl"}, arguments...)...)
+	command.TimeoutSeconds = systemctlTimeoutSeconds
+	return command
+}
+
+func readUnitStatus(ctx context.Context, pool *transport.Pool, guest transport.Guest, name string) (unitStatus, error) {
+	enabledCommand := systemctlCommand("is-enabled", "--", name)
+	enabledResult, err := pool.Run(ctx, guest, enabledCommand)
+	if err != nil {
+		return unitStatus{}, err
+	}
+	enabledState := firstLine(enabledResult.Stdout)
+	if enabledState == unitNotFoundState {
+		return unitStatus{}, nil
+	}
+	if enabledState == "" {
+		if reportsMissingUnit(string(enabledResult.Stderr)) {
+			return unitStatus{}, nil
+		}
+		return unitStatus{}, commandFailure(guest, enabledCommand, enabledResult)
+	}
+
+	// is-active exits nonzero for every state except active, and prints
+	// the state in each case.
+	activeCommand := systemctlCommand("is-active", "--", name)
+	activeResult, err := pool.Run(ctx, guest, activeCommand)
+	if err != nil {
+		return unitStatus{}, err
+	}
+	activeState := firstLine(activeResult.Stdout)
+	if activeState == "" {
+		return unitStatus{}, commandFailure(guest, activeCommand, activeResult)
+	}
+	return unitStatus{Found: true, EnabledState: enabledState, ActiveState: activeState}, nil
+}
+
+func reportsMissingUnit(stderr string) bool {
+	for _, message := range missingUnitMessages {
+		if strings.Contains(stderr, message) {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyEnabledState(state string) enablement {
+	switch state {
+	case "enabled", "enabled-runtime":
+		return enablementEnabled
+	case "static", "alias", "indirect", "generated", "transient":
+		return enablementFixed
+	default:
+		return enablementDisabled
+	}
+}
+
+func isActiveState(state string) bool {
+	switch state {
+	case "active", "activating", "reloading":
+		return true
+	default:
+		return false
+	}
+}
