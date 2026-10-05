@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,23 +20,30 @@ import (
 	"golang.org/x/crypto/ssh/knownhosts"
 )
 
+// DefaultPort, DefaultUser, and DefaultMaxSessions apply when the provider
+// configuration omits port, user, or max_sessions.
 const (
 	DefaultPort        = 22
 	DefaultUser        = "root"
 	DefaultMaxSessions = 4
+)
 
+const (
 	dialTimeout         = 20 * time.Second
 	agentSocketVariable = "SSH_AUTH_SOCK"
 )
 
-// NodeConfig is the SSH endpoint of one hypervisor.
+// NodeConfig is the SSH endpoint of one hypervisor. The SSH agent must offer a
+// key that the hypervisor accepts for User.
 type NodeConfig struct {
 	Host string
 	Port int
 	User string
 }
 
-// Result is the outcome of one command that ran to completion.
+// Result is the outcome of a command that ran to its end. ExitCode is the
+// exit status of the command, and Stdout and Stderr are the bytes that it
+// wrote.
 type Result struct {
 	Stdout   []byte
 	Stderr   []byte
@@ -60,14 +68,16 @@ type nodeConnection struct {
 	client *ssh.Client
 }
 
-// NewPool returns a pool for the given nodes. It opens no connection; the
-// first command for a node dials that node.
+// NewPool returns a pool for the named hypervisors. The first command for a
+// node opens the SSH connection to that node. maxSessions limits the
+// concurrent sessions per node and must be at least 1.
 func NewPool(nodes map[string]NodeConfig, maxSessions int) (*Pool, error) {
 	if maxSessions < 1 {
 		return nil, fmt.Errorf("max_sessions must be at least 1, got %d", maxSessions)
 	}
 	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
+		slog.Error("find home directory for known_hosts failed", "err", err)
 		return nil, fmt.Errorf("find home directory for known_hosts: %w", err)
 	}
 	pool := &Pool{
@@ -84,7 +94,7 @@ func NewPool(nodes map[string]NodeConfig, maxSessions int) (*Pool, error) {
 	return pool, nil
 }
 
-// Close closes every open SSH client.
+// Close closes the SSH client of every node. A later command dials again.
 func (pool *Pool) Close() {
 	pool.mutex.Lock()
 	defer pool.mutex.Unlock()
@@ -98,9 +108,10 @@ func (pool *Pool) Close() {
 	}
 }
 
-// RunOnNode runs one command line on the hypervisor in its own SSH session.
-// A command that exits with a nonzero status is a Result, not an error.
-func (pool *Pool) RunOnNode(
+// runOnNode runs the command line on the hypervisor in a new SSH session.
+// A nonzero exit status of the command is returned in Result.ExitCode with a
+// nil error.
+func (pool *Pool) runOnNode(
 	ctx context.Context,
 	node string,
 	commandLine string,
@@ -116,12 +127,14 @@ func (pool *Pool) RunOnNode(
 	select {
 	case connection.slots <- struct{}{}:
 	case <-ctx.Done():
-		return Result{}, ctx.Err()
+		slog.ErrorContext(ctx, "wait for a session slot ended", "node", node, "err", ctx.Err())
+		return Result{}, fmt.Errorf("wait for a session slot on node %q: %w", node, ctx.Err())
 	}
 	defer func() { <-connection.slots }()
 
-	session, err := connection.newSession(pool.knownHostsPath)
+	session, err := connection.newSession(ctx, pool.knownHostsPath)
 	if err != nil {
+		slog.ErrorContext(ctx, "open ssh session failed", "node", node, "err", err)
 		return Result{}, fmt.Errorf("ssh to node %q: %w", node, err)
 	}
 	defer func() { _ = session.Close() }()
@@ -133,15 +146,9 @@ func (pool *Pool) RunOnNode(
 	session.Stdout = &stdout
 	session.Stderr = &stderr
 
-	finished := make(chan struct{})
-	defer close(finished)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = session.Close()
-		case <-finished:
-		}
-	}()
+	// A canceled context closes the session, which ends session.Run.
+	stopWatching := context.AfterFunc(ctx, func() { _ = session.Close() })
+	defer stopWatching()
 
 	runError := session.Run(commandLine)
 	result := Result{Stdout: stdout.Bytes(), Stderr: stderr.Bytes()}
@@ -153,13 +160,15 @@ func (pool *Pool) RunOnNode(
 		result.ExitCode = exitError.ExitStatus()
 		return result, nil
 	}
+	cause := runError
 	if ctx.Err() != nil {
-		return Result{}, fmt.Errorf("command on node %q: %w", node, ctx.Err())
+		cause = ctx.Err()
 	}
-	return Result{}, fmt.Errorf("command on node %q: %w", node, runError)
+	slog.ErrorContext(ctx, "command on node failed", "node", node, "err", cause)
+	return Result{}, fmt.Errorf("command on node %q: %w", node, cause)
 }
 
-func (connection *nodeConnection) newSession(knownHostsPath string) (*ssh.Session, error) {
+func (connection *nodeConnection) newSession(ctx context.Context, knownHostsPath string) (*ssh.Session, error) {
 	connection.mutex.Lock()
 	defer connection.mutex.Unlock()
 
@@ -174,21 +183,34 @@ func (connection *nodeConnection) newSession(knownHostsPath string) (*ssh.Sessio
 		connection.client = nil
 	}
 
-	client, err := dial(connection.config, knownHostsPath)
+	client, err := dial(ctx, connection.config, knownHostsPath)
 	if err != nil {
 		return nil, err
 	}
 	connection.client = client
-	return client.NewSession()
+	session, err := client.NewSession()
+	if err != nil {
+		slog.ErrorContext(
+			ctx,
+			"open ssh session on a new connection failed",
+			"host", connection.config.Host, "port", connection.config.Port, "err", err,
+		)
+		return nil, fmt.Errorf("open session on %s: %w", connection.config.Host, err)
+	}
+	return session, nil
 }
 
-func dial(config NodeConfig, knownHostsPath string) (*ssh.Client, error) {
+func dial(ctx context.Context, config NodeConfig, knownHostsPath string) (*ssh.Client, error) {
 	socketPath := os.Getenv(agentSocketVariable)
 	if socketPath == "" {
 		return nil, fmt.Errorf("%s is not set; the provider authenticates through the SSH agent", agentSocketVariable)
 	}
-	agentConnection, err := net.Dial("unix", socketPath)
+	dialContext, cancel := context.WithTimeout(ctx, dialTimeout)
+	defer cancel()
+	var agentDialer net.Dialer
+	agentConnection, err := agentDialer.DialContext(dialContext, "unix", socketPath)
 	if err != nil {
+		slog.ErrorContext(ctx, "connect to ssh agent failed", "host", config.Host, "err", err)
 		return nil, fmt.Errorf("connect to SSH agent: %w", err)
 	}
 	// The agent signs only during the handshake.
@@ -196,6 +218,7 @@ func dial(config NodeConfig, knownHostsPath string) (*ssh.Client, error) {
 
 	hostKeyCallback, err := knownhosts.New(knownHostsPath)
 	if err != nil {
+		slog.Error("read known_hosts failed", "path", knownHostsPath, "err", err)
 		return nil, fmt.Errorf("read %s: %w", knownHostsPath, err)
 	}
 	address := net.JoinHostPort(config.Host, strconv.Itoa(config.Port))
@@ -213,32 +236,33 @@ func dial(config NodeConfig, knownHostsPath string) (*ssh.Client, error) {
 	}
 	client, err := ssh.Dial("tcp", address, clientConfig)
 	if err != nil {
+		slog.Error("ssh dial failed", "address", address, "user", config.User, "err", err)
 		return nil, fmt.Errorf("dial %s: %w", address, err)
 	}
 	return client, nil
 }
 
-// knownHostKeyAlgorithms returns the host key algorithms that known_hosts
-// lists for the address. Without this restriction the server may present a
-// key type that known_hosts does not list, and the check fails although a
-// listed key exists.
+// Limit host-key negotiation to the algorithms recorded in known_hosts.
 func knownHostKeyAlgorithms(callback ssh.HostKeyCallback, address string) ([]string, error) {
 	probePublicKey, _, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
+		slog.Error("generate probe key failed", "address", address, "err", err)
 		return nil, fmt.Errorf("generate probe key: %w", err)
 	}
 	probeKey, err := ssh.NewPublicKey(probePublicKey)
 	if err != nil {
+		slog.Error("encode probe key failed", "address", address, "err", err)
 		return nil, fmt.Errorf("encode probe key: %w", err)
 	}
 
 	checkError := callback(address, &net.TCPAddr{}, probeKey)
 	var keyError *knownhosts.KeyError
 	if !errors.As(checkError, &keyError) {
+		slog.Error("look up host in known_hosts failed", "address", address, "err", checkError)
 		return nil, fmt.Errorf("look up %s in known_hosts: %w", address, checkError)
 	}
 	if len(keyError.Want) == 0 {
-		return nil, fmt.Errorf("host %s has no entry in known_hosts", address)
+		return nil, fmt.Errorf("known_hosts does not list host %s", address)
 	}
 
 	algorithms := make([]string, 0, len(keyError.Want))

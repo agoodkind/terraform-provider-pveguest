@@ -36,7 +36,6 @@ type nodeModel struct {
 	User types.String `tfsdk:"user"`
 }
 
-// providerData is the value that every resource receives from Configure.
 type providerData struct {
 	pool     *transport.Pool
 	aptLocks *guestLocks
@@ -62,6 +61,8 @@ func (locks *guestLocks) lock(guest transport.Guest) func() {
 	return guestLock.Unlock
 }
 
+// New returns the factory of the pveguest provider. OpenTofu receives version
+// as the provider version.
 func New(version string) func() provider.Provider {
 	return func() provider.Provider {
 		return &pveguestProvider{version: version}

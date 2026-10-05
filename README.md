@@ -3,8 +3,8 @@
 `pveguest` is an OpenTofu provider that declares files, symbolic links, apt
 packages, and systemd units inside Proxmox guests. The provider opens SSH to
 the hypervisor and runs each command with `pct exec` for a container or
-`qm guest exec` for a VM. The guest needs no sshd and no network path from the
-machine that runs OpenTofu.
+`qm guest exec` for a VM. The provider does not require SSH access to the
+guest.
 
 The provider address is `tofu.home.arpa/agoodkind/pveguest`. The provider
 supports Debian guests.
@@ -16,20 +16,19 @@ supports Debian guests.
 - An SSH agent at `SSH_AUTH_SOCK` with a key that the hypervisor accepts for
   the configured user.
 - An entry for each hypervisor host in `~/.ssh/known_hosts`. The provider
-  rejects a host without an entry.
+  connects only to a host that `known_hosts` lists.
 - For `kind = "qemu"`: a running QEMU guest agent in the VM.
 
 ## Install
 
 ```sh
-make install
+make install-mirror
 ```
 
-`make install` builds the provider for the host platform and copies the binary
-to
+`make install-mirror` builds the provider for the host platform with version
+`0.1.0` and writes the binary to
 `~/.terraform.d/plugins/tofu.home.arpa/agoodkind/pveguest/0.1.0/<os>_<arch>/terraform-provider-pveguest_v0.1.0`.
-OpenTofu reads that directory as an implied local mirror without CLI
-configuration.
+OpenTofu reads that directory as an implied local mirror.
 
 A configuration selects the provider by its address:
 
@@ -96,7 +95,7 @@ resource.
 | `kind` | string | yes | `lxc` or `qemu`. |
 
 Read returns an error that includes `node`, `vmid`, and `kind` for a stopped
-container, a stopped VM, and a VM without a running guest agent.
+container, a stopped VM, and a VM with a stopped guest agent.
 
 ## pveguest_file
 
@@ -104,15 +103,16 @@ A regular file. Read runs `stat` and `sha256sum`. Read removes a missing file
 from state, and the next plan creates it. Destroy deletes the file.
 
 An apply runs `mkdir -p` for the directory of `path`, writes a temporary file
-in that directory, sets mode and owner, runs `validate`, and renames the temporary file to `path`. A failed
-`validate` command fails the apply, deletes the temporary file, and does not
-replace the file at `path`.
+in that directory, sets mode and owner, runs `validate`, and renames the
+temporary file to `path`. A failed `validate` command fails the apply before
+the rename and deletes the temporary file. The file at `path` has its earlier
+content.
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `path` | string | yes | | Absolute path. An apply creates each missing parent directory with mode `0755` and owner `root:root` and changes no existing directory. Destroy deletes the file and no directory. A change replaces the resource. |
+| `path` | string | yes | | Absolute path. An apply creates each missing parent directory with mode `0755` and owner `root:root`. Destroy deletes the file. A change replaces the resource. |
 | `content` | string | one of `content`, `content_wo` | | File content. |
-| `content_wo` | string, write-only | one of `content`, `content_wo` | | File content that OpenTofu stores in neither the plan nor the state. |
+| `content_wo` | string, write-only | one of `content`, `content_wo` | | Specify file content that OpenTofu does not store in plans or state. Also set `content_wo_version`. |
 | `content_wo_version` | number | with `content_wo` | | A changed value writes `content_wo` again. |
 | `mode` | string | no | `0644` | Four octal digits. |
 | `owner` | string | no | `root` | User name. |
@@ -125,9 +125,9 @@ replace the file at `path`.
 | `write_id` | Random identifier that changes each time an apply writes the content, mode, owner, or group. |
 
 With `content_wo`, Read compares the hash of the file in the guest with the
-hash stored at the last apply. A difference produces a planned rewrite. A
-changed `content_wo` value with the same `content_wo_version` produces no
-change.
+hash stored at the last apply. A difference produces a planned rewrite. The
+provider writes a changed `content_wo` value when `content_wo_version` also
+changes.
 
 A VM file larger than 1 MiB exceeds the stdin limit of `qm guest exec`, and
 the provider returns an error before it runs the command.
@@ -140,35 +140,34 @@ that is not a link, from state. Destroy deletes the link.
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `path` | string | yes | Absolute path of the link. A change replaces the resource. |
-| `target` | string | yes | Path that the link stores. |
+| `target` | string | yes | Specify the symbolic link's target path. The target does not need to exist. |
 
 ## pveguest_apt_packages
 
-A set of installed apt packages. Read runs `dpkg-query --show`. A package that
-is not installed is absent from the set in state, and the next plan adds it.
+A set of installed apt packages. Read runs `dpkg-query --show` and stores the
+declared packages that are installed. The next plan adds each missing package.
 
 An apply with at least one missing package runs `apt-get update` and then
 `apt-get install -y --no-install-recommends` with
-`DEBIAN_FRONTEND=noninteractive`. An apply without a missing package runs
-neither command. A failed `apt-get update` fails the apply with its own error.
-The provider runs one apt operation per guest at a time.
+`DEBIAN_FRONTEND=noninteractive`. A failed `apt-get update` fails the apply
+with its own error. The provider runs one apt operation per guest at a time.
 
-The resource removes no package. A name removed from `packages` stays
-installed, and destroy changes nothing in the guest.
+A package remains installed after its name is removed from `packages` and
+after destroy.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `packages` | set of string | yes | Package names without a version or an architecture. |
+| `packages` | set of string | yes | Specify Debian package names without version or architecture suffixes. |
 
 ## pveguest_systemd_unit
 
 The enabled state and the active state of one unit. Read runs
-`systemctl is-enabled` and `systemctl is-active`. Read removes a unit without
-a unit file from state. Read runs no command that changes the guest.
+`systemctl is-enabled` and `systemctl is-active`. Read removes a unit from
+state when its unit file does not exist.
 
 Create and Update run `systemctl daemon-reload` and then `enable`, `disable`,
-`start`, `stop`, or `restart` as the declaration requires. Create fails for a
-unit without a unit file. Destroy changes nothing in the guest.
+`start`, `stop`, or `restart` as the declaration requires. Create fails when
+the unit file does not exist. Destroy removes the resource from state.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -178,8 +177,9 @@ unit without a unit file. Destroy changes nothing in the guest.
 | `restart_on` | map of string | no | A changed map restarts an active unit during apply. |
 
 The intended `restart_on` value is the `write_id` of each file that the unit
-reads. The `sha256` of a file is the same before a hand edit and after the rewrite
-that repairs it, and a map of `sha256` values then plans no restart.
+reads. The `sha256` of a file is the same before a hand edit and after the
+rewrite that repairs it. The `write_id` changes at each write, and the changed
+value triggers the restart.
 
 Create restarts a unit that is already active when `restart_on` has at least
 one entry.
@@ -188,16 +188,17 @@ one entry.
 
 | Command | Action |
 | --- | --- |
-| `make build` | Builds `bin/terraform-provider-pveguest`. |
-| `make test` | Runs the unit tests. The acceptance tests skip without `TF_ACC`. |
-| `make check` | Runs `go vet` and fails when `gofmt -l` lists a file. |
-| `make install` | Builds and copies the binary to the implied local mirror. |
-| `make testacc` | Runs `make install` and then the acceptance tests. |
+| `make build` | Runs vet, every lint gate, and `govulncheck`, then builds `dist/terraform-provider-pveguest`. |
+| `make test` | Runs `go test ./...`. The acceptance tests skip unless `TF_ACC` is set. |
+| `make check` | Runs every lint gate. |
+| `make fmt` | Applies the configured Go formatters. |
+| `make install-mirror` | Builds the provider with version `0.1.0` and writes it to the implied local mirror. |
+| `make testacc` | Runs `make install-mirror` and then the acceptance tests. |
+| `make help` | Lists every target. |
 
 ## Acceptance tests
 
-The acceptance tests change a real guest and use no mock. The target must be a
-guest without a service that other systems depend on.
+The acceptance tests change a real guest. Use a dedicated test guest.
 
 ```sh
 make testacc \

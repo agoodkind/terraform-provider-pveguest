@@ -1,4 +1,4 @@
-package acceptance
+package acceptance_test
 
 import (
 	"crypto/sha256"
@@ -126,8 +126,6 @@ func TestAccFile(t *testing.T) {
 func TestAccFileCreatesParentDirectories(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
-	// A restrictive mode on the existing directory shows that the apply
-	// does not change it.
 	guest.mustRun("chmod", "0700", "--", testDirectory)
 	firstLevel := testDirectory + "/missing"
 	secondLevel := firstLevel + "/nested"
@@ -172,7 +170,9 @@ func TestAccFileCreatesParentDirectories(t *testing.T) {
 func TestAccFileValidate(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
-	path := testDirectory + "/validated.conf"
+	// The validation path includes a space and an apostrophe to exercise quoting.
+	fileName := "it's validated.conf"
+	path := testDirectory + "/" + fileName
 	validate := `validate = "grep -q good %s"`
 	goodContent := "good\n"
 
@@ -188,17 +188,15 @@ func TestAccFileValidate(t *testing.T) {
 				// wraps the diagnostic text, and each gap in the pattern
 				// matches a line break.
 				Config:      guest.fileConfig(path, "bad\n", validate),
-				ExpectError: regexp.MustCompile(`validate\s+command\s+for\s+\S+\s+exited\s+with\s+status\s+1`),
+				ExpectError: regexp.MustCompile(`(?s)validate\s+command\s+for\s+.+exited\s+with\s+status\s+1`),
 			},
 			{
-				// AC6: the previous file is unchanged, and the temporary
-				// file is gone.
 				PreConfig: func() {
 					if err := guest.expectFileContent(path, goodContent)(); err != nil {
 						t.Fatal(err)
 					}
 					listing := strings.TrimSpace(guest.mustRun("ls", "-A", "--", testDirectory))
-					if listing != "validated.conf" {
+					if listing != fileName {
 						t.Fatalf("directory contains %q after the failed apply", listing)
 					}
 				},
@@ -256,7 +254,6 @@ func TestAccFileWriteOnly(t *testing.T) {
 				),
 			},
 			{
-				// New content with the same version writes nothing.
 				Config: guest.writeOnlyConfig(path, secondMarker, 1),
 				ConfigPlanChecks: resource.ConfigPlanChecks{
 					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
@@ -365,8 +362,7 @@ resource "pveguest_apt_packages" "test" {
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		// Destroy does not remove packages.
-		CheckDestroy: expectInstalled,
+		CheckDestroy:             expectInstalled,
 		Steps: []resource.TestStep{
 			{
 				Config: config,
@@ -378,6 +374,46 @@ resource "pveguest_apt_packages" "test" {
 				Config:           config,
 				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
 				Check:            expectInstalled,
+			},
+		},
+	})
+}
+
+// A package name that starts with a dash is an apt-get option, and a unit name
+// that starts with a dash is a systemctl option. The plan rejects both.
+func TestAccRejectsOptionLikeNames(t *testing.T) {
+	guest := newTestGuest(t)
+	packageConfig := guest.providerBlock() + `
+resource "pveguest_apt_packages" "test" {
+  node     = local.node
+  vmid     = local.vmid
+  kind     = local.kind
+  packages = ["-o"]
+}
+`
+	unitConfig := guest.providerBlock() + `
+resource "pveguest_systemd_unit" "test" {
+  node    = local.node
+  vmid    = local.vmid
+  kind    = local.kind
+  name    = "--now"
+  enabled = true
+  active  = true
+}
+`
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:      packageConfig,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`must\s+be\s+a\s+Debian\s+package\s+name`),
+			},
+			{
+				Config:      unitConfig,
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`must\s+be\s+a\s+unit\s+name\s+with\s+a\s+suffix`),
 			},
 		},
 	})
@@ -451,12 +487,11 @@ resource "pveguest_systemd_unit" "timer" {
 				),
 			},
 			{
-				// An apply without changes does not restart the unit.
 				PreConfig: func() { activeSinceBeforeEdit = activeSince() },
 				Config:    config,
 				Check: checkGuest(func() error {
 					if activeSince() != activeSinceBeforeEdit {
-						return fmt.Errorf("the timer was restarted by an apply without changes")
+						return fmt.Errorf("a second apply of the same configuration restarted the timer")
 					}
 					return nil
 				}),

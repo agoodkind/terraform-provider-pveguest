@@ -1,4 +1,4 @@
-package acceptance
+package acceptance_test
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 
 const (
 	// A comma-separated list of running containers on the acceptance node.
-	// The test runs only `cat /etc/hostname` in them.
+	// The test runs `cat /etc/hostname` in each one.
 	parallelVMIDsVariable = "PVEGUEST_ACC_PARALLEL_VMIDS"
 	parallelRounds        = 20
 )

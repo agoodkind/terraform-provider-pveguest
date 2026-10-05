@@ -17,18 +17,36 @@ import (
 	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
 )
 
-const (
-	systemctlTimeoutSeconds = 300
-
-	// systemd 253 and later print this state for a unit without a unit
-	// file. Earlier versions print only an error message.
-	unitNotFoundState = "not-found"
-)
+const systemctlTimeoutSeconds = 300
 
 var (
 	unitNamePattern = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+\.[a-z]+$`)
 
 	missingUnitMessages = []string{missingFileMessage, "does not exist", "not found"}
+)
+
+type unitFileState string
+
+const (
+	unitFileEnabled        unitFileState = "enabled"
+	unitFileEnabledRuntime unitFileState = "enabled-runtime"
+	unitFileStatic         unitFileState = "static"
+	unitFileAlias          unitFileState = "alias"
+	unitFileIndirect       unitFileState = "indirect"
+	unitFileGenerated      unitFileState = "generated"
+	unitFileTransient      unitFileState = "transient"
+
+	// systemd 253 and later print this state when the unit file does not
+	// exist. Earlier versions print an error message.
+	unitFileNotFound unitFileState = "not-found"
+)
+
+type unitActiveState string
+
+const (
+	unitActive     unitActiveState = "active"
+	unitActivating unitActiveState = "activating"
+	unitReloading  unitActiveState = "reloading"
 )
 
 // enablement classifies the output of systemctl is-enabled.
@@ -37,16 +55,15 @@ type enablement int
 const (
 	enablementDisabled enablement = iota
 	enablementEnabled
-	// A fixed unit has no install information or is created at runtime.
-	// systemctl enable and disable do not change it, and every declared
-	// value of enabled is satisfied.
+	// systemd reports a fixed unit as static, alias, indirect, generated, or
+	// transient. A fixed unit satisfies both values of enabled.
 	enablementFixed
 )
 
 type unitStatus struct {
-	Found        bool
-	EnabledState string
-	ActiveState  string
+	Found     bool
+	FileState unitFileState
+	Active    unitActiveState
 }
 
 type systemdUnitResource struct {
@@ -74,7 +91,7 @@ func (r *systemdUnitResource) Metadata(_ context.Context, req resource.MetadataR
 func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "The enabled state and the active state of a systemd unit inside a guest. " +
-			"The unit file must exist. Destroy changes nothing in the guest.",
+			"The unit file must exist. Destroy removes the resource from state.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required:    true,
@@ -112,8 +129,8 @@ func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// The files behind a new restart_on map may have changed before this
-	// resource existed, and an active unit has not read them yet.
+	// A new restart_on map can reference files created before resource adoption.
+	// The first restart applies those file dependencies to an active unit.
 	restart := len(plan.RestartOn.Elements()) > 0
 	if err := r.apply(ctx, plan, restart); err != nil {
 		resp.Diagnostics.AddError("Create systemd unit state", err.Error())
@@ -140,15 +157,16 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	switch classifyEnabledState(status.EnabledState) {
+	switch classifyEnabledState(status.FileState) {
 	case enablementEnabled:
 		state.Enabled = types.BoolValue(true)
 	case enablementDisabled:
 		state.Enabled = types.BoolValue(false)
 	case enablementFixed:
-		// The value from the last apply stays in state.
+		// A fixed unit satisfies the declared value, so Read writes the
+		// enabled value to state only for enabled and disabled units.
 	}
-	state.Active = types.BoolValue(isActiveState(status.ActiveState))
+	state.Active = types.BoolValue(isActiveState(status.Active))
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -168,8 +186,7 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Delete runs no command in the guest. The framework removes the resource
-// from state, and the unit stays in its current state.
+// The framework removes the resource from state after Delete returns.
 func (r *systemdUnitResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
 }
 
@@ -179,7 +196,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 
 	// A unit file written earlier in the same apply is unknown to the
 	// manager until this reload.
-	if _, err := runChecked(ctx, r.data.pool, guest, systemctlCommand("daemon-reload")); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, systemctlCommand("daemon-reload")); err != nil {
 		return err
 	}
 	status, err := readUnitStatus(ctx, r.data.pool, guest, name)
@@ -187,23 +204,23 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 		return err
 	}
 	if !status.Found {
-		return fmt.Errorf("%s: unit %s has no unit file", guest, name)
+		return fmt.Errorf("%s: the unit file of %s does not exist", guest, name)
 	}
 
-	current := classifyEnabledState(status.EnabledState)
+	current := classifyEnabledState(status.FileState)
 	wantEnabled := plan.Enabled.ValueBool()
 	if current == enablementDisabled && wantEnabled {
-		if _, err := runChecked(ctx, r.data.pool, guest, systemctlCommand("enable", "--", name)); err != nil {
+		if err := runChecked(ctx, r.data.pool, guest, systemctlCommand("enable", "--", name)); err != nil {
 			return err
 		}
 	}
 	if current == enablementEnabled && !wantEnabled {
-		if _, err := runChecked(ctx, r.data.pool, guest, systemctlCommand("disable", "--", name)); err != nil {
+		if err := runChecked(ctx, r.data.pool, guest, systemctlCommand("disable", "--", name)); err != nil {
 			return err
 		}
 	}
 
-	isActive := isActiveState(status.ActiveState)
+	isActive := isActiveState(status.Active)
 	wantActive := plan.Active.ValueBool()
 	var action string
 	switch {
@@ -216,8 +233,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	default:
 		return nil
 	}
-	_, err = runChecked(ctx, r.data.pool, guest, systemctlCommand(action, "--", name))
-	return err
+	return runChecked(ctx, r.data.pool, guest, systemctlCommand(action, "--", name))
 }
 
 func systemctlCommand(arguments ...string) transport.Command {
@@ -228,15 +244,15 @@ func systemctlCommand(arguments ...string) transport.Command {
 
 func readUnitStatus(ctx context.Context, pool *transport.Pool, guest transport.Guest, name string) (unitStatus, error) {
 	enabledCommand := systemctlCommand("is-enabled", "--", name)
-	enabledResult, err := pool.Run(ctx, guest, enabledCommand)
+	enabledResult, err := runGuest(ctx, pool, guest, enabledCommand)
 	if err != nil {
 		return unitStatus{}, err
 	}
-	enabledState := firstLine(enabledResult.Stdout)
-	if enabledState == unitNotFoundState {
+	fileState := unitFileState(firstLine(enabledResult.Stdout))
+	if fileState == unitFileNotFound {
 		return unitStatus{}, nil
 	}
-	if enabledState == "" {
+	if fileState == "" {
 		if reportsMissingUnit(string(enabledResult.Stderr)) {
 			return unitStatus{}, nil
 		}
@@ -246,15 +262,15 @@ func readUnitStatus(ctx context.Context, pool *transport.Pool, guest transport.G
 	// is-active exits nonzero for every state except active, and prints
 	// the state in each case.
 	activeCommand := systemctlCommand("is-active", "--", name)
-	activeResult, err := pool.Run(ctx, guest, activeCommand)
+	activeResult, err := runGuest(ctx, pool, guest, activeCommand)
 	if err != nil {
 		return unitStatus{}, err
 	}
-	activeState := firstLine(activeResult.Stdout)
+	activeState := unitActiveState(firstLine(activeResult.Stdout))
 	if activeState == "" {
 		return unitStatus{}, commandFailure(guest, activeCommand, activeResult)
 	}
-	return unitStatus{Found: true, EnabledState: enabledState, ActiveState: activeState}, nil
+	return unitStatus{Found: true, FileState: fileState, Active: activeState}, nil
 }
 
 func reportsMissingUnit(stderr string) bool {
@@ -266,20 +282,22 @@ func reportsMissingUnit(stderr string) bool {
 	return false
 }
 
-func classifyEnabledState(state string) enablement {
+func classifyEnabledState(state unitFileState) enablement {
 	switch state {
-	case "enabled", "enabled-runtime":
+	case unitFileEnabled, unitFileEnabledRuntime:
 		return enablementEnabled
-	case "static", "alias", "indirect", "generated", "transient":
+	case unitFileStatic, unitFileAlias, unitFileIndirect, unitFileGenerated, unitFileTransient:
 		return enablementFixed
+	case unitFileNotFound:
+		return enablementDisabled
 	default:
 		return enablementDisabled
 	}
 }
 
-func isActiveState(state string) bool {
+func isActiveState(state unitActiveState) bool {
 	switch state {
-	case "active", "activating", "reloading":
+	case unitActive, unitActivating, unitReloading:
 		return true
 	default:
 		return false

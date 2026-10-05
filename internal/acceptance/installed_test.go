@@ -1,4 +1,4 @@
-package acceptance
+package acceptance_test
 
 import (
 	"archive/zip"
@@ -23,15 +23,11 @@ const (
 	secretVariable       = "TF_VAR_secret"
 )
 
-// tofuWorkspace runs the tofu binary in one directory. The provider comes
-// from the implied local mirror that make install fills, not from the test
-// process.
 type tofuWorkspace struct {
 	t         *testing.T
 	directory string
 	binary    string
-	// variableValue is the value of the ephemeral input variable. OpenTofu stores
-	// no ephemeral value, and each command receives it again.
+	// Each OpenTofu command requires the ephemeral input again.
 	variableValue string
 }
 
@@ -107,8 +103,7 @@ func (w *tofuWorkspace) requirePlanArchiveOmits(fileName string, secret string) 
 }
 
 // TestAccInstalledProviderWriteOnly runs the tofu binary against the
-// installed provider and reads the raw state file and the saved plan file,
-// which the plugin test harness does not expose.
+// installed provider and reads the raw state file and the saved plan file.
 func TestAccInstalledProviderWriteOnly(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
@@ -176,7 +171,7 @@ resource "pveguest_file" "secret" {
 	}
 	workspace.requireOmits(stateFileName, firstMarker)
 
-	// AC1 through the installed binary: exit status 0 means no changes.
+	// With detailed exit codes, OpenTofu returns status 0 for an unchanged plan.
 	output, exitCode := workspace.run("plan", "-no-color", "-detailed-exitcode")
 	if exitCode != 0 {
 		t.Fatalf("plan after apply exited with status %d:\n%s", exitCode, output)

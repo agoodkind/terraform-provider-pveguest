@@ -44,13 +44,13 @@ func (r *linkResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 				Description: "Absolute path of the link. The parent directory must exist.",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path without a trailing slash"),
+					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path that ends in a file name"),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"target": schema.StringAttribute{
 				Required:    true,
-				Description: "Path that the link stores. The target does not need to exist.",
+				Description: "Specify the symbolic link's target path. The target does not need to exist.",
 				Validators:  []validator.String{stringvalidator.LengthAtLeast(1)},
 			},
 		}),
@@ -83,7 +83,7 @@ func (r *linkResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
 	command := guestCommand("readlink", "-v", "--", state.Path.ValueString())
-	result, err := r.data.pool.Run(ctx, guest, command)
+	result, err := runGuest(ctx, r.data.pool, guest, command)
 	if err != nil {
 		resp.Diagnostics.AddError("Read link", err.Error())
 		return
@@ -124,7 +124,7 @@ func (r *linkResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	_, err := runChecked(ctx, r.data.pool, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
+	err := runChecked(ctx, r.data.pool, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
 	if err != nil {
 		resp.Diagnostics.AddError("Delete link", err.Error())
 	}
@@ -135,6 +135,5 @@ func (r *linkResource) writeLink(ctx context.Context, plan linkModel) error {
 	// -T makes ln replace a link to a directory instead of creating the new
 	// link inside that directory.
 	command := guestCommand("ln", "-sfT", "--", plan.Target.ValueString(), plan.Path.ValueString())
-	_, err := runChecked(ctx, r.data.pool, guest, command)
-	return err
+	return runChecked(ctx, r.data.pool, guest, command)
 }

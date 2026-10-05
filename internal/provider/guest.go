@@ -3,6 +3,8 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"maps"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -20,9 +22,8 @@ import (
 
 const maximumErrorOutputBytes = 4000
 
-// guestAttributes returns the three arguments that identify the guest on
-// every resource. Each argument forces replacement: a new value selects
-// another guest.
+// A changed node, vmid, or kind selects another guest. Each of the three
+// attributes forces replacement of the resource.
 func guestAttributes() map[string]schema.Attribute {
 	return map[string]schema.Attribute{
 		"node": schema.StringAttribute{
@@ -48,9 +49,7 @@ func guestAttributes() map[string]schema.Attribute {
 }
 
 func withGuestAttributes(attributes map[string]schema.Attribute) map[string]schema.Attribute {
-	for name, attribute := range guestAttributes() {
-		attributes[name] = attribute
-	}
+	maps.Copy(attributes, guestAttributes())
 	return attributes
 }
 
@@ -77,14 +76,14 @@ func providerDataFrom(req resource.ConfigureRequest, resp *resource.ConfigureRes
 	return data
 }
 
-// guestCommand prefixes the C locale, because the provider parses command
-// output and error text.
+// The provider sets LC_ALL=C for command-output and error parsing.
 func guestCommand(argv ...string) transport.Command {
 	return transport.Command{Argv: append([]string{"env", "LC_ALL=C"}, argv...)}
 }
 
-// runChecked runs the command and returns an error when it exits nonzero.
-func runChecked(
+// runGuest runs the command in the guest. A nonzero exit status of the command
+// is part of the result, and the caller decides whether it is a failure.
+func runGuest(
 	ctx context.Context,
 	pool *transport.Pool,
 	guest transport.Guest,
@@ -92,12 +91,29 @@ func runChecked(
 ) (transport.Result, error) {
 	result, err := pool.Run(ctx, guest, command)
 	if err != nil {
-		return result, err
-	}
-	if result.ExitCode != 0 {
-		return result, commandFailure(guest, command, result)
+		slog.ErrorContext(
+			ctx, "guest command failed",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+		)
+		return transport.Result{}, fmt.Errorf("run guest command: %w", err)
 	}
 	return result, nil
+}
+
+func runChecked(
+	ctx context.Context,
+	pool *transport.Pool,
+	guest transport.Guest,
+	command transport.Command,
+) error {
+	result, err := runGuest(ctx, pool, guest, command)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return commandFailure(guest, command, result)
+	}
+	return nil
 }
 
 func commandFailure(guest transport.Guest, command transport.Command, result transport.Result) error {

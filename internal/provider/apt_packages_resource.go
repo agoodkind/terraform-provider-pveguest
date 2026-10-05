@@ -1,3 +1,5 @@
+// Package provider implements the pveguest OpenTofu provider and its resources
+// for files, links, apt packages, and systemd units inside Proxmox guests.
 package provider
 
 import (
@@ -31,8 +33,9 @@ const (
 	dpkgNoMatchMessage = "no packages found matching"
 )
 
-// The Debian policy pattern for package names. It also rejects a name that
-// starts with a dash, which apt-get would read as an option.
+// The pattern is the Debian policy pattern for package names. The pattern
+// also rejects a name that starts with a dash. apt-get reads such a name as
+// an option.
 var packageNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+$`)
 
 type aptPackagesResource struct {
@@ -57,12 +60,12 @@ func (r *aptPackagesResource) Metadata(_ context.Context, req resource.MetadataR
 func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "A set of apt packages that are installed inside a guest. " +
-			"The resource installs missing packages and removes none.",
+			"The resource installs each missing package.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"packages": schema.SetAttribute{
 				Required:    true,
 				ElementType: types.StringType,
-				Description: "Package names without a version or an architecture.",
+				Description: "Specify Debian package names without version or architecture suffixes.",
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
 					setvalidator.ValueStringsAre(
@@ -138,8 +141,7 @@ func (r *aptPackagesResource) Update(ctx context.Context, req resource.UpdateReq
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Delete runs no command in the guest. The framework removes the resource
-// from state, and the packages stay installed.
+// The framework removes the resource from state after Delete returns.
 func (r *aptPackagesResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
 }
 
@@ -169,13 +171,13 @@ func (r *aptPackagesResource) install(ctx context.Context, plan aptPackagesModel
 	// Error-Mode=any makes apt-get update exit nonzero when an index
 	// download fails. The default mode prints a warning and exits zero.
 	updateCommand := aptCommand("update", "-o", "APT::Update::Error-Mode=any")
-	if _, err := runChecked(ctx, r.data.pool, guest, updateCommand); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, updateCommand); err != nil {
 		diagnostics.AddError("apt-get update failed", err.Error())
 		return diagnostics
 	}
 
 	installArguments := append([]string{"install", "-y", "--no-install-recommends", "--"}, missing...)
-	if _, err := runChecked(ctx, r.data.pool, guest, aptCommand(installArguments...)); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, aptCommand(installArguments...)); err != nil {
 		diagnostics.AddError("apt-get install failed", err.Error())
 		return diagnostics
 	}
@@ -221,12 +223,12 @@ func readInstalledPackages(
 	}
 	arguments := append([]string{"dpkg-query", "--show", "--showformat", dpkgQueryFormat, "--"}, names...)
 	command := guestCommand(arguments...)
-	result, err := pool.Run(ctx, guest, command)
+	result, err := runGuest(ctx, pool, guest, command)
 	if err != nil {
 		return nil, err
 	}
-	// dpkg-query exits 1 when at least one name matches no package and
-	// still prints every package that it found.
+	// dpkg-query returns status 1 when a requested package is not installed.
+	// Its output still includes the installed packages.
 	noMatch := result.ExitCode == 1 && strings.Contains(string(result.Stderr), dpkgNoMatchMessage)
 	if result.ExitCode != 0 && !noMatch {
 		return nil, commandFailure(guest, command, result)
@@ -236,7 +238,7 @@ func readInstalledPackages(
 
 func parseDpkgQueryOutput(output string) map[string]bool {
 	installed := make(map[string]bool)
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		name, status, hasStatus := strings.Cut(line, "\t")
 		if !hasStatus {
 			continue

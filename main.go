@@ -1,9 +1,12 @@
+// Command terraform-provider-pveguest serves the pveguest OpenTofu provider
+// over the plugin protocol.
 package main
 
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
+	"os"
 
 	"github.com/hashicorp/terraform-plugin-framework/providerserver"
 
@@ -12,7 +15,7 @@ import (
 
 const providerAddress = "tofu.home.arpa/agoodkind/pveguest"
 
-// The Makefile overrides this value at link time.
+// The install-mirror target sets this value at link time.
 var version = "dev"
 
 func main() {
@@ -24,7 +27,9 @@ func main() {
 		Address: providerAddress,
 		Debug:   debug,
 	}
+	slog.Info("provider server starting", "address", providerAddress, "version", version, "debug", debug)
 	if err := providerserver.Serve(context.Background(), provider.New(version), options); err != nil {
-		log.Fatal(err)
+		slog.Error("provider server stopped", "address", providerAddress, "err", err)
+		os.Exit(1)
 	}
 }

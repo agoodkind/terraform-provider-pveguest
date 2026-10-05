@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path"
 	"regexp"
 	"strings"
@@ -95,7 +96,7 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 				Description: "Absolute path of the file. An apply creates missing parent directories with mode 0755 and owner root:root.",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path without a trailing slash"),
+					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path that ends in a file name"),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
@@ -110,7 +111,7 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Optional:    true,
 				Sensitive:   true,
 				WriteOnly:   true,
-				Description: "File content that is stored in neither the plan nor the state. Requires content_wo_version.",
+				Description: "Specify file content that OpenTofu does not store in plans or state. Also set content_wo_version.",
 				Validators: []validator.String{
 					stringvalidator.AlsoRequires(fwpath.MatchRoot("content_wo_version")),
 				},
@@ -199,7 +200,7 @@ func (r *fileResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRe
 			plannedHash = types.StringValue(hashHex([]byte(plan.Content.ValueString())))
 		}
 	} else if hasState {
-		// Write-only content is absent from the plan. The hash is unknown
+		// OpenTofu omits write-only content from the plan. The hash is unknown
 		// until apply whenever the file must be written.
 		appliedHash, diagnostics := req.Private.GetKey(ctx, appliedHashEntry)
 		resp.Diagnostics.Append(diagnostics...)
@@ -222,8 +223,7 @@ func (r *fileResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRe
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("write_id"), plannedWriteID)...)
 }
 
-// guestWritePlanned reports whether the apply changes the file in the
-// guest. A changed validate command alone writes nothing.
+// Updating validate alone does not rewrite the file.
 func guestWritePlanned(plan fileModel, state fileModel) bool {
 	sameContent := !plan.SHA256.IsUnknown() && plan.SHA256.Equal(state.SHA256)
 	sameAttributes := plan.Mode.Equal(state.Mode) && plan.Owner.Equal(state.Owner) && plan.Group.Equal(state.Group)
@@ -255,7 +255,12 @@ func (r *fileResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 	plan.WriteID = types.StringValue(writeID)
-	resp.Diagnostics.Append(resp.Private.SetKey(ctx, appliedHashEntry, encodeAppliedHash(plan.SHA256.ValueString()))...)
+	appliedHash, err := encodeAppliedHash(plan.SHA256.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Store applied hash", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, appliedHashEntry, appliedHash)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -324,7 +329,12 @@ func (r *fileResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		}
 		plan.WriteID = types.StringValue(writeID)
 	}
-	resp.Diagnostics.Append(resp.Private.SetKey(ctx, appliedHashEntry, encodeAppliedHash(plan.SHA256.ValueString()))...)
+	appliedHash, err := encodeAppliedHash(plan.SHA256.ValueString())
+	if err != nil {
+		resp.Diagnostics.AddError("Store applied hash", err.Error())
+		return
+	}
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, appliedHashEntry, appliedHash)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -335,14 +345,13 @@ func (r *fileResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	_, err := runChecked(ctx, r.data.pool, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
+	err := runChecked(ctx, r.data.pool, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
 	if err != nil {
 		resp.Diagnostics.AddError("Delete file", err.Error())
 	}
 }
 
-// fileContent returns the bytes to write. Write-only content exists only in
-// the configuration, never in the plan.
+// The provider reads write-only content from configuration during apply.
 func fileContent(ctx context.Context, plan fileModel, config tfsdk.Config) ([]byte, diag.Diagnostics) {
 	if !plan.Content.IsNull() {
 		return []byte(plan.Content.ValueString()), nil
@@ -353,7 +362,7 @@ func fileContent(ctx context.Context, plan fileModel, config tfsdk.Config) ([]by
 		return nil, diagnostics
 	}
 	if writeOnlyContent.IsNull() || writeOnlyContent.IsUnknown() {
-		diagnostics.AddError("Missing file content", "Neither content nor content_wo has a value during apply.")
+		diagnostics.AddError("Missing file content", "The apply needs a value for content or content_wo.")
 		return nil, diagnostics
 	}
 	return []byte(writeOnlyContent.ValueString()), diagnostics
@@ -370,9 +379,9 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 
 	// mkdir -m sets the mode of the last directory only. The umask gives
 	// every new directory in the path mode 0755. The command runs as root,
-	// and mkdir -p changes no existing directory.
+	// and mkdir -p applies the umask only to the directories that it creates.
 	directoryCommand := guestCommand("sh", "-c", `umask 022 && mkdir -p -- "$1"`, "sh", path.Dir(destination))
-	if _, err := runChecked(ctx, r.data.pool, guest, directoryCommand); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, directoryCommand); err != nil {
 		return err
 	}
 
@@ -380,7 +389,7 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	// chmod sets the declared mode.
 	writeCommand := guestCommand("sh", "-c", `umask 077 && cat > "$1"`, "sh", temporaryPath)
 	writeCommand.Stdin = content
-	if _, err := runChecked(ctx, r.data.pool, guest, writeCommand); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, writeCommand); err != nil {
 		r.removeTemporaryFile(ctx, guest, temporaryPath)
 		return err
 	}
@@ -390,7 +399,7 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	}
 	if !plan.Validate.IsNull() {
 		validateScript := validateCommandLine(plan.Validate.ValueString(), temporaryPath)
-		result, err := r.data.pool.Run(ctx, guest, guestCommand("sh", "-c", validateScript))
+		result, err := runGuest(ctx, r.data.pool, guest, guestCommand("sh", "-c", validateScript))
 		if err != nil {
 			r.removeTemporaryFile(ctx, guest, temporaryPath)
 			return err
@@ -398,7 +407,7 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 		if result.ExitCode != 0 {
 			r.removeTemporaryFile(ctx, guest, temporaryPath)
 			return fmt.Errorf(
-				"%s: validate command for %s exited with status %d and the file was not replaced. Output: %q",
+				"%s: validate command for %s exited with status %d. Output: %q",
 				guest, destination, result.ExitCode, combinedOutput(result),
 			)
 		}
@@ -406,7 +415,7 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	// -T makes mv fail on a directory at the destination instead of moving
 	// the temporary file into it.
 	moveCommand := guestCommand("mv", "-fT", "--", temporaryPath, destination)
-	if _, err := runChecked(ctx, r.data.pool, guest, moveCommand); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, moveCommand); err != nil {
 		r.removeTemporaryFile(ctx, guest, temporaryPath)
 		return err
 	}
@@ -415,12 +424,11 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 
 func (r *fileResource) setAttributes(ctx context.Context, guest transport.Guest, plan fileModel, targetPath string) error {
 	modeCommand := guestCommand("chmod", plan.Mode.ValueString(), "--", targetPath)
-	if _, err := runChecked(ctx, r.data.pool, guest, modeCommand); err != nil {
+	if err := runChecked(ctx, r.data.pool, guest, modeCommand); err != nil {
 		return err
 	}
 	ownership := plan.Owner.ValueString() + ":" + plan.Group.ValueString()
-	_, err := runChecked(ctx, r.data.pool, guest, guestCommand("chown", ownership, "--", targetPath))
-	return err
+	return runChecked(ctx, r.data.pool, guest, guestCommand("chown", ownership, "--", targetPath))
 }
 
 // removeTemporaryFile runs after another step failed. The caller reports
@@ -436,7 +444,7 @@ func readFileStatus(
 	filePath string,
 ) (fileStatus, bool, error) {
 	statCommand := guestCommand("stat", "-L", "-c", "%a %U %G", "--", filePath)
-	statResult, err := pool.Run(ctx, guest, statCommand)
+	statResult, err := runGuest(ctx, pool, guest, statCommand)
 	if err != nil {
 		return fileStatus{}, false, err
 	}
@@ -448,11 +456,15 @@ func readFileStatus(
 	}
 	status, err := parseStatOutput(firstLine(statResult.Stdout))
 	if err != nil {
-		return fileStatus{}, false, fmt.Errorf("%s: %w", guest, err)
+		slog.ErrorContext(
+			ctx, "stat output of a guest file is malformed",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+		)
+		return fileStatus{}, false, fmt.Errorf("%s: parse stat output: %w", guest, err)
 	}
 
 	hashCommand := guestCommand("sha256sum", "--", filePath)
-	hashResult, err := pool.Run(ctx, guest, hashCommand)
+	hashResult, err := runGuest(ctx, pool, guest, hashCommand)
 	if err != nil {
 		return fileStatus{}, false, err
 	}
@@ -465,7 +477,11 @@ func readFileStatus(
 	}
 	status.SHA256, err = parseSHA256SumOutput(firstLine(hashResult.Stdout))
 	if err != nil {
-		return fileStatus{}, false, fmt.Errorf("%s: %w", guest, err)
+		slog.ErrorContext(
+			ctx, "sha256sum output of a guest file is malformed",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+		)
+		return fileStatus{}, false, fmt.Errorf("%s: parse sha256sum output: %w", guest, err)
 	}
 	return status, true, nil
 }
@@ -499,6 +515,7 @@ func parseSHA256SumOutput(line string) (string, error) {
 func temporaryPathFor(destination string) (string, error) {
 	suffix := make([]byte, temporarySuffixBytes)
 	if _, err := rand.Read(suffix); err != nil {
+		slog.Error("generate temporary file name failed", "err", err)
 		return "", fmt.Errorf("generate temporary file name: %w", err)
 	}
 	name := "." + path.Base(destination) + ".pveguest-" + hex.EncodeToString(suffix)
@@ -510,15 +527,17 @@ type appliedHashDocument struct {
 	SHA256 string `json:"sha256"`
 }
 
-func encodeAppliedHash(hash string) []byte {
-	// Marshal cannot fail for a struct with one string field.
-	document, _ := json.Marshal(appliedHashDocument{SHA256: hash})
-	return document
+func encodeAppliedHash(hash string) ([]byte, error) {
+	document, err := json.Marshal(appliedHashDocument{SHA256: hash})
+	if err != nil {
+		slog.Error("encode applied hash failed", "err", err)
+		return nil, fmt.Errorf("encode applied hash: %w", err)
+	}
+	return document, nil
 }
 
 // decodeAppliedHash returns an empty string for a missing or unreadable
-// document. No file hash equals the empty string, and the plan then writes
-// the file.
+// document. The plan then writes the file.
 func decodeAppliedHash(document []byte) string {
 	var decoded appliedHashDocument
 	if err := json.Unmarshal(document, &decoded); err != nil {
@@ -530,6 +549,7 @@ func decodeAppliedHash(document []byte) string {
 func newWriteID() (string, error) {
 	identifier := make([]byte, writeIDBytes)
 	if _, err := rand.Read(identifier); err != nil {
+		slog.Error("generate write_id failed", "err", err)
 		return "", fmt.Errorf("generate write_id: %w", err)
 	}
 	return hex.EncodeToString(identifier), nil
