@@ -68,10 +68,11 @@ func (guest Guest) String() string {
 	return fmt.Sprintf("guest node=%q vmid=%d kind=%s", guest.Node, guest.VMID, guest.Kind)
 }
 
-// apiPath returns the API path of an operation on the guest. The QEMU guest
-// agent operations live under agent.
-func (guest Guest) apiPath(operation string) string {
-	node := url.PathEscape(guest.Node)
+// apiPath returns the API path of an operation on the guest. The path uses the
+// Proxmox node name, which can differ from the node key of the guest. The QEMU
+// guest agent operations live under agent.
+func (guest Guest) apiPath(nodeName string, operation string) string {
+	node := url.PathEscape(nodeName)
 	vmid := strconv.FormatInt(guest.VMID, 10)
 	if guest.Kind == KindQEMU {
 		return "/api2/json/nodes/" + node + "/qemu/" + vmid + "/agent/" + operation

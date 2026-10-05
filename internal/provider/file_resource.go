@@ -449,12 +449,24 @@ func (r *fileResource) writeContent(
 }
 
 func (r *fileResource) setAttributes(ctx context.Context, guest transport.Guest, plan fileModel, targetPath string) error {
-	modeCommand := guestCommand("chmod", plan.Mode.ValueString(), "--", targetPath)
-	if err := runChecked(ctx, r.data.client, guest, modeCommand); err != nil {
+	return setGuestAttributes(ctx, r.data.client, guest, plan.Mode, plan.Owner, plan.Group, targetPath)
+}
+
+func setGuestAttributes(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	mode types.String,
+	owner types.String,
+	group types.String,
+	targetPath string,
+) error {
+	modeCommand := guestCommand("chmod", mode.ValueString(), "--", targetPath)
+	if err := runChecked(ctx, client, guest, modeCommand); err != nil {
 		return err
 	}
-	ownership := plan.Owner.ValueString() + ":" + plan.Group.ValueString()
-	return runChecked(ctx, r.data.client, guest, guestCommand("chown", ownership, "--", targetPath))
+	ownership := owner.ValueString() + ":" + group.ValueString()
+	return runChecked(ctx, client, guest, guestCommand("chown", ownership, "--", targetPath))
 }
 
 // removeTemporaryFile runs after another step failed. The caller reports
@@ -489,27 +501,41 @@ func readFileStatus(
 		return fileStatus{}, false, fmt.Errorf("%s: parse stat output: %w", guest, err)
 	}
 
+	// The file can disappear between stat and sha256sum.
+	hash, found, err := readGuestSHA256(ctx, client, guest, filePath)
+	if err != nil || !found {
+		return fileStatus{}, false, err
+	}
+	status.SHA256 = hash
+	return status, true, nil
+}
+
+func readGuestSHA256(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	filePath string,
+) (string, bool, error) {
 	hashCommand := guestCommand("sha256sum", "--", filePath)
 	hashResult, err := runGuest(ctx, client, guest, hashCommand)
 	if err != nil {
-		return fileStatus{}, false, err
+		return "", false, err
 	}
 	if hashResult.ExitCode != 0 {
-		// The file can disappear between stat and sha256sum.
 		if strings.Contains(string(hashResult.Stderr), missingFileMessage) {
-			return fileStatus{}, false, nil
+			return "", false, nil
 		}
-		return fileStatus{}, false, commandFailure(guest, hashCommand, hashResult)
+		return "", false, commandFailure(guest, hashCommand, hashResult)
 	}
-	status.SHA256, err = parseSHA256SumOutput(firstLine(hashResult.Stdout))
+	hash, err := parseSHA256SumOutput(firstLine(hashResult.Stdout))
 	if err != nil {
 		slog.ErrorContext(
 			ctx, "sha256sum output of a guest file is malformed",
 			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
 		)
-		return fileStatus{}, false, fmt.Errorf("%s: parse sha256sum output: %w", guest, err)
+		return "", false, fmt.Errorf("%s: parse sha256sum output: %w", guest, err)
 	}
-	return status, true, nil
+	return hash, true, nil
 }
 
 func parseStatOutput(line string) (fileStatus, error) {

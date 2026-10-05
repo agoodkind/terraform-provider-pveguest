@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/provider"
 	"github.com/hashicorp/terraform-plugin-framework/provider/schema"
@@ -29,6 +30,7 @@ type nodeModel struct {
 	Endpoint types.String `tfsdk:"endpoint"`
 	APIToken types.String `tfsdk:"api_token"`
 	Insecure types.Bool   `tfsdk:"insecure"`
+	NodeName types.String `tfsdk:"node_name"`
 }
 
 type providerData struct {
@@ -76,8 +78,8 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 		Attributes: map[string]schema.Attribute{
 			"nodes": schema.MapNestedAttribute{
 				Required: true,
-				Description: "Hypervisors by Proxmox node name. A resource selects one with its node argument. " +
-					"The map key is the node name in the API path.",
+				Description: "Hypervisors by name. A resource selects one with its node argument. " +
+					"The map key is the node name in the API path unless the entry sets node_name.",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
 						"endpoint": schema.StringAttribute{
@@ -88,6 +90,13 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 							Required:    true,
 							Sensitive:   true,
 							Description: "API token in the form user@realm!tokenid=secret.",
+						},
+						"node_name": schema.StringAttribute{
+							Optional:    true,
+							Description: "Proxmox node name in the API path. The default is the map key.",
+							Validators: []validator.String{
+								stringvalidator.LengthAtLeast(1),
+							},
 						},
 						"insecure": schema.BoolAttribute{
 							Optional:    true,
@@ -127,10 +136,11 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 
 	nodes := make(map[string]transport.NodeConfig, len(nodeModels))
 	for name, model := range nodeModels {
-		if model.Endpoint.IsUnknown() || model.APIToken.IsUnknown() || model.Insecure.IsUnknown() {
+		if model.Endpoint.IsUnknown() || model.APIToken.IsUnknown() || model.Insecure.IsUnknown() ||
+			model.NodeName.IsUnknown() {
 			resp.Diagnostics.AddError(
 				"Unknown provider configuration",
-				fmt.Sprintf("The endpoint, api_token, and insecure arguments of node %q must be known when the provider is configured.", name),
+				fmt.Sprintf("The endpoint, api_token, insecure, and node_name arguments of node %q must be known when the provider is configured.", name),
 			)
 			return
 		}
@@ -138,6 +148,7 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 			Endpoint: model.Endpoint.ValueString(),
 			APIToken: model.APIToken.ValueString(),
 			Insecure: model.Insecure.ValueBool(),
+			NodeName: model.NodeName.ValueString(),
 		}
 	}
 
@@ -160,6 +171,7 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		newFileResource,
+		newDownloadResource,
 		newLinkResource,
 		newAptPackagesResource,
 		newSystemdUnitResource,

@@ -43,11 +43,13 @@ var tokenPattern = regexp.MustCompile(`^[^@!=\s]+@[^@!=\s]+![^!=\s]+=\S+$`)
 
 // NodeConfig is the API endpoint of one hypervisor. APIToken is the full
 // token string user@realm!tokenid=secret. Insecure skips TLS certificate
-// verification.
+// verification. NodeName is the Proxmox node name in the API path, and an
+// empty value selects the key of the node in the NewClient map.
 type NodeConfig struct {
 	Endpoint string
 	APIToken string
 	Insecure bool
+	NodeName string
 }
 
 // Result is the outcome of a command that ran to its end. ExitCode is the
@@ -66,6 +68,7 @@ type Client struct {
 }
 
 type nodeConnection struct {
+	nodeName      string
 	endpoint      string
 	authorization string
 	httpClient    *http.Client
@@ -127,7 +130,12 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		IdleConnTimeout:     idleConnectionTimeout,
 		MaxIdleConnsPerHost: maxRequests,
 	}
+	nodeName := config.NodeName
+	if nodeName == "" {
+		nodeName = name
+	}
 	return &nodeConnection{
+		nodeName:      nodeName,
 		endpoint:      strings.TrimRight(config.Endpoint, "/"),
 		authorization: authorizationScheme + config.APIToken,
 		httpClient:    &http.Client{Transport: transport, Timeout: requestTimeout},
@@ -144,7 +152,7 @@ func (connection *nodeConnection) call(
 	guest Guest,
 	request apiRequest,
 ) (json.RawMessage, error) {
-	apiPath := guest.apiPath(request.operation)
+	apiPath := guest.apiPath(connection.nodeName, request.operation)
 
 	select {
 	case connection.slots <- struct{}{}:

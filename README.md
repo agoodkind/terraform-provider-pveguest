@@ -1,6 +1,6 @@
 # terraform-provider-pveguest
 
-`pveguest` is an OpenTofu provider that declares files, symbolic links, apt
+`pveguest` is an OpenTofu provider that declares files, downloads, symbolic links, apt
 packages, and systemd units inside Proxmox guests. The provider calls the
 Proxmox VE API with an API token. A container runs each command through its
 `exec` API, and a VM runs each command through the QEMU guest agent API. The
@@ -83,7 +83,8 @@ resource "pveguest_systemd_unit" "ssh" {
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `nodes` | map of object | yes | | Hypervisors by Proxmox node name. The map key is the node name in the API path. |
+| `nodes` | map of object | yes | | Hypervisors by name. A resource selects one with its `node` argument. |
+| `nodes.<name>.node_name` | string | no | the map key | Proxmox node name in the API path. Set it when the Proxmox node name differs from the map key. |
 | `nodes.<name>.endpoint` | string | yes | | URL of the Proxmox VE API, for example `https://10.230.0.254:8006`. |
 | `nodes.<name>.api_token` | string, sensitive | yes | | API token in the form `user@realm!tokenid=secret`. |
 | `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
@@ -128,7 +129,7 @@ resource.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `node` | string | yes | Key in the provider `nodes` map. |
+| `node` | string | yes | Key in the provider `nodes` map. The API path uses the `node_name` of that entry, or the key when `node_name` is unset. |
 | `vmid` | number | yes | Proxmox ID of the guest. |
 | `kind` | string | yes | `lxc` or `qemu`. |
 
@@ -171,6 +172,34 @@ Content larger than the standard input limit of one command takes several
 commands. One command truncates the temporary file, and one command per piece
 appends to it. A piece has at most 96 KiB for a container and 16 KiB for a VM.
 The validate, mode, owner, and rename steps run after the last piece.
+
+## pveguest_download
+
+A regular file that the guest downloads over HTTPS and that must have a given
+SHA-256 hash. Read runs `stat` and `sha256sum`. Read removes a missing file from
+state, and the next plan creates it. A hash that differs from `sha256` produces
+a planned rewrite. Destroy deletes the file.
+
+An apply runs `mkdir -p` for the directory of `path`. The guest then runs
+`curl -fsSL --proto =https` in that directory and writes a temporary file. The
+provider reads `sha256sum` of the temporary file. A mismatch deletes the
+temporary file and fails the apply with an error that states the guest, the URL,
+the expected hash, and the received hash. The file at `path` has its earlier
+content. A match sets mode and owner and renames the temporary file to `path`.
+The download has the exec timeout of 600 seconds.
+
+| Argument | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `url` | string | yes | | HTTPS URL. The guest needs network access to it. |
+| `sha256` | string | yes | | Expected hash as 64 lowercase hexadecimal characters. |
+| `path` | string | yes | | Absolute path. An apply creates each missing parent directory with mode `0755` and owner `root:root`. A change replaces the resource. |
+| `mode` | string | no | `0644` | Four octal digits. |
+| `owner` | string | no | `root` | User name. |
+| `group` | string | no | `root` | Group name. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `write_id` | Random identifier that changes each time an apply writes the file, mode, owner, or group. |
 
 ## pveguest_link
 
@@ -269,6 +298,10 @@ items at the end:
 - The package `hello`. The cleanup purges it.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
+
+`TestAccDownload` and `TestAccDownloadHashMismatch` download
+`https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
+access to `www.rfc-editor.org` over HTTPS.
 
 The last test, `TestAccGuestIsClean`, fails when one of these items is still
 in the guest. `TESTARGS` passes extra arguments to `go test`, for example
