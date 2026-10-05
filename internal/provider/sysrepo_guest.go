@@ -18,9 +18,9 @@ import (
 const (
 	sysrepoTimeoutSeconds = 300
 
-	// The temporary edit file of sysrepocfg lives outside the sysrepo
+	// The temporary import file of sysrepocfg lives outside the sysrepo
 	// repository.
-	sysrepoEditTemplatePath = "/tmp/sysrepo-edit.xml"
+	sysrepoImportTemplatePath = "/tmp/sysrepo-import.xml"
 )
 
 var yangIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
@@ -89,31 +89,32 @@ func difference(left []string, right []string) []string {
 	return missing
 }
 
-// runSysrepocfgEdit writes the edit document to a temporary file in the guest,
-// merges it into the datastore of the module with sysrepocfg, and deletes the
-// temporary file.
-func runSysrepocfgEdit(
+// runSysrepocfgImport writes the document to a temporary file in the guest,
+// replaces the configuration of the module in the datastore with it using
+// sysrepocfg, and deletes the temporary file. An empty document removes the
+// configuration of the module.
+func runSysrepocfgImport(
 	ctx context.Context,
 	client *transport.Client,
 	guest transport.Guest,
 	datastore string,
 	module string,
-	edit string,
+	document string,
 ) error {
-	temporaryPath, err := temporaryPathFor(sysrepoEditTemplatePath)
+	temporaryPath, err := temporaryPathFor(sysrepoImportTemplatePath)
 	if err != nil {
 		return err
 	}
 	removeCommand := guestCommand("rm", "-f", "--", temporaryPath)
-	if err := writeGuestContent(ctx, client, guest, temporaryPath, []byte(edit)); err != nil {
+	if err := writeGuestContent(ctx, client, guest, temporaryPath, []byte(document)); err != nil {
 		// The caller reports the write failure and ignores a failed removal.
 		_, _ = client.Run(ctx, guest, removeCommand)
 		return err
 	}
-	editCommand := sysrepocfgCommand(
-		"--edit="+temporaryPath, "--datastore", datastore, "--module", module, "--format", "xml",
+	importCommand := sysrepocfgCommand(
+		"--import="+temporaryPath, "--datastore", datastore, "--module", module, "--format", "xml",
 	)
-	editErr := runChecked(ctx, client, guest, editCommand)
+	importErr := runChecked(ctx, client, guest, importCommand)
 	_, _ = client.Run(ctx, guest, removeCommand)
-	return editErr
+	return importErr
 }

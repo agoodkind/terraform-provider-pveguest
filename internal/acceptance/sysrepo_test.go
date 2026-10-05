@@ -11,12 +11,11 @@ import (
 
 const (
 	testSysrepoModule   = "pveguest-acc"
-	testSysrepoXPath    = "/pveguest-acc:settings"
 	testSysrepoFirst    = "2026-10-05"
 	testSysrepoSecond   = "2026-10-06"
 	testSysrepoFeature  = "extra"
 	testSysrepoFirstXML = `<settings xmlns="urn:pveguest:acc"><name>alpha</name></settings>`
-	testSysrepoEditXML  = `<settings xmlns="urn:pveguest:acc"><name>edited</name></settings>`
+	testSysrepoEditXML  = `<settings xmlns="urn:pveguest:acc"><note>added by hand</note></settings>`
 )
 
 // The module file for a revision. The second revision adds one leaf.
@@ -33,6 +32,7 @@ func testSysrepoYang(revision string) string {
   feature %s;
   container settings {
     leaf name { type string; }
+    leaf note { type string; }
 %s  }
 }
 `, testSysrepoModule, revision, testSysrepoFeature, extraLeaf)
@@ -70,7 +70,7 @@ func (g *testGuest) sysrepoModuleRow() string {
 func (g *testGuest) sysrepoExport() string {
 	g.t.Helper()
 	return g.mustRun(
-		"sysrepocfg", "--export", "--datastore", "running", "--xpath", testSysrepoXPath, "--format", "xml",
+		"sysrepocfg", "--export", "--datastore", "running", "--module", testSysrepoModule, "--format", "xml",
 	)
 }
 
@@ -99,11 +99,9 @@ resource "pveguest_sysrepo_data" "test" {
   kind      = local.kind
   datastore = "running"
   module    = pveguest_sysrepo_module.test.module
-  xpath     = %q
   content   = %q
 }
-`, testSysrepoModulePath(revision), testSysrepoYang(revision), testSysrepoFeature,
-		testSysrepoXPath, dataContent)
+`, testSysrepoModulePath(revision), testSysrepoYang(revision), testSysrepoFeature, dataContent)
 }
 
 func TestAccSysrepoModuleAndData(t *testing.T) {
@@ -146,7 +144,7 @@ func TestAccSysrepoModuleAndData(t *testing.T) {
 				),
 			},
 			{
-				// A hand edit of the datastore produces a planned merge.
+				// A node that the content omits is a difference. The apply removes it.
 				PreConfig: func() {
 					guest.writeFile(testDirectory+"/edit.xml", testSysrepoEditXML)
 					guest.mustRun(
@@ -158,7 +156,7 @@ func TestAccSysrepoModuleAndData(t *testing.T) {
 				ConfigPlanChecks: expectAction(dataAddress, plancheck.ResourceActionUpdate),
 				Check: checkGuest(func() error {
 					export := guest.sysrepoExport()
-					if !strings.Contains(export, "<name>alpha</name>") {
+					if !strings.Contains(export, "<name>alpha</name>") || strings.Contains(export, "<note>") {
 						return fmt.Errorf("export is %q", export)
 					}
 					return nil

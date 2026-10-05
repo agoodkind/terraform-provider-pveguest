@@ -340,23 +340,23 @@ features differ from the declaration.
 
 ## pveguest_sysrepo_data
 
-A subtree of configuration data in the `startup` or `running` datastore of the
-guest. The guest needs `sysrepocfg` from sysrepo 3, and the module that defines
-the data must be installed. Read removes the resource from state when the
-module is not installed.
+The whole configuration of one YANG module in the `startup` or `running`
+datastore of the guest. The guest needs `sysrepocfg` from sysrepo 3, and the
+module must be installed. Read removes the resource from state when the module
+is not installed.
 
-Create and Update validate `content` as XML and write it to a temporary file in
-the guest. Then they run `sysrepocfg --edit=<temporary file> --datastore
-<datastore> --module <module> --format xml`, which merges the content into the
-datastore, and delete the temporary file. A merge adds and changes nodes and
-removes none. A node in the datastore that `content` omits stays after the
-apply and remains a difference. `content` must define the whole subtree.
+Create and Update validate `content` as XML with at least one element and write
+it to a temporary file in the guest. Then they run `sysrepocfg
+--import=<temporary file> --datastore <datastore> --module <module> --format
+xml` and delete the temporary file. The import replaces the configuration of
+the module in the datastore with `content`. A node that `content` omits is
+removed. `content` must define the whole configuration of the module.
 
-Read runs `sysrepocfg --export --datastore <datastore> --xpath <xpath> --format
-xml --defaults explicit`. When the canonical form of the export differs from
-the canonical form of the content in state, Read stores the export as the
-content, and the plan shows an update. `content` must have the form that the
-export prints for `xpath`, including the ancestors of a selected node.
+Read runs `sysrepocfg --export --datastore <datastore> --module <module>
+--format xml --defaults explicit`. When the canonical form of the export differs
+from the canonical form of the content in state, Read stores the export as the
+content, and the plan shows an update. A node that a hand edit added is such a
+difference. `content` must have the form that the export prints.
 
 The canonical form is the Go `encoding/xml` token stream with these changes:
 
@@ -369,18 +369,15 @@ The canonical form is the Go `encoding/xml` token stream with these changes:
 - Element order, list entry order, and text inside the elements stay as they
   are.
 
-Destroy builds a copy of the content in state with the NETCONF operation
-`remove` on each top-level element and merges it with the same `sysrepocfg
---edit` command. The command removes the whole subtree of each top-level
-element, including nodes that `content` omits. A destroy with empty content in
-state removes nothing.
+Destroy runs the same `sysrepocfg --import` command with an empty file. The
+`sysrepocfg` source accepts an empty import file and calls `sr_replace_config`
+without data, which removes the configuration of the module in the datastore.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `datastore` | string | yes | `startup` or `running`. A change replaces the resource. |
 | `module` | string | yes | Name of the YANG module that defines the content. A change replaces the resource. |
-| `xpath` | string | yes | XPath of the subtree that `content` defines. A change replaces the resource. |
-| `content` | string | yes | XML document with the data of the subtree. |
+| `content` | string | yes | XML document with the whole configuration of the module. |
 
 ## Development
 

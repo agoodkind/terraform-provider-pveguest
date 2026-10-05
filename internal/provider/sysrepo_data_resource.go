@@ -36,7 +36,6 @@ type sysrepoDataModel struct {
 	Kind      types.String `tfsdk:"kind"`
 	Datastore types.String `tfsdk:"datastore"`
 	Module    types.String `tfsdk:"module"`
-	XPath     types.String `tfsdk:"xpath"`
 	Content   types.String `tfsdk:"content"`
 }
 
@@ -50,8 +49,9 @@ func (r *sysrepoDataResource) Metadata(_ context.Context, req resource.MetadataR
 
 func (r *sysrepoDataResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "A subtree of configuration data in a sysrepo datastore of a guest. " +
-			"An apply merges the content into the datastore. Destroy removes the data that the content selects.",
+		Description: "The configuration of one YANG module in a sysrepo datastore of a guest. " +
+			"An apply replaces the configuration of the module with the content. " +
+			"Destroy removes the configuration of the module.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"datastore": schema.StringAttribute{
 				Required:    true,
@@ -69,20 +69,11 @@ func (r *sysrepoDataResource) Schema(_ context.Context, _ resource.SchemaRequest
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
-			"xpath": schema.StringAttribute{
-				Required: true,
-				Description: "XPath of the subtree that the content defines. Read exports this subtree. " +
-					"A change replaces the resource.",
-				Validators: []validator.String{
-					stringvalidator.LengthAtLeast(1),
-				},
-				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
-			},
 			"content": schema.StringAttribute{
 				Required: true,
-				Description: "XML document with the data of the subtree, in the form that sysrepocfg --export " +
-					"prints for xpath. Whitespace between elements, comments, namespace prefixes, and the order " +
-					"of attributes are not differences.",
+				Description: "XML document with the whole configuration of the module, in the form that " +
+					"sysrepocfg --export prints. Whitespace between elements, comments, namespace prefixes, and " +
+					"the order of attributes are not differences.",
 			},
 		}),
 	}
@@ -98,16 +89,16 @@ func (r *sysrepoDataResource) Create(ctx context.Context, req resource.CreateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.merge(ctx, plan); err != nil {
-		resp.Diagnostics.AddError("Merge sysrepo data", err.Error())
+	if err := r.replace(ctx, plan); err != nil {
+		resp.Diagnostics.AddError("Import sysrepo data", err.Error())
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Read exports the subtree. When the export differs from the content in state,
-// Read stores the export as the content. The plan then shows an update that
-// merges the declared content.
+// Read exports the configuration of the module. When the export differs from
+// the content in state, Read stores the export as the content. The plan then
+// shows an update that imports the declared content.
 func (r *sysrepoDataResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state sysrepoDataModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -123,14 +114,14 @@ func (r *sysrepoDataResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 	if _, installed := sysrepo.FindImplemented(modules, state.Module.ValueString()); !installed {
 		// An uninstalled module takes its data away, and sysrepocfg rejects an
-		// XPath of an unknown module.
+		// unknown module.
 		resp.State.RemoveResource(ctx)
 		return
 	}
 
 	exportCommand := sysrepocfgCommand(
 		"--export", "--datastore", state.Datastore.ValueString(),
-		"--xpath", state.XPath.ValueString(),
+		"--module", state.Module.ValueString(),
 		"--format", "xml", "--defaults", explicitDefaultsMode,
 	)
 	result, err := runGuest(ctx, r.data.client, guest, exportCommand)
@@ -166,49 +157,34 @@ func (r *sysrepoDataResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if err := r.merge(ctx, plan); err != nil {
-		resp.Diagnostics.AddError("Merge sysrepo data", err.Error())
+	if err := r.replace(ctx, plan); err != nil {
+		resp.Diagnostics.AddError("Import sysrepo data", err.Error())
 		return
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Delete merges a copy of the content that has the NETCONF operation remove
-// on each top-level element.
+// Delete imports an empty document, which removes the configuration of the
+// module in the datastore.
 func (r *sysrepoDataResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state sysrepoDataModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// Read stores an empty export as the content when the datastore has no
-	// data at the XPath. The delete then has nothing to remove.
-	canonical, err := sysrepo.CanonicalXML(state.Content.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Remove sysrepo data", err.Error())
-		return
-	}
-	if canonical == "" {
-		return
-	}
-	edit, err := sysrepo.RemoveEdit(state.Content.ValueString())
-	if err != nil {
-		resp.Diagnostics.AddError("Remove sysrepo data", err.Error())
-		return
-	}
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
 	unlock := r.data.sysrepoLocks.lock(guest)
 	defer unlock()
-	err = runSysrepocfgEdit(
-		ctx, r.data.client, guest, state.Datastore.ValueString(), state.Module.ValueString(), edit,
+	err := runSysrepocfgImport(
+		ctx, r.data.client, guest, state.Datastore.ValueString(), state.Module.ValueString(), "",
 	)
 	if err != nil {
 		resp.Diagnostics.AddError("Remove sysrepo data", err.Error())
 	}
 }
 
-func (r *sysrepoDataResource) merge(ctx context.Context, plan sysrepoDataModel) error {
+func (r *sysrepoDataResource) replace(ctx context.Context, plan sysrepoDataModel) error {
 	content := plan.Content.ValueString()
 	canonical, err := sysrepo.CanonicalXML(content)
 	if err != nil {
@@ -222,7 +198,7 @@ func (r *sysrepoDataResource) merge(ctx context.Context, plan sysrepoDataModel) 
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
 	unlock := r.data.sysrepoLocks.lock(guest)
 	defer unlock()
-	return runSysrepocfgEdit(
+	return runSysrepocfgImport(
 		ctx, r.data.client, guest, plan.Datastore.ValueString(), plan.Module.ValueString(), content,
 	)
 }

@@ -137,28 +137,12 @@ func TestCanonicalXMLRejectsMalformedDocument(t *testing.T) {
 	}
 }
 
-func TestRemoveEditMarksEachTopLevelElement(t *testing.T) {
-	content := "<a xmlns=\"urn:x\"><b>1</b></a>\n<c xmlns=\"urn:y\" />"
-	edit, err := sysrepo.RemoveEdit(content)
+func TestCanonicalXMLOfWhitespaceOnlyDocumentIsEmpty(t *testing.T) {
+	canonical, err := sysrepo.CanonicalXML("  \n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	canonical, err := sysrepo.CanonicalXML(edit)
-	if err != nil {
-		t.Fatalf("the edit is not valid XML: %v\n%s", err, edit)
-	}
-	const wantAttribute = "{urn:ietf:params:xml:ns:netconf:base:1.0}operation=\"remove\""
-	if count := strings.Count(canonical, wantAttribute); count != 2 {
-		t.Errorf("%d top-level elements have the remove operation, want 2:\n%s", count, canonical)
-	}
-	if count := strings.Count(canonical, "start "); count != 3 {
-		t.Errorf("the edit has %d elements, want 3:\n%s", count, canonical)
-	}
-}
-
-func TestRemoveEditRejectsEmptyContent(t *testing.T) {
-	_, err := sysrepo.RemoveEdit("  ")
-	if !errors.Is(err, sysrepo.ErrNoElement) {
-		t.Errorf("error is %v, want ErrNoElement", err)
+	if canonical != "" {
+		t.Errorf("canonical form is %q, want empty", canonical)
 	}
 }

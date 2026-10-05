@@ -13,19 +13,12 @@ import (
 	"strings"
 )
 
-var (
-	// ErrMalformedXML marks content that is not a well-formed XML document.
-	ErrMalformedXML = errors.New("malformed XML")
-	// ErrNoElement marks content without any XML element.
-	ErrNoElement = errors.New("the XML content has no element")
-)
+// ErrMalformedXML marks content that is not a well-formed XML document.
+var ErrMalformedXML = errors.New("malformed XML")
 
 const (
-	netconfNamespace = "urn:ietf:params:xml:ns:netconf:base:1.0"
-	operationPrefix  = "pveguestnc"
-	xmlWhitespace    = " \t\r\n"
-	selfClosingTail  = "/>"
-	namespaceAttr    = "xmlns"
+	xmlWhitespace = " \t\r\n"
+	namespaceAttr = "xmlns"
 )
 
 // CanonicalXML returns the canonical form of an XML document. Two documents
@@ -114,52 +107,4 @@ func writeStartElement(canonical *strings.Builder, element xml.StartElement) {
 		)
 	}
 	canonical.WriteString("\n")
-}
-
-// RemoveEdit returns the document with the NETCONF operation "remove" on each
-// top-level element. A sysrepocfg edit of the result deletes the data that the
-// top-level elements select. The edit succeeds when that data is absent.
-func RemoveEdit(content string) (string, error) {
-	decoder := xml.NewDecoder(strings.NewReader(content))
-	var edit strings.Builder
-	copied := 0
-	depth := 0
-	topLevelCount := 0
-	attributes := fmt.Sprintf(
-		` xmlns:%s=%q %s:operation="remove"`, operationPrefix, netconfNamespace, operationPrefix,
-	)
-
-	for {
-		token, err := decoder.Token()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			slog.Error("parse XML content failed", "err", err)
-			return "", fmt.Errorf("%w: %w", ErrMalformedXML, err)
-		}
-		switch token.(type) {
-		case xml.StartElement:
-			if depth == 0 {
-				topLevelCount++
-				// InputOffset is the end of the start tag, just after the ">".
-				tagEnd := int(decoder.InputOffset())
-				insertAt := tagEnd - 1
-				if strings.HasSuffix(content[:tagEnd], selfClosingTail) {
-					insertAt--
-				}
-				edit.WriteString(content[copied:insertAt])
-				edit.WriteString(attributes)
-				copied = insertAt
-			}
-			depth++
-		case xml.EndElement:
-			depth--
-		}
-	}
-	if topLevelCount == 0 {
-		return "", ErrNoElement
-	}
-	edit.WriteString(content[copied:])
-	return edit.String(), nil
 }
