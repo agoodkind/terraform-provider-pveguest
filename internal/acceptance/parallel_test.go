@@ -19,9 +19,9 @@ const (
 )
 
 // TestAccParallelGuestCommands runs one read-only command in several
-// containers of one hypervisor at the same time. `pct exec` exited with
-// status 129 and empty stderr under that load in an Ansible run on
-// 2026-10-04.
+// containers of one hypervisor at the same time. Parallel `pct exec` calls
+// exited with status 129 and empty stderr under that load in an Ansible run on
+// 2026-10-04. The test checks that every parallel exec call returns the output.
 func TestAccParallelGuestCommands(t *testing.T) {
 	handle := newTestGuest(t)
 	listed := os.Getenv(parallelVMIDsVariable)
@@ -37,14 +37,11 @@ func TestAccParallelGuestCommands(t *testing.T) {
 		guests = append(guests, transport.Guest{Node: handle.guest.Node, VMID: vmid, Kind: transport.KindLXC})
 	}
 
-	nodes := map[string]transport.NodeConfig{
-		handle.guest.Node: {Host: handle.host, Port: transport.DefaultPort, User: transport.DefaultUser},
-	}
-	pool, err := transport.NewPool(nodes, len(guests))
+	nodes := map[string]transport.NodeConfig{handle.guest.Node: handle.node}
+	client, err := transport.NewClient(nodes, len(guests))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pool.Close)
 
 	var mutex sync.Mutex
 	failures := map[string]int{}
@@ -55,7 +52,7 @@ func TestAccParallelGuestCommands(t *testing.T) {
 			go func(guest transport.Guest) {
 				defer group.Done()
 				command := transport.Command{Argv: []string{"cat", "/etc/hostname"}, TimeoutSeconds: 60}
-				result, runError := pool.Run(context.Background(), guest, command)
+				result, runError := client.Run(context.Background(), guest, command)
 				outcome := ""
 				if runError != nil {
 					outcome = "error: " + runError.Error()

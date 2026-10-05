@@ -29,7 +29,8 @@ install-mirror:
 		-o "$(MIRROR_DIRECTORY)/$(BINARY)_v$(PROVIDER_VERSION)" .
 
 # The acceptance tests change a real guest. PVEGUEST_ACC_NODE,
-# PVEGUEST_ACC_HOST, PVEGUEST_ACC_VMID, and PVEGUEST_ACC_KIND select it.
+# PVEGUEST_ACC_ENDPOINT, PVEGUEST_ACC_TOKEN_FILE, PVEGUEST_ACC_VMID,
+# PVEGUEST_ACC_KIND, and PVEGUEST_ACC_INSECURE select it.
 # The tests share one guest and its apt lock, which requires -p 1.
 testacc: install-mirror
 	TF_ACC=1 \

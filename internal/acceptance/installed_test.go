@@ -124,7 +124,7 @@ terraform {
 provider "pveguest" {
   nodes = {
     %q = {
-      host = %q
+      %s
     }
   }
 }
@@ -144,7 +144,7 @@ resource "pveguest_file" "secret" {
   content_wo_version = %d
   mode               = "0600"
 }
-`, providerSource, installedVersion, guest.guest.Node, guest.host,
+`, providerSource, installedVersion, guest.guest.Node, guest.nodeAttributes(),
 			guest.guest.Node, guest.guest.VMID, string(guest.guest.Kind), path, version)
 	}
 

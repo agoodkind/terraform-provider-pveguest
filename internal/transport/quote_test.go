@@ -10,8 +10,7 @@ import (
 )
 
 func TestQuoteCommandPassesArgumentsThroughShell(t *testing.T) {
-	// The arguments pass through the same number of shells as in production:
-	// the hypervisor login shell parses the command line once.
+	// One POSIX shell parses the quoted command line.
 	argv := []string{
 		"plain",
 		"",

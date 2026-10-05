@@ -272,7 +272,7 @@ func (r *fileResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	}
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	status, found, err := readFileStatus(ctx, r.data.pool, guest, state.Path.ValueString())
+	status, found, err := readFileStatus(ctx, r.data.client, guest, state.Path.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Read file", err.Error())
 		return
@@ -345,7 +345,7 @@ func (r *fileResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	err := runChecked(ctx, r.data.pool, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
+	err := runChecked(ctx, r.data.client, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
 	if err != nil {
 		resp.Diagnostics.AddError("Delete file", err.Error())
 	}
@@ -381,15 +381,11 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	// every new directory in the path mode 0755. The command runs as root,
 	// and mkdir -p applies the umask only to the directories that it creates.
 	directoryCommand := guestCommand("sh", "-c", `umask 022 && mkdir -p -- "$1"`, "sh", path.Dir(destination))
-	if err := runChecked(ctx, r.data.pool, guest, directoryCommand); err != nil {
+	if err := runChecked(ctx, r.data.client, guest, directoryCommand); err != nil {
 		return err
 	}
 
-	// The umask makes the temporary file unreadable for other users until
-	// chmod sets the declared mode.
-	writeCommand := guestCommand("sh", "-c", `umask 077 && cat > "$1"`, "sh", temporaryPath)
-	writeCommand.Stdin = content
-	if err := runChecked(ctx, r.data.pool, guest, writeCommand); err != nil {
+	if err := r.writeContent(ctx, guest, temporaryPath, content); err != nil {
 		r.removeTemporaryFile(ctx, guest, temporaryPath)
 		return err
 	}
@@ -399,7 +395,7 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	}
 	if !plan.Validate.IsNull() {
 		validateScript := validateCommandLine(plan.Validate.ValueString(), temporaryPath)
-		result, err := runGuest(ctx, r.data.pool, guest, guestCommand("sh", "-c", validateScript))
+		result, err := runGuest(ctx, r.data.client, guest, guestCommand("sh", "-c", validateScript))
 		if err != nil {
 			r.removeTemporaryFile(ctx, guest, temporaryPath)
 			return err
@@ -415,36 +411,66 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 	// -T makes mv fail on a directory at the destination instead of moving
 	// the temporary file into it.
 	moveCommand := guestCommand("mv", "-fT", "--", temporaryPath, destination)
-	if err := runChecked(ctx, r.data.pool, guest, moveCommand); err != nil {
+	if err := runChecked(ctx, r.data.client, guest, moveCommand); err != nil {
 		r.removeTemporaryFile(ctx, guest, temporaryPath)
 		return err
 	}
 	return nil
 }
 
+// One command accepts a limited standard input. Larger content takes one
+// command that truncates the temporary file and one command per piece that
+// appends. The umask makes the temporary file unreadable for other users until
+// chmod sets the declared mode.
+func (r *fileResource) writeContent(
+	ctx context.Context,
+	guest transport.Guest,
+	temporaryPath string,
+	content []byte,
+) error {
+	if len(content) <= guest.Kind.StdinLimit() {
+		writeCommand := guestCommand("sh", "-c", `umask 077 && cat > "$1"`, "sh", temporaryPath)
+		writeCommand.Stdin = content
+		return runChecked(ctx, r.data.client, guest, writeCommand)
+	}
+
+	truncateCommand := guestCommand("sh", "-c", `umask 077 && : > "$1"`, "sh", temporaryPath)
+	if err := runChecked(ctx, r.data.client, guest, truncateCommand); err != nil {
+		return err
+	}
+	for _, piece := range transport.SplitStdin(guest.Kind, content) {
+		appendCommand := guestCommand("sh", "-c", `cat >> "$1"`, "sh", temporaryPath)
+		appendCommand.Stdin = piece
+		if err := runChecked(ctx, r.data.client, guest, appendCommand); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *fileResource) setAttributes(ctx context.Context, guest transport.Guest, plan fileModel, targetPath string) error {
 	modeCommand := guestCommand("chmod", plan.Mode.ValueString(), "--", targetPath)
-	if err := runChecked(ctx, r.data.pool, guest, modeCommand); err != nil {
+	if err := runChecked(ctx, r.data.client, guest, modeCommand); err != nil {
 		return err
 	}
 	ownership := plan.Owner.ValueString() + ":" + plan.Group.ValueString()
-	return runChecked(ctx, r.data.pool, guest, guestCommand("chown", ownership, "--", targetPath))
+	return runChecked(ctx, r.data.client, guest, guestCommand("chown", ownership, "--", targetPath))
 }
 
 // removeTemporaryFile runs after another step failed. The caller reports
 // that failure and ignores a failed removal.
 func (r *fileResource) removeTemporaryFile(ctx context.Context, guest transport.Guest, temporaryPath string) {
-	_, _ = r.data.pool.Run(ctx, guest, guestCommand("rm", "-f", "--", temporaryPath))
+	_, _ = r.data.client.Run(ctx, guest, guestCommand("rm", "-f", "--", temporaryPath))
 }
 
 func readFileStatus(
 	ctx context.Context,
-	pool *transport.Pool,
+	client *transport.Client,
 	guest transport.Guest,
 	filePath string,
 ) (fileStatus, bool, error) {
 	statCommand := guestCommand("stat", "-L", "-c", "%a %U %G", "--", filePath)
-	statResult, err := runGuest(ctx, pool, guest, statCommand)
+	statResult, err := runGuest(ctx, client, guest, statCommand)
 	if err != nil {
 		return fileStatus{}, false, err
 	}
@@ -464,7 +490,7 @@ func readFileStatus(
 	}
 
 	hashCommand := guestCommand("sha256sum", "--", filePath)
-	hashResult, err := runGuest(ctx, pool, guest, hashCommand)
+	hashResult, err := runGuest(ctx, client, guest, hashCommand)
 	if err != nil {
 		return fileStatus{}, false, err
 	}

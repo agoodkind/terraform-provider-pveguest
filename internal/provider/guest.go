@@ -85,11 +85,11 @@ func guestCommand(argv ...string) transport.Command {
 // is part of the result, and the caller decides whether it is a failure.
 func runGuest(
 	ctx context.Context,
-	pool *transport.Pool,
+	client *transport.Client,
 	guest transport.Guest,
 	command transport.Command,
 ) (transport.Result, error) {
-	result, err := pool.Run(ctx, guest, command)
+	result, err := client.Run(ctx, guest, command)
 	if err != nil {
 		slog.ErrorContext(
 			ctx, "guest command failed",
@@ -102,11 +102,11 @@ func runGuest(
 
 func runChecked(
 	ctx context.Context,
-	pool *transport.Pool,
+	client *transport.Client,
 	guest transport.Guest,
 	command transport.Command,
 ) error {
-	result, err := runGuest(ctx, pool, guest, command)
+	result, err := runGuest(ctx, client, guest, command)
 	if err != nil {
 		return err
 	}

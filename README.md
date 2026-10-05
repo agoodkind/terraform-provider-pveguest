@@ -1,10 +1,10 @@
 # terraform-provider-pveguest
 
 `pveguest` is an OpenTofu provider that declares files, symbolic links, apt
-packages, and systemd units inside Proxmox guests. The provider opens SSH to
-the hypervisor and runs each command with `pct exec` for a container or
-`qm guest exec` for a VM. The provider does not require SSH access to the
-guest.
+packages, and systemd units inside Proxmox guests. The provider calls the
+Proxmox VE API with an API token. A container runs each command through its
+`exec` API, and a VM runs each command through the QEMU guest agent API. The
+provider does not require SSH access to the hypervisor or the guest.
 
 The provider address is `tofu.home.arpa/agoodkind/pveguest`. The provider
 supports Debian guests.
@@ -13,10 +13,11 @@ supports Debian guests.
 
 - Go 1.27.1 or later, for the build.
 - OpenTofu 1.11 or later. `content_wo` requires write-only attribute support.
-- An SSH agent at `SSH_AUTH_SOCK` with a key that the hypervisor accepts for
-  the configured user.
-- An entry for each hypervisor host in `~/.ssh/known_hosts`. The provider
-  connects only to a host that `known_hosts` lists.
+- A Proxmox VE API token for each hypervisor, with the privileges in
+  [API privileges](#api-privileges).
+- For `kind = "lxc"`: a Proxmox VE node that provides the container `exec`,
+  `exec-status`, `file-write`, and `file-read` API methods. Stock Proxmox VE does
+  not provide them.
 - For `kind = "qemu"`: a running QEMU guest agent in the VM.
 
 ## Install
@@ -44,8 +45,16 @@ terraform {
 
 provider "pveguest" {
   nodes = {
-    suburban = { host = "suburban.example.net" }
+    suburban = {
+      endpoint  = "https://suburban.example.net:8006"
+      api_token = var.suburban_api_token
+    }
   }
+}
+
+variable "suburban_api_token" {
+  type      = string
+  sensitive = true
 }
 
 resource "pveguest_file" "sshd_base" {
@@ -74,14 +83,43 @@ resource "pveguest_systemd_unit" "ssh" {
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `nodes` | map of object | yes | | Hypervisors by node name. |
-| `nodes.<name>.host` | string | yes | | SSH host name or address. |
-| `nodes.<name>.port` | number | no | `22` | SSH port. |
-| `nodes.<name>.user` | string | no | `root` | SSH user. |
-| `max_sessions` | number | no | `4` | Concurrent SSH sessions per hypervisor. |
+| `nodes` | map of object | yes | | Hypervisors by Proxmox node name. The map key is the node name in the API path. |
+| `nodes.<name>.endpoint` | string | yes | | URL of the Proxmox VE API, for example `https://10.230.0.254:8006`. |
+| `nodes.<name>.api_token` | string, sensitive | yes | | API token in the form `user@realm!tokenid=secret`. |
+| `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
+| `max_requests` | number | no | `4` | Concurrent API requests per hypervisor. |
 
-The provider keeps one SSH connection per hypervisor and runs each command in
-its own session.
+## API privileges
+
+The token needs these privileges on `/vms/<vmid>` of each guest that a resource
+manages. A token with privilege separation needs the privileges in its own
+permissions, not only in those of its user.
+
+| Guest kind | API methods | Privileges |
+| --- | --- | --- |
+| `lxc` | `exec`, `exec-status` | `VM.Guest.Exec` |
+| `qemu` | `agent/exec`, `agent/exec-status` | `VM.GuestAgent.Unrestricted` |
+
+The provider runs every guest operation through `exec` and `exec-status`. The
+file-write and file-read methods are not used.
+
+## Command execution
+
+An exec call starts the command and returns an identifier. The provider polls
+`exec-status` until the command exits. The delay between polls starts at 200 ms
+and doubles up to 2 s. A command has a timeout of 120 seconds by default. The
+wait ends 15 seconds after that timeout, or when OpenTofu cancels the
+operation.
+
+A result with a truncated output stream or a timed-out command fails with an
+error that states the guest and the command. Every API error states the guest
+(node, vmid, kind), the API path, the HTTP status, and the response text. A
+stopped container, a stopped VM, and a VM without a running guest agent produce
+an error that starts with the guest and contains "is unreachable".
+
+The container API accepts at most 96 KiB of standard input per command. The
+QEMU guest agent API accepts text of at most 64 KiB per request, and the
+provider limits each command to 16 KiB.
 
 ## Guest arguments
 
@@ -129,8 +167,10 @@ hash stored at the last apply. A difference produces a planned rewrite. The
 provider writes a changed `content_wo` value when `content_wo_version` also
 changes.
 
-A VM file larger than 1 MiB exceeds the stdin limit of `qm guest exec`, and
-the provider returns an error before it runs the command.
+Content larger than the standard input limit of one command takes several
+commands. One command truncates the temporary file, and one command per piece
+appends to it. A piece has at most 96 KiB for a container and 16 KiB for a VM.
+The validate, mode, owner, and rename steps run after the last piece.
 
 ## pveguest_link
 
@@ -203,17 +243,20 @@ The acceptance tests change a real guest. Use a dedicated test guest.
 ```sh
 make testacc \
   PVEGUEST_ACC_NODE=suburban \
-  PVEGUEST_ACC_HOST=suburban.example.net \
+  PVEGUEST_ACC_ENDPOINT=https://suburban.example.net:8006 \
+  PVEGUEST_ACC_TOKEN_FILE=$HOME/.config/pveguest/token \
   PVEGUEST_ACC_VMID=224 \
   PVEGUEST_ACC_KIND=lxc
 ```
 
 | Variable | Meaning |
 | --- | --- |
-| `PVEGUEST_ACC_NODE` | Node name for the provider `nodes` map. |
-| `PVEGUEST_ACC_HOST` | SSH host of the hypervisor. |
+| `PVEGUEST_ACC_NODE` | Proxmox node name and key in the provider `nodes` map. |
+| `PVEGUEST_ACC_ENDPOINT` | URL of the Proxmox VE API. |
+| `PVEGUEST_ACC_TOKEN_FILE` | Path of a file that contains the full API token string. |
 | `PVEGUEST_ACC_VMID` | ID of the test guest. |
 | `PVEGUEST_ACC_KIND` | `lxc` or `qemu`. |
+| `PVEGUEST_ACC_INSECURE` | `true` skips TLS certificate verification. The default is `false`. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the

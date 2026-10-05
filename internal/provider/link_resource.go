@@ -83,7 +83,7 @@ func (r *linkResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
 	command := guestCommand("readlink", "-v", "--", state.Path.ValueString())
-	result, err := runGuest(ctx, r.data.pool, guest, command)
+	result, err := runGuest(ctx, r.data.client, guest, command)
 	if err != nil {
 		resp.Diagnostics.AddError("Read link", err.Error())
 		return
@@ -124,7 +124,7 @@ func (r *linkResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 		return
 	}
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	err := runChecked(ctx, r.data.pool, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
+	err := runChecked(ctx, r.data.client, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
 	if err != nil {
 		resp.Diagnostics.AddError("Delete link", err.Error())
 	}
@@ -135,5 +135,5 @@ func (r *linkResource) writeLink(ctx context.Context, plan linkModel) error {
 	// -T makes ln replace a link to a directory instead of creating the new
 	// link inside that directory.
 	command := guestCommand("ln", "-sfT", "--", plan.Target.ValueString(), plan.Path.ValueString())
-	return runChecked(ctx, r.data.pool, guest, command)
+	return runChecked(ctx, r.data.client, guest, command)
 }

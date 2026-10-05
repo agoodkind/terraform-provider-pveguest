@@ -16,28 +16,23 @@ import (
 	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
 )
 
-const (
-	minimumPort = 1
-	maximumPort = 65535
-)
-
 type pveguestProvider struct {
 	version string
 }
 
 type providerModel struct {
 	Nodes       types.Map   `tfsdk:"nodes"`
-	MaxSessions types.Int64 `tfsdk:"max_sessions"`
+	MaxRequests types.Int64 `tfsdk:"max_requests"`
 }
 
 type nodeModel struct {
-	Host types.String `tfsdk:"host"`
-	Port types.Int64  `tfsdk:"port"`
-	User types.String `tfsdk:"user"`
+	Endpoint types.String `tfsdk:"endpoint"`
+	APIToken types.String `tfsdk:"api_token"`
+	Insecure types.Bool   `tfsdk:"insecure"`
 }
 
 type providerData struct {
-	pool     *transport.Pool
+	client   *transport.Client
 	aptLocks *guestLocks
 }
 
@@ -77,32 +72,33 @@ func (p *pveguestProvider) Metadata(_ context.Context, _ provider.MetadataReques
 func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "Declares files, links, apt packages, and systemd units inside Proxmox guests. " +
-			"Commands run through pct exec or qm guest exec on the hypervisor.",
+			"Commands run through the Proxmox VE API of the hypervisor.",
 		Attributes: map[string]schema.Attribute{
 			"nodes": schema.MapNestedAttribute{
-				Required:    true,
-				Description: "Hypervisors by node name. A resource selects one with its node argument.",
+				Required: true,
+				Description: "Hypervisors by Proxmox node name. A resource selects one with its node argument. " +
+					"The map key is the node name in the API path.",
 				NestedObject: schema.NestedAttributeObject{
 					Attributes: map[string]schema.Attribute{
-						"host": schema.StringAttribute{
+						"endpoint": schema.StringAttribute{
 							Required:    true,
-							Description: "SSH host name or address of the hypervisor.",
+							Description: "URL of the Proxmox VE API, for example https://10.230.0.254:8006.",
 						},
-						"port": schema.Int64Attribute{
-							Optional:    true,
-							Description: "SSH port. The default is 22.",
-							Validators:  []validator.Int64{int64validator.Between(minimumPort, maximumPort)},
+						"api_token": schema.StringAttribute{
+							Required:    true,
+							Sensitive:   true,
+							Description: "API token in the form user@realm!tokenid=secret.",
 						},
-						"user": schema.StringAttribute{
+						"insecure": schema.BoolAttribute{
 							Optional:    true,
-							Description: "SSH user. The default is root.",
+							Description: "Skips TLS certificate verification. The default is false.",
 						},
 					},
 				},
 			},
-			"max_sessions": schema.Int64Attribute{
+			"max_requests": schema.Int64Attribute{
 				Optional:    true,
-				Description: "Concurrent SSH sessions per hypervisor. The default is 4.",
+				Description: "Concurrent API requests per hypervisor. The default is 4.",
 				Validators:  []validator.Int64{int64validator.AtLeast(1)},
 			},
 		},
@@ -115,10 +111,10 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if config.Nodes.IsUnknown() || config.MaxSessions.IsUnknown() {
+	if config.Nodes.IsUnknown() || config.MaxRequests.IsUnknown() {
 		resp.Diagnostics.AddError(
 			"Unknown provider configuration",
-			"The nodes and max_sessions arguments must be known when the provider is configured.",
+			"The nodes and max_requests arguments must be known when the provider is configured.",
 		)
 		return
 	}
@@ -131,39 +127,32 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 
 	nodes := make(map[string]transport.NodeConfig, len(nodeModels))
 	for name, model := range nodeModels {
-		if model.Host.IsUnknown() || model.Port.IsUnknown() || model.User.IsUnknown() {
+		if model.Endpoint.IsUnknown() || model.APIToken.IsUnknown() || model.Insecure.IsUnknown() {
 			resp.Diagnostics.AddError(
 				"Unknown provider configuration",
-				fmt.Sprintf("The host, port, and user of node %q must be known when the provider is configured.", name),
+				fmt.Sprintf("The endpoint, api_token, and insecure arguments of node %q must be known when the provider is configured.", name),
 			)
 			return
 		}
-		nodeConfig := transport.NodeConfig{
-			Host: model.Host.ValueString(),
-			Port: transport.DefaultPort,
-			User: transport.DefaultUser,
+		nodes[name] = transport.NodeConfig{
+			Endpoint: model.Endpoint.ValueString(),
+			APIToken: model.APIToken.ValueString(),
+			Insecure: model.Insecure.ValueBool(),
 		}
-		if !model.Port.IsNull() {
-			nodeConfig.Port = int(model.Port.ValueInt64())
-		}
-		if !model.User.IsNull() {
-			nodeConfig.User = model.User.ValueString()
-		}
-		nodes[name] = nodeConfig
 	}
 
-	maxSessions := transport.DefaultMaxSessions
-	if !config.MaxSessions.IsNull() {
-		maxSessions = int(config.MaxSessions.ValueInt64())
+	maxRequests := transport.DefaultMaxRequests
+	if !config.MaxRequests.IsNull() {
+		maxRequests = int(config.MaxRequests.ValueInt64())
 	}
 
-	pool, err := transport.NewPool(nodes, maxSessions)
+	client, err := transport.NewClient(nodes, maxRequests)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
 		return
 	}
 	resp.ResourceData = &providerData{
-		pool:     pool,
+		client:   client,
 		aptLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
 	}
 }

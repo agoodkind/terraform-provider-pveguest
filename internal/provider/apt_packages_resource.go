@@ -107,7 +107,7 @@ func (r *aptPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	installed, err := readInstalledPackages(ctx, r.data.pool, guest, declared)
+	installed, err := readInstalledPackages(ctx, r.data.client, guest, declared)
 	if err != nil {
 		resp.Diagnostics.AddError("Read apt packages", err.Error())
 		return
@@ -158,7 +158,7 @@ func (r *aptPackagesResource) install(ctx context.Context, plan aptPackagesModel
 	unlock := r.data.aptLocks.lock(guest)
 	defer unlock()
 
-	installed, err := readInstalledPackages(ctx, r.data.pool, guest, declared)
+	installed, err := readInstalledPackages(ctx, r.data.client, guest, declared)
 	if err != nil {
 		diagnostics.AddError("Read apt packages", err.Error())
 		return diagnostics
@@ -171,18 +171,18 @@ func (r *aptPackagesResource) install(ctx context.Context, plan aptPackagesModel
 	// Error-Mode=any makes apt-get update exit nonzero when an index
 	// download fails. The default mode prints a warning and exits zero.
 	updateCommand := aptCommand("update", "-o", "APT::Update::Error-Mode=any")
-	if err := runChecked(ctx, r.data.pool, guest, updateCommand); err != nil {
+	if err := runChecked(ctx, r.data.client, guest, updateCommand); err != nil {
 		diagnostics.AddError("apt-get update failed", err.Error())
 		return diagnostics
 	}
 
 	installArguments := append([]string{"install", "-y", "--no-install-recommends", "--"}, missing...)
-	if err := runChecked(ctx, r.data.pool, guest, aptCommand(installArguments...)); err != nil {
+	if err := runChecked(ctx, r.data.client, guest, aptCommand(installArguments...)); err != nil {
 		diagnostics.AddError("apt-get install failed", err.Error())
 		return diagnostics
 	}
 
-	installed, err = readInstalledPackages(ctx, r.data.pool, guest, declared)
+	installed, err = readInstalledPackages(ctx, r.data.client, guest, declared)
 	if err != nil {
 		diagnostics.AddError("Read apt packages", err.Error())
 		return diagnostics
@@ -214,7 +214,7 @@ func missingPackages(declared []string, installed map[string]bool) []string {
 
 func readInstalledPackages(
 	ctx context.Context,
-	pool *transport.Pool,
+	client *transport.Client,
 	guest transport.Guest,
 	names []string,
 ) (map[string]bool, error) {
@@ -223,7 +223,7 @@ func readInstalledPackages(
 	}
 	arguments := append([]string{"dpkg-query", "--show", "--showformat", dpkgQueryFormat, "--"}, names...)
 	command := guestCommand(arguments...)
-	result, err := runGuest(ctx, pool, guest, command)
+	result, err := runGuest(ctx, client, guest, command)
 	if err != nil {
 		return nil, err
 	}

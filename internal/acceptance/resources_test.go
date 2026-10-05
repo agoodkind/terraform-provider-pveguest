@@ -16,6 +16,10 @@ import (
 const (
 	firstMarker  = "pveguest-acceptance-marker-one"
 	secondMarker = "pveguest-acceptance-marker-two"
+
+	// 200 KiB, about twice the 96 KiB limit of one exec call for a container.
+	largeContentBytes  = 200 * 1024
+	largeLineFillBytes = 80
 )
 
 func sha256Hex(content string) string {
@@ -118,6 +122,46 @@ func TestAccFile(t *testing.T) {
 					}
 					return nil
 				}),
+			},
+		},
+	})
+}
+
+// The content exceeds the 96 KiB of one exec call, and the non-ASCII
+// characters give the pieces for a VM character boundaries to respect.
+func TestAccFileLargerThanOneExecInput(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useTestDirectory()
+	path := testDirectory + "/large.conf"
+	var builder strings.Builder
+	for line := 0; builder.Len() < largeContentBytes; line++ {
+		fmt.Fprintf(&builder, "line %06d é中 payload %s\n", line, strings.Repeat("x", largeLineFillBytes))
+	}
+	content := builder.String()
+	wantHash := sha256Hex(content)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: guest.fileConfig(path, content, ""),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr("pveguest_file.test", "sha256", wantHash),
+					checkGuest(func() error {
+						fields := strings.Fields(guest.mustRun("sha256sum", "--", path))
+						if len(fields) == 0 || fields[0] != wantHash {
+							return fmt.Errorf("sha256sum of %s reports %q, want %s", path, fields, wantHash)
+						}
+						return nil
+					}),
+					checkGuest(func() error {
+						listing := strings.TrimSpace(guest.mustRun("ls", "-A", "--", testDirectory))
+						if listing != "large.conf" {
+							return fmt.Errorf("directory contains %q, want only large.conf", listing)
+						}
+						return nil
+					}),
+				),
 			},
 		},
 	})

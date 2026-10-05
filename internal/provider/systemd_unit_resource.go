@@ -147,7 +147,7 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	status, err := readUnitStatus(ctx, r.data.pool, guest, state.Name.ValueString())
+	status, err := readUnitStatus(ctx, r.data.client, guest, state.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Read systemd unit", err.Error())
 		return
@@ -196,10 +196,10 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 
 	// A unit file written earlier in the same apply is unknown to the
 	// manager until this reload.
-	if err := runChecked(ctx, r.data.pool, guest, systemctlCommand("daemon-reload")); err != nil {
+	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("daemon-reload")); err != nil {
 		return err
 	}
-	status, err := readUnitStatus(ctx, r.data.pool, guest, name)
+	status, err := readUnitStatus(ctx, r.data.client, guest, name)
 	if err != nil {
 		return err
 	}
@@ -210,12 +210,12 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	current := classifyEnabledState(status.FileState)
 	wantEnabled := plan.Enabled.ValueBool()
 	if current == enablementDisabled && wantEnabled {
-		if err := runChecked(ctx, r.data.pool, guest, systemctlCommand("enable", "--", name)); err != nil {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("enable", "--", name)); err != nil {
 			return err
 		}
 	}
 	if current == enablementEnabled && !wantEnabled {
-		if err := runChecked(ctx, r.data.pool, guest, systemctlCommand("disable", "--", name)); err != nil {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
 			return err
 		}
 	}
@@ -233,7 +233,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	default:
 		return nil
 	}
-	return runChecked(ctx, r.data.pool, guest, systemctlCommand(action, "--", name))
+	return runChecked(ctx, r.data.client, guest, systemctlCommand(action, "--", name))
 }
 
 func systemctlCommand(arguments ...string) transport.Command {
@@ -242,9 +242,9 @@ func systemctlCommand(arguments ...string) transport.Command {
 	return command
 }
 
-func readUnitStatus(ctx context.Context, pool *transport.Pool, guest transport.Guest, name string) (unitStatus, error) {
+func readUnitStatus(ctx context.Context, client *transport.Client, guest transport.Guest, name string) (unitStatus, error) {
 	enabledCommand := systemctlCommand("is-enabled", "--", name)
-	enabledResult, err := runGuest(ctx, pool, guest, enabledCommand)
+	enabledResult, err := runGuest(ctx, client, guest, enabledCommand)
 	if err != nil {
 		return unitStatus{}, err
 	}
@@ -262,7 +262,7 @@ func readUnitStatus(ctx context.Context, pool *transport.Pool, guest transport.G
 	// is-active exits nonzero for every state except active, and prints
 	// the state in each case.
 	activeCommand := systemctlCommand("is-active", "--", name)
-	activeResult, err := runGuest(ctx, pool, guest, activeCommand)
+	activeResult, err := runGuest(ctx, client, guest, activeCommand)
 	if err != nil {
 		return unitStatus{}, err
 	}

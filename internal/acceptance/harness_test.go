@@ -18,9 +18,11 @@ import (
 const (
 	acceptanceVariable = "TF_ACC"
 	nodeVariable       = "PVEGUEST_ACC_NODE"
-	hostVariable       = "PVEGUEST_ACC_HOST"
+	endpointVariable   = "PVEGUEST_ACC_ENDPOINT"
+	tokenFileVariable  = "PVEGUEST_ACC_TOKEN_FILE"
 	vmidVariable       = "PVEGUEST_ACC_VMID"
 	kindVariable       = "PVEGUEST_ACC_KIND"
+	insecureVariable   = "PVEGUEST_ACC_INSECURE"
 
 	providerSource = "tofu.home.arpa/agoodkind/pveguest"
 
@@ -43,10 +45,34 @@ var protoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServer, erro
 // testGuest runs commands in the guest directly, outside the provider, for
 // setup, hand edits, assertions, and cleanup.
 type testGuest struct {
-	t     *testing.T
-	pool  *transport.Pool
-	guest transport.Guest
-	host  string
+	t      *testing.T
+	client *transport.Client
+	guest  transport.Guest
+	node   transport.NodeConfig
+}
+
+// nodeConfigFromEnvironment reads the API endpoint, the token file, and the
+// TLS setting of the acceptance node.
+func nodeConfigFromEnvironment(t *testing.T) transport.NodeConfig {
+	t.Helper()
+	tokenFile := requireVariable(t, tokenFileVariable)
+	tokenBytes, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("%s: %v", tokenFileVariable, err)
+	}
+	insecure := false
+	insecureText := os.Getenv(insecureVariable)
+	if insecureText != "" {
+		insecure, err = strconv.ParseBool(insecureText)
+		if err != nil {
+			t.Fatalf("%s: %v", insecureVariable, err)
+		}
+	}
+	return transport.NodeConfig{
+		Endpoint: requireVariable(t, endpointVariable),
+		APIToken: strings.TrimSpace(string(tokenBytes)),
+		Insecure: insecure,
+	}
 }
 
 func newTestGuest(t *testing.T) *testGuest {
@@ -55,30 +81,32 @@ func newTestGuest(t *testing.T) *testGuest {
 		t.Skipf("%s is not set", acceptanceVariable)
 	}
 	node := requireVariable(t, nodeVariable)
-	host := requireVariable(t, hostVariable)
 	kind := requireVariable(t, kindVariable)
 	vmid, err := strconv.ParseInt(requireVariable(t, vmidVariable), 10, 64)
 	if err != nil {
 		t.Fatalf("%s: %v", vmidVariable, err)
 	}
 
-	nodes := map[string]transport.NodeConfig{
-		node: {Host: host, Port: transport.DefaultPort, User: transport.DefaultUser},
-	}
-	pool, err := transport.NewPool(nodes, transport.DefaultMaxSessions)
+	nodeConfig := nodeConfigFromEnvironment(t)
+	client, err := transport.NewClient(map[string]transport.NodeConfig{node: nodeConfig}, transport.DefaultMaxRequests)
 	if err != nil {
 		t.Fatal(err)
 	}
-	handle := &testGuest{
-		t:     t,
-		pool:  pool,
-		guest: transport.Guest{Node: node, VMID: vmid, Kind: transport.Kind(kind)},
-		host:  host,
+	return &testGuest{
+		t:      t,
+		client: client,
+		guest:  transport.Guest{Node: node, VMID: vmid, Kind: transport.Kind(kind)},
+		node:   nodeConfig,
 	}
-	// Cleanups run in reverse order: the pool closes after every guest
-	// cleanup that a test registers later.
-	t.Cleanup(pool.Close)
-	return handle
+}
+
+// nodeAttributes returns the HCL attributes of the node object in the
+// provider block.
+func (g *testGuest) nodeAttributes() string {
+	return fmt.Sprintf(
+		"endpoint  = %q\n      api_token = %q\n      insecure  = %t",
+		g.node.Endpoint, g.node.APIToken, g.node.Insecure,
+	)
 }
 
 func requireVariable(t *testing.T, name string) string {
@@ -97,7 +125,7 @@ func (g *testGuest) run(stdin []byte, argv ...string) transport.Result {
 		Stdin:          stdin,
 		TimeoutSeconds: directTimeout,
 	}
-	result, err := g.pool.Run(context.Background(), g.guest, command)
+	result, err := g.client.Run(context.Background(), g.guest, command)
 	if err != nil {
 		g.t.Fatalf("run %q: %v", argv, err)
 	}
@@ -191,7 +219,7 @@ terraform {
 provider "pveguest" {
   nodes = {
     %q = {
-      host = %q
+      %s
     }
   }
 }
@@ -201,5 +229,5 @@ locals {
   vmid = %d
   kind = %q
 }
-`, providerSource, g.guest.Node, g.host, g.guest.Node, g.guest.VMID, string(g.guest.Kind))
+`, providerSource, g.guest.Node, g.nodeAttributes(), g.guest.Node, g.guest.VMID, string(g.guest.Kind))
 }
