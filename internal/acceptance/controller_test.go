@@ -145,8 +145,6 @@ func TestAccDownloadArchiveMember(t *testing.T) {
 	archiveURL := baseURL + "/stack.tar.gz"
 	config := guest.providerBlock() +
 		guest.controllerDownloadBlock("test", archiveURL, bytesHash(archive), path, `archive_member = "mwan"`)
-	unsafeConfig := guest.providerBlock() +
-		guest.controllerDownloadBlock("test", archiveURL, bytesHash(archive), path, `archive_member = "../mwan"`)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
@@ -166,8 +164,27 @@ func TestAccDownloadArchiveMember(t *testing.T) {
 				ConfigPlanChecks: expectAction("pveguest_download.test", plancheck.ResourceActionUpdate),
 				Check:            checkGuest(guest.expectFileContent(path, string(member))),
 			},
+		},
+	})
+}
+
+// The post-test destroy reuses the last configuration, and an invalid
+// archive_member in an apply test fails that destroy.
+func TestAccDownloadRejectsUnsafeArchiveMember(t *testing.T) {
+	guest := newTestGuest(t)
+	config := guest.providerBlock() + guest.controllerDownloadBlock(
+		"test",
+		"https://127.0.0.1/stack.tar.gz",
+		bytesHash([]byte("unused")),
+		testDirectory+"/archive/mwan",
+		`archive_member = "../mwan"`,
+	)
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
 			{
-				Config:      unsafeConfig,
+				Config:      config,
 				PlanOnly:    true,
 				ExpectError: regexp.MustCompile(`(?s)must\s+not\s+contain\s+a\s+\.\.\s+component`),
 			},
