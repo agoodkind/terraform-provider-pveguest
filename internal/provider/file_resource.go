@@ -385,7 +385,7 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 		return err
 	}
 
-	if err := r.writeContent(ctx, guest, temporaryPath, content); err != nil {
+	if err := writeGuestContent(ctx, r.data.client, guest, temporaryPath, content); err != nil {
 		r.removeTemporaryFile(ctx, guest, temporaryPath)
 		return err
 	}
@@ -422,8 +422,9 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 // command that truncates the temporary file and one command per piece that
 // appends. The umask makes the temporary file unreadable for other users until
 // chmod sets the declared mode.
-func (r *fileResource) writeContent(
+func writeGuestContent(
 	ctx context.Context,
+	client *transport.Client,
 	guest transport.Guest,
 	temporaryPath string,
 	content []byte,
@@ -431,17 +432,17 @@ func (r *fileResource) writeContent(
 	if len(content) <= guest.Kind.StdinLimit() {
 		writeCommand := guestCommand("sh", "-c", `umask 077 && cat > "$1"`, "sh", temporaryPath)
 		writeCommand.Stdin = content
-		return runChecked(ctx, r.data.client, guest, writeCommand)
+		return runChecked(ctx, client, guest, writeCommand)
 	}
 
 	truncateCommand := guestCommand("sh", "-c", `umask 077 && : > "$1"`, "sh", temporaryPath)
-	if err := runChecked(ctx, r.data.client, guest, truncateCommand); err != nil {
+	if err := runChecked(ctx, client, guest, truncateCommand); err != nil {
 		return err
 	}
 	for _, piece := range transport.SplitStdin(guest.Kind, content) {
 		appendCommand := guestCommand("sh", "-c", `cat >> "$1"`, "sh", temporaryPath)
 		appendCommand.Stdin = piece
-		if err := runChecked(ctx, r.data.client, guest, appendCommand); err != nil {
+		if err := runChecked(ctx, client, guest, appendCommand); err != nil {
 			return err
 		}
 	}

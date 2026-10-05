@@ -49,6 +49,9 @@ type testGuest struct {
 	client *transport.Client
 	guest  transport.Guest
 	node   transport.NodeConfig
+
+	// controllerCAFile is the PEM certificate of a local HTTPS test server.
+	controllerCAFile string
 }
 
 // nodeConfigFromEnvironment reads the API endpoint, the token file, and the
@@ -222,6 +225,7 @@ provider "pveguest" {
       %s
     }
   }
+  %s
 }
 
 locals {
@@ -229,5 +233,15 @@ locals {
   vmid = %d
   kind = %q
 }
-`, providerSource, g.guest.Node, g.nodeAttributes(), g.guest.Node, g.guest.VMID, string(g.guest.Kind))
+`, providerSource, g.guest.Node, g.nodeAttributes(), g.controllerAttribute(),
+		g.guest.Node, g.guest.VMID, string(g.guest.Kind))
+}
+
+// controllerAttribute returns the controller_ca_file attribute of the provider
+// block, or an empty string when the test has no local HTTPS server.
+func (g *testGuest) controllerAttribute() string {
+	if g.controllerCAFile == "" {
+		return ""
+	}
+	return fmt.Sprintf("controller_ca_file = %q", g.controllerCAFile)
 }

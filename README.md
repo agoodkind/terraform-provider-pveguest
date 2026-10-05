@@ -1,7 +1,7 @@
 # terraform-provider-pveguest
 
 `pveguest` is an OpenTofu provider that declares files, downloads, symbolic links, apt
-packages, and systemd units inside Proxmox guests. The provider calls the
+packages, deb packages, and systemd units inside Proxmox guests. The provider calls the
 Proxmox VE API with an API token. A container runs each command through its
 `exec` API, and a VM runs each command through the QEMU guest agent API. The
 provider does not require SSH access to the hypervisor or the guest.
@@ -89,6 +89,7 @@ resource "pveguest_systemd_unit" "ssh" {
 | `nodes.<name>.api_token` | string, sensitive | yes | | API token in the form `user@realm!tokenid=secret`. |
 | `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
 | `max_requests` | number | no | `4` | Concurrent API requests per hypervisor. |
+| `controller_ca_file` | string | no | | Path of a PEM file with certificate authorities that the controller trusts in addition to the system roots when `pveguest_download` uses `fetch = "controller"`. |
 
 ## API privileges
 
@@ -175,23 +176,44 @@ The validate, mode, owner, and rename steps run after the last piece.
 
 ## pveguest_download
 
-A regular file that the guest downloads over HTTPS and that must have a given
-SHA-256 hash. Read runs `stat` and `sha256sum`. Read removes a missing file from
-state, and the next plan creates it. A hash that differs from `sha256` produces
-a planned rewrite. Destroy deletes the file.
+A regular file that comes from an HTTPS URL, optionally from one member of a
+`.tar.gz` archive, and that must have a given SHA-256 hash. Read runs `stat` and
+`sha256sum`. Read removes a missing file from state, and the next plan creates
+it. A guest file with a hash that differs from `file_sha256` produces a planned
+rewrite. A changed `url`, `sha256`, `archive_member`, or `fetch` produces a
+planned rewrite. A plan does not download anything. Destroy deletes the file.
 
-An apply runs `mkdir -p` for the directory of `path`. The guest then runs
-`curl -fsSL --proto =https` in that directory and writes a temporary file. The
-provider reads `sha256sum` of the temporary file. A mismatch deletes the
-temporary file and fails the apply with an error that states the guest, the URL,
-the expected hash, and the received hash. The file at `path` has its earlier
-content. A match sets mode and owner and renames the temporary file to `path`.
-The download has the exec timeout of 600 seconds.
+An apply runs `mkdir -p` for the directory of `path`. Both fetch modes write a
+temporary file in that directory, compare its hash, set mode and owner, and
+rename it to `path`. A failed step deletes every temporary file. The file at
+`path` has its earlier content.
+
+With `fetch = "guest"`, the guest runs `curl -fsSL --proto =https`. A hash of
+the downloaded object that differs from `sha256` fails the apply with an error
+that states the guest, the URL, the expected hash, and the received hash. With
+`archive_member`, `curl` writes the archive to a temporary file and the guest
+runs `tar -xzf <archive> -O -- <member>` into the second temporary file. The
+guest steps have the exec timeout of 600 seconds each.
+
+With `fetch = "controller"`, the machine that runs OpenTofu downloads `url`
+into the cache directory `$XDG_CACHE_HOME/pveguest`, or `~/.cache/pveguest`.
+The cache file name is the SHA-256 hash. A cached file with a matching hash
+skips the download, and a download with another hash fails the apply. With
+`archive_member`, the controller extracts that member with Go `archive/tar`
+and `compress/gzip`, and rejects a member path that is absolute or contains
+`..`. The controller compresses the payload with gzip and writes the compressed
+stream to a temporary file in the guest in chunks of at most 96 KiB. The guest
+runs `gzip -dc` into the second temporary file. The provider compares the
+SHA-256 hash of that file with the hash that the controller computed from the
+payload. `fetch = "controller"` requires `kind = "lxc"`, because the QEMU guest agent
+API accepts only text.
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `url` | string | yes | | HTTPS URL. The guest needs network access to it. |
-| `sha256` | string | yes | | Expected hash as 64 lowercase hexadecimal characters. |
+| `url` | string | yes | | HTTPS URL. The guest needs network access to it with `fetch = "guest"`. |
+| `sha256` | string | yes | | Expected hash of the object at `url` as 64 lowercase hexadecimal characters. With `archive_member`, the hash of the archive. |
+| `fetch` | string | no | `guest` | `guest` runs `curl` in the guest. `controller` downloads on the machine that runs OpenTofu and sends the file through the exec API. |
+| `archive_member` | string | no | | Relative path of one file inside a `.tar.gz` archive at `url`. The installed file is that member. |
 | `path` | string | yes | | Absolute path. An apply creates each missing parent directory with mode `0755` and owner `root:root`. A change replaces the resource. |
 | `mode` | string | no | `0644` | Four octal digits. |
 | `owner` | string | no | `root` | User name. |
@@ -199,6 +221,7 @@ The download has the exec timeout of 600 seconds.
 
 | Attribute | Meaning |
 | --- | --- |
+| `file_sha256` | SHA-256 hash of the installed file in the guest. |
 | `write_id` | Random identifier that changes each time an apply writes the file, mode, owner, or group. |
 
 ## pveguest_link
@@ -227,6 +250,29 @@ after destroy.
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `packages` | set of string | yes | Specify Debian package names without version or architecture suffixes. |
+
+## pveguest_deb_packages
+
+Packages that are installed from `.deb` files in the guest, for example files
+that `pveguest_download` writes. Read runs `dpkg-query --show` for each package
+and `dpkg-deb -f <path> Version` for each file. Read removes a package from
+state when it is not installed or its installed version differs from the
+version of its file. A missing file does not remove the package.
+
+An apply installs every missing or different package in one call:
+`apt-get install -y --no-install-recommends --no-download -- <paths>` with
+`DEBIAN_FRONTEND=noninteractive`. The provider runs one apt operation per
+guest at a time. A dependency that the guest lacks fails the apply with the
+error text of apt. Destroy removes the resource from state and leaves the
+packages installed.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `packages` | map of string | yes | Map from Debian package name to the absolute guest path of its `.deb` file. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `deb_versions` | Map from package name to the installed version. |
 
 ## pveguest_systemd_unit
 
@@ -302,6 +348,16 @@ items at the end:
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
 access to `www.rfc-editor.org` over HTTPS.
+
+`TestAccDownloadControllerTransfer`, `TestAccDownloadArchiveMember`, and
+`TestAccDebPackages` serve their objects from a local HTTPS server in the test
+process. The test writes the server certificate to a file and sets
+`controller_ca_file` in the provider block to that file. Each test sets
+`XDG_CACHE_HOME` to a temporary directory. `TestAccDownloadControllerTransfer`
+sends 30 MiB of random data and logs the elapsed time of the apply with
+`t.Logf`. `TestAccDebPackages` builds a package with `dpkg-deb` and skips when
+the controller lacks `dpkg-deb`. It installs and purges the package
+`pveguest-acc-test`.
 
 The last test, `TestAccGuestIsClean`, fails when one of these items is still
 in the guest. `TESTARGS` passes extra arguments to `go test`, for example

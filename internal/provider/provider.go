@@ -24,6 +24,8 @@ type pveguestProvider struct {
 type providerModel struct {
 	Nodes       types.Map   `tfsdk:"nodes"`
 	MaxRequests types.Int64 `tfsdk:"max_requests"`
+
+	ControllerCAFile types.String `tfsdk:"controller_ca_file"`
 }
 
 type nodeModel struct {
@@ -36,6 +38,8 @@ type nodeModel struct {
 type providerData struct {
 	client   *transport.Client
 	aptLocks *guestLocks
+
+	controllerCAFile string
 }
 
 // guestLocks serializes operations per guest. apt and dpkg use one lock
@@ -110,6 +114,11 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 				Description: "Concurrent API requests per hypervisor. The default is 4.",
 				Validators:  []validator.Int64{int64validator.AtLeast(1)},
 			},
+			"controller_ca_file": schema.StringAttribute{
+				Optional: true,
+				Description: "Path of a PEM file with certificate authorities that the controller trusts in addition to " +
+					"the system roots when a pveguest_download with fetch = \"controller\" downloads a URL.",
+			},
 		},
 	}
 }
@@ -124,6 +133,13 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		resp.Diagnostics.AddError(
 			"Unknown provider configuration",
 			"The nodes and max_requests arguments must be known when the provider is configured.",
+		)
+		return
+	}
+	if config.ControllerCAFile.IsUnknown() {
+		resp.Diagnostics.AddError(
+			"Unknown provider configuration",
+			"The controller_ca_file argument must be known when the provider is configured.",
 		)
 		return
 	}
@@ -165,6 +181,8 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	resp.ResourceData = &providerData{
 		client:   client,
 		aptLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+
+		controllerCAFile: config.ControllerCAFile.ValueString(),
 	}
 }
 
@@ -174,6 +192,7 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newDownloadResource,
 		newLinkResource,
 		newAptPackagesResource,
+		newDebPackagesResource,
 		newSystemdUnitResource,
 	}
 }
