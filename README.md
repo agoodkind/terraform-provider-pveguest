@@ -1,7 +1,7 @@
 # terraform-provider-pveguest
 
 `pveguest` is an OpenTofu provider that declares files, downloads, symbolic links, apt
-packages, deb packages, and systemd units inside Proxmox guests. The provider calls the
+packages, deb packages, systemd units, and sysrepo modules and data inside Proxmox guests. The provider calls the
 Proxmox VE API with an API token. A container runs each command through its
 `exec` API, and a VM runs each command through the QEMU guest agent API. The
 provider does not require SSH access to the hypervisor or the guest.
@@ -299,6 +299,89 @@ value triggers the restart.
 Create restarts a unit that is already active when `restart_on` has at least
 one entry.
 
+## pveguest_sysrepo_module
+
+A YANG module in the sysrepo repository of the guest. The guest needs
+`sysrepoctl` from sysrepo 3. The module file must already exist in the guest,
+for example from `pveguest_file`. Read runs `sysrepoctl --list`. Read removes
+the resource from state when the module is not installed. Read stores the
+installed revision and the enabled features, and a difference from the
+declaration produces a planned update. The provider runs one sysrepo operation
+per guest at a time.
+
+The file name is `<module>@<revision>.yang`, and the module name and revision
+come from it. A changed module name replaces the resource. Destroy runs
+`sysrepoctl --uninstall <module>`.
+
+Create and Update run these `sysrepoctl` commands in order:
+
+1. When the module is not installed: `sysrepoctl --install <path> --search-dirs
+   <directory of path> --enable-feature <feature> ...`. A module that another
+   module only imports counts as not installed.
+2. When the module is installed at another revision and `update` is `true`:
+   `sysrepoctl --update <path> --search-dirs <directory of path>`. With
+   `update = false` the apply fails and states both revisions.
+3. When the enabled features differ from `features`: `sysrepoctl --change
+   <module> --enable-feature <feature> ... --disable-feature <feature> ...`.
+
+Each apply then runs `sysrepoctl --list` and fails when the revision or the
+features differ from the declaration.
+
+| Argument | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `path` | string | yes | | Absolute path of the module file in the guest. The directory of the file resolves imports. |
+| `features` | set of string | no | empty | Features to enable. The apply disables every other enabled feature. |
+| `update` | bool | no | `false` | Whether an apply replaces a module that is installed at another revision. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `module` | Module name from the file name. |
+| `revision` | Revision from the file name in the plan, and the installed revision after a refresh. |
+
+## pveguest_sysrepo_data
+
+A subtree of configuration data in the `startup` or `running` datastore of the
+guest. The guest needs `sysrepocfg` from sysrepo 3, and the module that defines
+the data must be installed. Read removes the resource from state when the
+module is not installed.
+
+Create and Update validate `content` as XML and write it to a temporary file in
+the guest. Then they run `sysrepocfg --edit=<temporary file> --datastore
+<datastore> --module <module> --format xml`, which merges the content into the
+datastore, and delete the temporary file. A merge adds and changes nodes and
+removes none. A node in the datastore that `content` omits stays after the
+apply and remains a difference. `content` must define the whole subtree.
+
+Read runs `sysrepocfg --export --datastore <datastore> --xpath <xpath> --format
+xml --defaults explicit`. When the canonical form of the export differs from
+the canonical form of the content in state, Read stores the export as the
+content, and the plan shows an update. `content` must have the form that the
+export prints for `xpath`, including the ancestors of a selected node.
+
+The canonical form is the Go `encoding/xml` token stream with these changes:
+
+- Comments, processing instructions, and directives are dropped.
+- Namespace declarations and prefixes are dropped. Each element and attribute
+  keeps its namespace URI and local name.
+- Attributes are sorted by namespace URI and local name.
+- Whitespace at the start and end of text is trimmed, and text that has only
+  whitespace is dropped. Adjacent text and CDATA sections merge.
+- Element order, list entry order, and text inside the elements stay as they
+  are.
+
+Destroy builds a copy of the content in state with the NETCONF operation
+`remove` on each top-level element and merges it with the same `sysrepocfg
+--edit` command. The command removes the whole subtree of each top-level
+element, including nodes that `content` omits. A destroy with empty content in
+state removes nothing.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `datastore` | string | yes | `startup` or `running`. A change replaces the resource. |
+| `module` | string | yes | Name of the YANG module that defines the content. A change replaces the resource. |
+| `xpath` | string | yes | XPath of the subtree that `content` defines. A change replaces the resource. |
+| `content` | string | yes | XML document with the data of the subtree. |
+
 ## Development
 
 | Command | Action |
@@ -344,6 +427,9 @@ items at the end:
 - The package `hello`. The cleanup purges it.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
+- The sysrepo module `pveguest-acc` and its data in the `running` datastore.
+  `TestAccSysrepoModuleAndData` skips when the guest has no `sysrepoctl` or
+  `sysrepocfg`.
 
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
