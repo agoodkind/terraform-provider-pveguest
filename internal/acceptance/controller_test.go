@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	// 30 MiB, the size of the MWAN binary that the transfer test sends.
+	// Use 30 MiB of random data to measure transfer time for a large payload.
 	transferPayloadBytes = 30 * 1024 * 1024
 
 	debPackageName   = "pveguest-acc-test"
@@ -158,7 +158,6 @@ func TestAccDownloadArchiveMember(t *testing.T) {
 				),
 			},
 			{
-				// A hand edit produces a planned rewrite.
 				PreConfig:        func() { guest.writeFile(path, "edited by hand\n") },
 				Config:           config,
 				ConfigPlanChecks: expectAction("pveguest_download.test", plancheck.ResourceActionUpdate),
@@ -168,8 +167,8 @@ func TestAccDownloadArchiveMember(t *testing.T) {
 	})
 }
 
-// The post-test destroy reuses the last configuration, and an invalid
-// archive_member in an apply test fails that destroy.
+// The acceptance harness reuses the last configuration during cleanup.
+// Keep invalid archive_member values in a plan-only test.
 func TestAccDownloadRejectsUnsafeArchiveMember(t *testing.T) {
 	guest := newTestGuest(t)
 	config := guest.providerBlock() + guest.controllerDownloadBlock(
@@ -246,7 +245,6 @@ resource "pveguest_deb_packages" "test" {
 	})
 }
 
-// buildDeb runs dpkg-deb on the controller to build a minimal package.
 func buildDeb(t *testing.T) []byte {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "package")
