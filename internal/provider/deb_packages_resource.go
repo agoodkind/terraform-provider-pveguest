@@ -215,12 +215,15 @@ func (r *debPackagesResource) installPending(
 		return fileVersions, nil
 	}
 
-	// --no-download makes a dependency that the guest lacks fail the install
-	// with the apt error.
+	// --no-download blocks apt from copying local .deb files into its archive cache.
+	// Disable both repository source locations to reject dependencies that need a download.
 	arguments := append(
 		[]string{
-			"install", "-y", "--no-install-recommends", "--no-download", "--allow-downgrades",
-			"-o", "DPkg::Lock::Timeout=300", "--",
+			"install", "-y", "--no-install-recommends", "--allow-downgrades",
+			"-o", "DPkg::Lock::Timeout=300",
+			"-o", "Dir::Etc::SourceList=/dev/null",
+			"-o", "Dir::Etc::SourceParts=/nonexistent",
+			"--",
 		},
 		pendingPaths...,
 	)
