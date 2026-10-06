@@ -217,7 +217,13 @@ func (r *debPackagesResource) installPending(
 
 	// --no-download makes a dependency that the guest lacks fail the install
 	// with the apt error.
-	arguments := append([]string{"install", "-y", "--no-install-recommends", "--no-download", "--"}, pendingPaths...)
+	arguments := append(
+		[]string{
+			"install", "-y", "--no-install-recommends", "--no-download", "--allow-downgrades",
+			"-o", "DPkg::Lock::Timeout=300", "--",
+		},
+		pendingPaths...,
+	)
 	if err := runChecked(ctx, r.data.client, guest, aptCommand(arguments...)); err != nil {
 		return nil, err
 	}
