@@ -197,8 +197,10 @@ guest steps have the exec timeout of 600 seconds each.
 
 With `fetch = "controller"`, the machine that runs OpenTofu downloads `url`
 into the cache directory `$XDG_CACHE_HOME/pveguest`, or `~/.cache/pveguest`.
-The cache file name is the SHA-256 hash. A cached file with a matching hash
-skips the download, and a download with another hash fails the apply. With
+The cache file name is the SHA-256 hash. The provider process serializes
+requests for the same hash. Each request checks the cache after acquiring
+the hash lock. A matching cached file skips the download, and a download
+with another hash fails the apply. With
 `archive_member`, the controller extracts that member with Go `archive/tar`
 and `compress/gzip`, and rejects a member path that is absolute or contains
 `..`. The controller compresses the payload with gzip and writes the compressed
@@ -243,6 +245,7 @@ An apply with at least one missing package runs `apt-get update` and then
 `apt-get install -y --no-install-recommends` with
 `DEBIAN_FRONTEND=noninteractive`. A failed `apt-get update` fails the apply
 with its own error. The provider runs one apt operation per guest at a time.
+apt-get waits up to 300 seconds for the package lock during installation.
 
 A package remains installed after its name is removed from `packages` and
 after destroy.
@@ -259,12 +262,11 @@ and `dpkg-deb -f <path> Version` for each file. Read removes a package from
 state when it is not installed or its installed version differs from the
 version of its file. A missing file does not remove the package.
 
-An apply installs every missing or different package in one call:
-`apt-get install -y --no-install-recommends --no-download -- <paths>` with
-`DEBIAN_FRONTEND=noninteractive`. The provider runs one apt operation per
-guest at a time. A dependency that the guest lacks fails the apply with the
-error text of apt. Destroy removes the resource from state and leaves the
-packages installed.
+An apply installs every missing or different package from its declared file.
+apt-get permits downgrades and waits up to 300 seconds for the package lock.
+The install excludes recommended packages and rejects dependencies that
+require a download. The provider serializes apt operations per guest.
+Destroy removes the resource from state and retains the installed packages.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -280,9 +282,11 @@ The enabled state and the active state of one unit. Read runs
 `systemctl is-enabled` and `systemctl is-active`. Read removes a unit from
 state when its unit file does not exist.
 
-Create and Update run `systemctl daemon-reload` and then `enable`, `disable`,
-`start`, `stop`, or `restart` as the declaration requires. Create fails when
-the unit file does not exist. Destroy removes the resource from state.
+Create and Update run `systemctl daemon-reload` and reconcile the declared
+unit state. When `restart_on` changes and the unit remains enabled, the
+provider runs `systemctl reenable` to rebuild its installation links before
+reconciling its active state. Create fails when the unit file does not exist.
+Destroy removes the resource from state.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -296,8 +300,9 @@ reads. The `sha256` of a file is the same before a hand edit and after the
 rewrite that repairs it. The `write_id` changes at each write, and the changed
 value triggers the restart.
 
-Create restarts a unit that is already active when `restart_on` has at least
-one entry.
+Create requests a restart when `restart_on` has at least one entry. It also
+rebuilds installation links when the unit is already enabled and the
+declaration requires it to remain enabled.
 
 ## Development
 

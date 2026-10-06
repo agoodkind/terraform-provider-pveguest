@@ -214,6 +214,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 			return err
 		}
 	}
+	// Rebuild installation links after dependency changes.
 	if current == enablementEnabled && wantEnabled && restart {
 		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("reenable", "--", name)); err != nil {
 			return err

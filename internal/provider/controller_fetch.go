@@ -140,6 +140,7 @@ func cachedArchive(ctx context.Context, caFile string, url string, wantHash stri
 		return "", fmt.Errorf("create the download cache directory: %w", err)
 	}
 	cachedPath := filepath.Join(directory, wantHash)
+	// Check the cache after acquiring the hash lock; another request may have filled it.
 	unlock := downloadLocks.lock(wantHash)
 	defer unlock()
 	if fileHasHash(cachedPath, wantHash) {
