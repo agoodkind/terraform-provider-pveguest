@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/listvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwpath "github.com/hashicorp/terraform-plugin-framework/path"
@@ -68,7 +69,7 @@ type fileModel struct {
 	Mode             types.String `tfsdk:"mode"`
 	Owner            types.String `tfsdk:"owner"`
 	Group            types.String `tfsdk:"group"`
-	Validate         types.String `tfsdk:"validate"`
+	Validate         types.List   `tfsdk:"validate"`
 	SHA256           types.String `tfsdk:"sha256"`
 	WriteID          types.String `tfsdk:"write_id"`
 }
@@ -150,12 +151,14 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 					stringvalidator.RegexMatches(accountNamePattern, "must be a group name"),
 				},
 			},
-			"validate": schema.StringAttribute{
-				Optional: true,
-				Description: "Shell command that runs in the guest on the temporary file before the rename. " +
-					"The shell-quoted path of the temporary file replaces %s. A nonzero exit status fails the apply.",
-				Validators: []validator.String{
-					stringvalidator.RegexMatches(regexp.MustCompile(validatePathPlaceholder), "must contain %s"),
+			"validate": schema.ListAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				Description: "Command and arguments that run in the guest without a shell before the rename. " +
+					"The path of the temporary file replaces each %s element. A nonzero exit status fails the apply.",
+				Validators: []validator.List{
+					listvalidator.SizeAtLeast(1),
+					listvalidator.ValueStringsAre(stringvalidator.LengthAtLeast(1)),
 				},
 			},
 			"sha256": schema.StringAttribute{
@@ -394,8 +397,12 @@ func (r *fileResource) writeFile(ctx context.Context, guest transport.Guest, pla
 		return err
 	}
 	if !plan.Validate.IsNull() {
-		validateScript := validateCommandLine(plan.Validate.ValueString(), temporaryPath)
-		result, err := runGuest(ctx, r.data.client, guest, guestCommand("sh", "-c", validateScript))
+		validateArgv, err := validateArguments(ctx, plan.Validate, temporaryPath)
+		if err != nil {
+			r.removeTemporaryFile(ctx, guest, temporaryPath)
+			return err
+		}
+		result, err := runGuest(ctx, r.data.client, guest, transport.Command{Argv: validateArgv})
 		if err != nil {
 			r.removeTemporaryFile(ctx, guest, temporaryPath)
 			return err
@@ -608,8 +615,19 @@ func newWriteID() (string, error) {
 	return hex.EncodeToString(identifier), nil
 }
 
-func validateCommandLine(template string, temporaryPath string) string {
-	return strings.ReplaceAll(template, validatePathPlaceholder, transport.Quote(temporaryPath))
+func validateArguments(ctx context.Context, validate types.List, temporaryPath string) ([]string, error) {
+	var elements []string
+	if diagnostics := validate.ElementsAs(ctx, &elements, false); diagnostics.HasError() {
+		return nil, fmt.Errorf("read validate: %s", diagnostics.Errors()[0].Detail())
+	}
+	argv := make([]string, 0, len(elements))
+	for _, element := range elements {
+		if element == validatePathPlaceholder {
+			element = temporaryPath
+		}
+		argv = append(argv, element)
+	}
+	return argv, nil
 }
 
 func hashHex(content []byte) string {

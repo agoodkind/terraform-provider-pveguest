@@ -217,21 +217,30 @@ func TestAccFileValidate(t *testing.T) {
 	// The validation path includes a space and an apostrophe to exercise quoting.
 	fileName := "it's validated.conf"
 	path := testDirectory + "/" + fileName
-	validate := `validate = "grep -q good %s"`
+	passing := `validate = ["/bin/true", "%s"]`
+	failing := `validate = ["/bin/false", "%s"]`
+	changedPassing := `validate = ["/bin/true", "%s", "extra"]`
 	goodContent := "good\n"
+	var firstWriteID string
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: guest.fileConfig(path, goodContent, validate),
-				Check:  checkGuest(guest.expectFileContent(path, goodContent)),
+				Config: guest.fileConfig(path, goodContent, passing),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					checkGuest(guest.expectFileContent(path, goodContent)),
+					resource.TestCheckResourceAttrWith("pveguest_file.test", "write_id", func(value string) error {
+						firstWriteID = value
+						return nil
+					}),
+				),
 			},
 			{
 				// AC6: a failing validate command fails the apply. OpenTofu
 				// wraps the diagnostic text, and each gap in the pattern
 				// matches a line break.
-				Config:      guest.fileConfig(path, "bad\n", validate),
+				Config:      guest.fileConfig(path, "bad\n", failing),
 				ExpectError: regexp.MustCompile(`(?s)validate\s+command\s+for\s+.+exited\s+with\s+status\s+1`),
 			},
 			{
@@ -244,10 +253,14 @@ func TestAccFileValidate(t *testing.T) {
 						t.Fatalf("directory contains %q after the failed apply", listing)
 					}
 				},
-				Config: guest.fileConfig(path, goodContent, validate),
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
-				},
+				Config:           guest.fileConfig(path, goodContent, changedPassing),
+				ConfigPlanChecks: expectAction("pveguest_file.test", plancheck.ResourceActionUpdate),
+				Check: resource.TestCheckResourceAttrWith("pveguest_file.test", "write_id", func(value string) error {
+					if value != firstWriteID {
+						return fmt.Errorf("write_id is %q, want %q", value, firstWriteID)
+					}
+					return nil
+				}),
 			},
 		},
 	})
