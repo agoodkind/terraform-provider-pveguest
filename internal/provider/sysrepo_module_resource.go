@@ -47,13 +47,13 @@ func (r *sysrepoModuleResource) Metadata(_ context.Context, req resource.Metadat
 
 func (r *sysrepoModuleResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "A YANG module that is installed in the sysrepo repository of a guest, with its enabled features. " +
+		Description: "This resource manages an installed YANG module and its enabled features in a guest. " +
 			"Destroy uninstalls the module.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"path": schema.StringAttribute{
 				Required: true,
-				Description: "Absolute path of the module file in the guest. The file name has the form " +
-					"<module>@<revision>.yang. The directory of the file is the search directory for imports.",
+				Description: "The module file must exist at this absolute guest path and use the name " +
+					"<module>@<YYYY-MM-DD>.yang. sysrepoctl resolves imports from its directory.",
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path that ends in a file name"),
 				},
@@ -63,7 +63,7 @@ func (r *sysrepoModuleResource) Schema(_ context.Context, _ resource.SchemaReque
 				Computed:    true,
 				ElementType: types.StringType,
 				Default:     setdefault.StaticValue(types.SetValueMust(types.StringType, []attr.Value{})),
-				Description: "Features that are enabled in the installed module. The default is none.",
+				Description: "Installation enables these features. With update = true, apply also reconciles features of installed modules.",
 				Validators: []validator.Set{
 					setvalidator.ValueStringsAre(
 						stringvalidator.RegexMatches(yangIdentifierPattern, "must be a YANG feature name"),
@@ -74,16 +74,16 @@ func (r *sysrepoModuleResource) Schema(_ context.Context, _ resource.SchemaReque
 				Optional: true,
 				Computed: true,
 				Default:  booldefault.StaticBool(false),
-				Description: "Whether an apply replaces an installed module that has another revision than the file. " +
-					"The default is false, and an apply then fails for a module at another revision.",
+				Description: "Set true to reconcile the revision and features of an installed module. " +
+					"The default is false, which preserves installed modules.",
 			},
 			"module": schema.StringAttribute{
 				Computed:    true,
-				Description: "Module name from the file name. A changed name replaces the resource.",
+				Description: "The provider parses the module name from the file name. A changed name replaces the resource.",
 			},
 			"revision": schema.StringAttribute{
 				Computed:    true,
-				Description: "Revision from the file name in the plan, and the installed revision after a refresh.",
+				Description: "The plan uses the file name revision. With update = true, refresh records the installed revision.",
 			},
 		}),
 	}
@@ -142,8 +142,6 @@ func (r *sysrepoModuleResource) Create(ctx context.Context, req resource.CreateR
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Read removes the resource from state when the module is not installed. A
-// revision or feature set that differs from the declaration plans an update.
 func (r *sysrepoModuleResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state sysrepoModuleModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -230,10 +228,8 @@ func (r *sysrepoModuleResource) apply(ctx context.Context, plan *sysrepoModuleMo
 	return diagnostics
 }
 
-// converge installs the module when it is absent, updates it when it has
-// another revision and update is set, and then enables and disables features
-// until the installed features equal the declared features. It fails when the
-// installed module does not match the declaration afterwards.
+// Preserve installed modules when update is false. Otherwise verify the revision
+// and enabled features after sysrepoctl succeeds.
 func (r *sysrepoModuleResource) converge(
 	ctx context.Context,
 	guest transport.Guest,

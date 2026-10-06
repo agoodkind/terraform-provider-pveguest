@@ -43,9 +43,8 @@ type providerData struct {
 	controllerCAFile string
 }
 
-// guestLocks serializes operations per guest. apt and dpkg use one lock
-// file per guest and fail when two processes run at once. The sysrepo tools
-// change one repository per guest and wait for each other with a timeout.
+// guestLocks serializes mutations for one guest within this provider instance.
+// Separate provider instances do not share these locks.
 type guestLocks struct {
 	mutex sync.Mutex
 	locks map[transport.Guest]*sync.Mutex

@@ -21,8 +21,7 @@ const (
 	datastoreStartup = "startup"
 	datastoreRunning = "running"
 
-	// The export prints only the nodes that the datastore stores explicitly.
-	// A default value that sysrepo supplies is not a difference.
+	// Exclude implicit defaults from drift comparison.
 	explicitDefaultsMode = "explicit"
 )
 
@@ -49,13 +48,12 @@ func (r *sysrepoDataResource) Metadata(_ context.Context, req resource.MetadataR
 
 func (r *sysrepoDataResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "The configuration of one YANG module in a sysrepo datastore of a guest. " +
-			"An apply replaces the configuration of the module with the content. " +
-			"Destroy removes the configuration of the module.",
+		Description: "This resource manages the complete configuration of one YANG module in a guest datastore. " +
+			"Apply replaces that configuration. Destroy removes it.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"datastore": schema.StringAttribute{
 				Required:    true,
-				Description: "Datastore that stores the data: startup or running. A change replaces the resource.",
+				Description: "Select startup or running. A change replaces the resource.",
 				Validators: []validator.String{
 					stringvalidator.OneOf(datastoreStartup, datastoreRunning),
 				},
@@ -63,7 +61,7 @@ func (r *sysrepoDataResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 			"module": schema.StringAttribute{
 				Required:    true,
-				Description: "Name of the YANG module that defines the content. A change replaces the resource.",
+				Description: "The installed YANG module must define the content. A changed module name replaces the resource.",
 				Validators: []validator.String{
 					stringvalidator.RegexMatches(yangIdentifierPattern, "must be a YANG module name"),
 				},
@@ -71,9 +69,9 @@ func (r *sysrepoDataResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 			"content": schema.StringAttribute{
 				Required: true,
-				Description: "XML document with the whole configuration of the module, in the form that " +
-					"sysrepocfg --export prints. Whitespace between elements, comments, namespace prefixes, and " +
-					"the order of attributes are not differences.",
+				Description: "Supply the complete module configuration as XML compatible with sysrepocfg --export. " +
+					"Comparison ignores comments, namespace prefixes, attribute order, and surrounding text whitespace. " +
+					"Apply removes omitted nodes.",
 			},
 		}),
 	}
@@ -96,9 +94,7 @@ func (r *sysrepoDataResource) Create(ctx context.Context, req resource.CreateReq
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Read exports the configuration of the module. When the export differs from
-// the content in state, Read stores the export as the content. The plan then
-// shows an update that imports the declared content.
+// Preserve the declared XML formatting when its canonical form matches the export.
 func (r *sysrepoDataResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state sysrepoDataModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
@@ -113,8 +109,7 @@ func (r *sysrepoDataResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 	if _, installed := sysrepo.FindImplemented(modules, state.Module.ValueString()); !installed {
-		// An uninstalled module takes its data away, and sysrepocfg rejects an
-		// unknown module.
+		// sysrepocfg cannot export an uninstalled module.
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -164,8 +159,7 @@ func (r *sysrepoDataResource) Update(ctx context.Context, req resource.UpdateReq
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Delete imports an empty document, which removes the configuration of the
-// module in the datastore.
+// Delete requests removal of module data with an empty import.
 func (r *sysrepoDataResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state sysrepoDataModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)

@@ -18,7 +18,6 @@ const (
 	testSysrepoEditXML  = `<settings xmlns="urn:pveguest:acc"><note>added by hand</note></settings>`
 )
 
-// The module file for a revision. The second revision adds one leaf.
 func testSysrepoYang(revision string) string {
 	extraLeaf := ""
 	if revision == testSysrepoSecond {
@@ -42,8 +41,6 @@ func testSysrepoModulePath(revision string) string {
 	return fmt.Sprintf("%s/%s@%s.yang", testDirectory, testSysrepoModule, revision)
 }
 
-// useSysrepo skips the test when the guest has no sysrepoctl, and removes the
-// test module and its data after the test.
 func (g *testGuest) useSysrepo() {
 	g.t.Helper()
 	probe := g.run(nil, "sh", "-c", "command -v sysrepoctl && command -v sysrepocfg")
@@ -196,7 +193,7 @@ func TestAccSysrepoModuleAndData(t *testing.T) {
 				),
 			},
 			{
-				// A node that the content omits is a difference. The apply removes it.
+				// Replacement must remove a node added outside OpenTofu.
 				PreConfig: func() {
 					guest.writeFile(testDirectory+"/edit.xml", testSysrepoEditXML)
 					guest.mustRun(
@@ -215,7 +212,6 @@ func TestAccSysrepoModuleAndData(t *testing.T) {
 				}),
 			},
 			{
-				// An uninstalled module is a normal Read result: the plan installs it again.
 				PreConfig: func() {
 					guest.mustRun("sysrepoctl", "--uninstall", testSysrepoModule)
 				},
@@ -229,7 +225,6 @@ func TestAccSysrepoModuleAndData(t *testing.T) {
 				}),
 			},
 			{
-				// A file with a newer revision updates the installed module.
 				Config:           guest.sysrepoConfig(testSysrepoSecond, testSysrepoFirstXML),
 				ConfigPlanChecks: expectAction(moduleAddress, plancheck.ResourceActionUpdate),
 				Check: resource.ComposeAggregateTestCheckFunc(

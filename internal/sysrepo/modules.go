@@ -17,9 +17,8 @@ const (
 	listFlagsColumn     = 2
 	listFeaturesColumn  = 6
 
-	// The flags column starts with the upper-case letter (hexadecimal 49) for
-	// an installed module. A module that another module only imports has the
-	// lower-case letter, and a submodule has a different letter.
+	// Uppercase I identifies an implemented module. Lowercase i identifies
+	// a module that sysrepo imports but does not implement.
 	implementedFlag = "\x49"
 
 	moduleFileSuffixText = ".yang"
@@ -30,14 +29,13 @@ var ErrNoModuleTable = errors.New("the sysrepoctl --list output has no module ta
 
 var moduleFilePattern = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_.-]*)@([0-9]{4}-[0-9]{2}-[0-9]{2})\.yang$`)
 
-// ModuleFile is the module name and revision that a YANG file name states.
+// ModuleFile identifies the module and revision encoded in a YANG file name.
 type ModuleFile struct {
 	Module   string
 	Revision string
 }
 
-// ParseModuleFileName reads the module name and the revision from a file name
-// of the form <module>@<revision>.yang.
+// ParseModuleFileName requires <module>@<YYYY-MM-DD>.yang.
 func ParseModuleFileName(filePath string) (ModuleFile, error) {
 	base := path.Base(filePath)
 	match := moduleFilePattern.FindStringSubmatch(base)
@@ -50,20 +48,18 @@ func ParseModuleFileName(filePath string) (ModuleFile, error) {
 	return ModuleFile{Module: match[1], Revision: match[2]}, nil
 }
 
-// InstalledModule is one row of the sysrepoctl module list.
+// InstalledModule records a module revision, implementation state, and enabled features.
 type InstalledModule struct {
 	Name     string
 	Revision string
 	// Implemented is true for a module that sysrepo installed. A module that
 	// another module only imports is not implemented.
 	Implemented bool
-	// Features are the enabled features, in the order that the list prints them.
+	// Features lists enabled features in sysrepoctl output order.
 	Features []string
 }
 
-// ParseModuleList reads the output of `sysrepoctl --list`. The output has a
-// repository line, a header line, a ruler, one row per module or submodule,
-// and a flag legend. Columns are separated by "|".
+// ParseModuleList expects the seven-column sysrepoctl table and skips submodules.
 func ParseModuleList(output string) ([]InstalledModule, error) {
 	var modules []InstalledModule
 	inTable := false
@@ -101,7 +97,7 @@ func ParseModuleList(output string) ([]InstalledModule, error) {
 	return modules, nil
 }
 
-// FindImplemented returns the implemented module with the name.
+// FindImplemented returns false for absent modules and modules that sysrepo only imports.
 func FindImplemented(modules []InstalledModule, name string) (InstalledModule, bool) {
 	for _, module := range modules {
 		if module.Name == name && module.Implemented {

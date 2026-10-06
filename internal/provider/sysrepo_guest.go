@@ -18,8 +18,6 @@ import (
 const (
 	sysrepoTimeoutSeconds = 300
 
-	// The temporary import file of sysrepocfg lives outside the sysrepo
-	// repository.
 	sysrepoImportTemplatePath = "/tmp/sysrepo-import.xml"
 )
 
@@ -61,7 +59,6 @@ func listSysrepoModules(
 	return modules, nil
 }
 
-// stringValues returns the sorted elements of a set of strings.
 func stringValues(ctx context.Context, set types.Set) ([]string, diag.Diagnostics) {
 	values := make([]string, 0, len(set.Elements()))
 	diagnostics := set.ElementsAs(ctx, &values, false)
@@ -78,7 +75,6 @@ func stringSetOf(ctx context.Context, values []string) (types.Set, diag.Diagnost
 	return types.SetValueFrom(ctx, types.StringType, sorted)
 }
 
-// difference returns the elements of left that right lacks.
 func difference(left []string, right []string) []string {
 	var missing []string
 	for _, value := range left {
@@ -89,10 +85,8 @@ func difference(left []string, right []string) []string {
 	return missing
 }
 
-// runSysrepocfgImport writes the document to a temporary file in the guest,
-// replaces the configuration of the module in the datastore with it using
-// sysrepocfg, and deletes the temporary file. An empty document removes the
-// configuration of the module.
+// An empty import requests removal of the module configuration.
+// The helper attempts to delete the temporary file after write or import failure.
 func runSysrepocfgImport(
 	ctx context.Context,
 	client *transport.Client,

@@ -1,5 +1,4 @@
-// Package sysrepo parses and builds the text that the sysrepo command-line
-// tools read and write.
+// Package sysrepo parses module listings and compares XML from sysrepo tools.
 package sysrepo
 
 import (
@@ -21,15 +20,11 @@ const (
 	namespaceAttr = "xmlns"
 )
 
-// CanonicalXML returns the canonical form of an XML document. Two documents
-// with the same data have the same canonical form.
-//
-// The canonical form has one line per token of the Go encoding/xml token
-// stream. It keeps element names with their namespace URIs, attributes sorted
-// by namespace URI and name, and text. It drops comments, processing
-// instructions, directives, namespace declarations, prefixes, whitespace around
-// text, and text that is only whitespace. A document with several top-level
-// elements is valid, and an empty document returns an empty string.
+// CanonicalXML builds a comparison string from XML tokens. It ignores comments,
+// processing instructions, and directives. It preserves namespace URIs and
+// element order, sorts attributes, and combines adjacent text and CDATA before
+// trimming text boundaries. It accepts multiple top-level elements and returns
+// an empty string for empty input.
 func CanonicalXML(content string) (string, error) {
 	decoder := xml.NewDecoder(strings.NewReader(content))
 	var canonical strings.Builder

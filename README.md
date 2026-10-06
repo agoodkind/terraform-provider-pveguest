@@ -301,83 +301,62 @@ one entry.
 
 ## pveguest_sysrepo_module
 
-A YANG module in the sysrepo repository of the guest. The guest needs
-`sysrepoctl` from sysrepo 3. The module file must already exist in the guest,
-for example from `pveguest_file`. Read runs `sysrepoctl --list`. Read removes
-the resource from state when the module is not installed. Read stores the
-installed revision and the enabled features, and a difference from the
-declaration produces a planned update. The provider runs one sysrepo operation
-per guest at a time.
+This resource manages a YANG module and its enabled features in a guest.
+The guest requires sysrepo 3 and `sysrepoctl`. The module file must already
+exist at `path`, for example through `pveguest_file`.
 
-The file name is `<module>@<revision>.yang`, and the module name and revision
-come from it. A changed module name replaces the resource. Destroy runs
-`sysrepoctl --uninstall <module>`.
+| Operation | Behavior |
+| --- | --- |
+| Create | The provider installs an absent module with `sysrepoctl --install`. An imported but unimplemented module also requires installation. |
+| Update | The provider runs `sysrepoctl --update` when the installed revision differs and `update = true`. With `update = false`, the provider preserves an installed module. |
+| Feature changes | Installation enables the declared features. With `update = true`, the provider also reconciles features of installed modules through `sysrepoctl --change`. |
+| Read | The provider removes an uninstalled module from state. With `update = true`, refresh also records the installed revision and features. |
+| Destroy | The provider runs `sysrepoctl --uninstall`. |
 
-Create and Update run these `sysrepoctl` commands in order:
-
-1. When the module is not installed: `sysrepoctl --install <path> --search-dirs
-   <directory of path> --enable-feature <feature> ...`. A module that another
-   module only imports counts as not installed.
-2. When the module is installed at another revision and `update` is `true`:
-   `sysrepoctl --update <path> --search-dirs <directory of path>`. With
-   `update = false` the apply fails and states both revisions.
-3. When the enabled features differ from `features`: `sysrepoctl --change
-   <module> --enable-feature <feature> ... --disable-feature <feature> ...`.
-
-Each apply then runs `sysrepoctl --list` and fails when the revision or the
-features differ from the declaration.
+The apply verifies the installed revision and features after mutation.
+One provider instance serializes sysrepo mutations per guest. Reads and
+separate provider instances do not share that serialization.
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `path` | string | yes | | Absolute path of the module file in the guest. The directory of the file resolves imports. |
-| `features` | set of string | no | empty | Features to enable. The apply disables every other enabled feature. |
-| `update` | bool | no | `false` | Whether an apply replaces a module that is installed at another revision. |
+| `path` | string | yes | | The absolute guest path must end in `<module>@<YYYY-MM-DD>.yang`. The file directory is the import search directory. |
+| `features` | set of string | no | empty | Installation enables this set. With `update = true`, apply also reconciles the enabled features of installed modules. |
+| `update` | bool | no | `false` | A true value reconciles the revision and features of an installed module. A false value preserves it. |
 
 | Attribute | Meaning |
 | --- | --- |
-| `module` | Module name from the file name. |
-| `revision` | Revision from the file name in the plan, and the installed revision after a refresh. |
+| `module` | The provider parses the module name from the file name. A changed name replaces the resource. |
+| `revision` | The plan uses the file name revision. With `update = true`, refresh records the installed revision. |
 
 ## pveguest_sysrepo_data
 
-The whole configuration of one YANG module in the `startup` or `running`
-datastore of the guest. The guest needs `sysrepocfg` from sysrepo 3, and the
-module must be installed. Read removes the resource from state when the module
-is not installed.
+This resource replaces the complete configuration of one installed YANG
+module in the guest's `startup` or `running` datastore. The guest requires
+sysrepo 3 and `sysrepocfg`. Apply removes nodes omitted from `content`.
 
-Create and Update validate `content` as XML with at least one element and write
-it to a temporary file in the guest. Then they run `sysrepocfg
---import=<temporary file> --datastore <datastore> --module <module> --format
-xml` and delete the temporary file. The import replaces the configuration of
-the module in the datastore with `content`. A node that `content` omits is
-removed. `content` must define the whole configuration of the module.
+Create and Update require XML with at least one element. The provider writes
+a temporary guest file and imports it with `sysrepocfg --import`, selecting
+the datastore, module, and XML format. The provider attempts to delete the
+temporary file after the write or import finishes. Destroy imports an empty file
+to remove the module configuration.
 
-Read runs `sysrepocfg --export --datastore <datastore> --module <module>
---format xml --defaults explicit`. When the canonical form of the export differs
-from the canonical form of the content in state, Read stores the export as the
-content, and the plan shows an update. A node that a hand edit added is such a
-difference. `content` must have the form that the export prints.
+Read exports the module with `sysrepocfg --export --defaults explicit`.
+Read removes an uninstalled module from state. A different canonical export
+replaces `content` in state, and the next plan restores the declaration.
+Matching canonical content retains the declared XML formatting.
 
-The canonical form is the Go `encoding/xml` token stream with these changes:
-
-- Comments, processing instructions, and directives are dropped.
-- Namespace declarations and prefixes are dropped. Each element and attribute
-  keeps its namespace URI and local name.
-- Attributes are sorted by namespace URI and local name.
-- Whitespace at the start and end of text is trimmed, and text that has only
-  whitespace is dropped. Adjacent text and CDATA sections merge.
-- Element order, list entry order, and text inside the elements stay as they
-  are.
-
-Destroy runs the same `sysrepocfg --import` command with an empty file. The
-`sysrepocfg` source accepts an empty import file and calls `sr_replace_config`
-without data, which removes the configuration of the module in the datastore.
+Canonical comparison preserves element order, namespace URIs, local names,
+and text after trimming its leading and trailing whitespace. It combines
+adjacent text and CDATA sections, sorts attributes by namespace URI and local
+name, and ignores whitespace-only text, comments, processing instructions,
+directives, namespace prefixes, and namespace declarations. Content must use
+a representation compatible with the export.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
-| `datastore` | string | yes | `startup` or `running`. A change replaces the resource. |
-| `module` | string | yes | Name of the YANG module that defines the content. A change replaces the resource. |
-| `content` | string | yes | XML document with the whole configuration of the module. |
+| `datastore` | string | yes | Select `startup` or `running`. A change replaces the resource. |
+| `module` | string | yes | The installed YANG module must define the content. A change replaces the resource. |
+| `content` | string | yes | Supply the complete module configuration as XML. |
 
 ## Development
 
