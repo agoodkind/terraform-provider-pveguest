@@ -176,7 +176,10 @@ func (r *aptPackagesResource) install(ctx context.Context, plan aptPackagesModel
 		return diagnostics
 	}
 
-	installArguments := append([]string{"install", "-y", "--no-install-recommends", "--"}, missing...)
+	installArguments := append(
+		[]string{"install", "-y", "--no-install-recommends", "-o", "DPkg::Lock::Timeout=300", "--"},
+		missing...,
+	)
 	if err := runChecked(ctx, r.data.client, guest, aptCommand(installArguments...)); err != nil {
 		diagnostics.AddError("apt-get install failed", err.Error())
 		return diagnostics
