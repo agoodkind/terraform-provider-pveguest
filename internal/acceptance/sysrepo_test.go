@@ -104,6 +104,58 @@ resource "pveguest_sysrepo_data" "test" {
 `, testSysrepoModulePath(revision), testSysrepoYang(revision), testSysrepoFeature, dataContent)
 }
 
+func (g *testGuest) sysrepoModuleOnlyConfig(revision string) string {
+	return g.providerBlock() + fmt.Sprintf(`
+resource "pveguest_file" "module" {
+  node    = local.node
+  vmid    = local.vmid
+  kind    = local.kind
+  path    = %q
+  content = %q
+}
+
+resource "pveguest_sysrepo_module" "test" {
+  node = local.node
+  vmid = local.vmid
+  kind = local.kind
+  path = pveguest_file.module.path
+}
+`, testSysrepoModulePath(revision), testSysrepoYang(revision))
+}
+
+func TestAccSysrepoModuleWithoutUpdateKeepsInstalledRevision(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useSysrepo()
+	guest.useTestDirectory()
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				PreConfig: func() {
+					guest.writeFile(testSysrepoModulePath(testSysrepoSecond), testSysrepoYang(testSysrepoSecond))
+					guest.mustRun(
+						"sysrepoctl", "--install", testSysrepoModulePath(testSysrepoSecond),
+						"--search-dirs", testDirectory,
+					)
+				},
+				Config: guest.sysrepoModuleOnlyConfig(testSysrepoFirst),
+				Check: checkGuest(func() error {
+					row := guest.sysrepoModuleRow()
+					if !strings.Contains(row, testSysrepoSecond) {
+						return fmt.Errorf("module row is %q", row)
+					}
+					return nil
+				}),
+			},
+			{
+				Config:   guest.sysrepoModuleOnlyConfig(testSysrepoFirst),
+				PlanOnly: true,
+			},
+		},
+	})
+}
+
 func TestAccSysrepoModuleAndData(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useSysrepo()

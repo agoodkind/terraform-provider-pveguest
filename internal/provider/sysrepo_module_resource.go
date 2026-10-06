@@ -162,6 +162,9 @@ func (r *sysrepoModuleResource) Read(ctx context.Context, req resource.ReadReque
 		resp.State.RemoveResource(ctx)
 		return
 	}
+	if keepsInstalledModule(state.Update.ValueBool(), found) {
+		return
+	}
 
 	features, diagnostics := stringSetOf(ctx, installed.Features)
 	resp.Diagnostics.Append(diagnostics...)
@@ -247,6 +250,9 @@ func (r *sysrepoModuleResource) converge(
 		return err
 	}
 	installed, isInstalled := sysrepo.FindImplemented(modules, file.Module)
+	if keepsInstalledModule(plan.Update.ValueBool(), isInstalled) {
+		return nil
+	}
 	switch {
 	case !isInstalled:
 		arguments := []string{"--install", modulePath, "--search-dirs", searchDirectory}
@@ -257,14 +263,6 @@ func (r *sysrepoModuleResource) converge(
 			return err
 		}
 	case installed.Revision != file.Revision:
-		if !plan.Update.ValueBool() {
-			revisionErr := fmt.Errorf(
-				"%s: module %s is installed at revision %s and the file has revision %s. Set update = true to replace it",
-				guest, file.Module, installed.Revision, file.Revision,
-			)
-			slog.ErrorContext(ctx, "sysrepo module has another revision and update is not set", "err", revisionErr)
-			return revisionErr
-		}
 		updateCommand := sysrepoctlCommand("--update", modulePath, "--search-dirs", searchDirectory)
 		if err := runChecked(ctx, client, guest, updateCommand); err != nil {
 			return err
@@ -305,6 +303,10 @@ func (r *sysrepoModuleResource) converge(
 		return mismatchErr
 	}
 	return nil
+}
+
+func keepsInstalledModule(update bool, isInstalled bool) bool {
+	return isInstalled && !update
 }
 
 func (r *sysrepoModuleResource) requireInstalled(
