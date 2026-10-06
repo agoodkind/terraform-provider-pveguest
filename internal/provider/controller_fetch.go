@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,6 +36,25 @@ const (
 	fetchGuest      = "guest"
 	fetchController = "controller"
 )
+
+type hashLocks struct {
+	mutex sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+var downloadLocks = &hashLocks{locks: map[string]*sync.Mutex{}}
+
+func (h *hashLocks) lock(hash string) func() {
+	h.mutex.Lock()
+	entry, found := h.locks[hash]
+	if !found {
+		entry = &sync.Mutex{}
+		h.locks[hash] = entry
+	}
+	h.mutex.Unlock()
+	entry.Lock()
+	return entry.Unlock
+}
 
 // controllerPayload is the file that the controller sends to the guest.
 type controllerPayload struct {
@@ -120,6 +140,8 @@ func cachedArchive(ctx context.Context, caFile string, url string, wantHash stri
 		return "", fmt.Errorf("create the download cache directory: %w", err)
 	}
 	cachedPath := filepath.Join(directory, wantHash)
+	unlock := downloadLocks.lock(wantHash)
+	defer unlock()
 	if fileHasHash(cachedPath, wantHash) {
 		return cachedPath, nil
 	}
