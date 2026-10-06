@@ -36,14 +36,15 @@ type nodeModel struct {
 }
 
 type providerData struct {
-	client   *transport.Client
-	aptLocks *guestLocks
+	client       *transport.Client
+	aptLocks     *guestLocks
+	sysrepoLocks *guestLocks
 
 	controllerCAFile string
 }
 
-// guestLocks serializes operations per guest. apt and dpkg use one lock
-// file per guest and fail when two processes run at once.
+// guestLocks serializes mutations for one guest within this provider instance.
+// Separate provider instances do not share these locks.
 type guestLocks struct {
 	mutex sync.Mutex
 	locks map[transport.Guest]*sync.Mutex
@@ -77,7 +78,7 @@ func (p *pveguestProvider) Metadata(_ context.Context, _ provider.MetadataReques
 
 func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Declares files, links, apt packages, and systemd units inside Proxmox guests. " +
+		Description: "Declares files, links, apt packages, systemd units, and sysrepo state inside Proxmox guests. " +
 			"Commands run through the Proxmox VE API of the hypervisor.",
 		Attributes: map[string]schema.Attribute{
 			"nodes": schema.MapNestedAttribute{
@@ -179,8 +180,9 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		return
 	}
 	resp.ResourceData = &providerData{
-		client:   client,
-		aptLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		client:       client,
+		aptLocks:     &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		sysrepoLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
 
 		controllerCAFile: config.ControllerCAFile.ValueString(),
 	}
@@ -194,6 +196,8 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newAptPackagesResource,
 		newDebPackagesResource,
 		newSystemdUnitResource,
+		newSysrepoModuleResource,
+		newSysrepoDataResource,
 	}
 }
 

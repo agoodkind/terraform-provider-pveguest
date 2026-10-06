@@ -22,6 +22,10 @@ func TestAccGuestIsClean(t *testing.T) {
 	if guest.packageInstalled(testPackage) {
 		t.Errorf("package %s is installed after the tests", testPackage)
 	}
+	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
+	if hasSysrepo && guest.sysrepoModuleRow() != "" {
+		t.Errorf("sysrepo module %s is installed after the tests", testSysrepoModule)
+	}
 	if state := guest.systemctlState("is-active", testTimer); state != "inactive" {
 		t.Errorf("%s is %s after the tests, want inactive", testTimer, state)
 	}

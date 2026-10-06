@@ -1,7 +1,7 @@
 # terraform-provider-pveguest
 
 `pveguest` is an OpenTofu provider that declares files, downloads, symbolic links, apt
-packages, deb packages, and systemd units inside Proxmox guests. The provider calls the
+packages, deb packages, systemd units, and sysrepo modules and data inside Proxmox guests. The provider calls the
 Proxmox VE API with an API token. A container runs each command through its
 `exec` API, and a VM runs each command through the QEMU guest agent API. The
 provider does not require SSH access to the hypervisor or the guest.
@@ -304,6 +304,65 @@ Create requests a restart when `restart_on` has at least one entry. It also
 rebuilds installation links when the unit is already enabled and the
 declaration requires it to remain enabled.
 
+## pveguest_sysrepo_module
+
+This resource manages a YANG module and its enabled features in a guest.
+The guest requires sysrepo 3 and `sysrepoctl`. The module file must already
+exist at `path`, for example through `pveguest_file`.
+
+| Operation | Behavior |
+| --- | --- |
+| Create | The provider installs an absent module with `sysrepoctl --install`. An imported but unimplemented module also requires installation. |
+| Update | The provider runs `sysrepoctl --update` when the installed revision differs and `update = true`. With `update = false`, the provider preserves an installed module. |
+| Feature changes | Installation enables the declared features. With `update = true`, the provider also reconciles features of installed modules through `sysrepoctl --change`. |
+| Read | The provider removes an uninstalled module from state. With `update = true`, refresh also records the installed revision and features. |
+| Destroy | The provider runs `sysrepoctl --uninstall`. |
+
+The apply verifies the installed revision and features after mutation.
+One provider instance serializes sysrepo mutations per guest. Reads and
+separate provider instances do not share that serialization.
+
+| Argument | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `path` | string | yes | | The absolute guest path must end in `<module>@<YYYY-MM-DD>.yang`. The file directory is the import search directory. |
+| `features` | set of string | no | empty | Installation enables this set. With `update = true`, apply also reconciles the enabled features of installed modules. |
+| `update` | bool | no | `false` | A true value reconciles the revision and features of an installed module. A false value preserves it. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `module` | The provider parses the module name from the file name. A changed name replaces the resource. |
+| `revision` | The plan uses the file name revision. With `update = true`, refresh records the installed revision. |
+
+## pveguest_sysrepo_data
+
+This resource replaces the complete configuration of one installed YANG
+module in the guest's `startup` or `running` datastore. The guest requires
+sysrepo 3 and `sysrepocfg`. Apply removes nodes omitted from `content`.
+
+Create and Update require XML with at least one element. The provider writes
+a temporary guest file and imports it with `sysrepocfg --import`, selecting
+the datastore, module, and XML format. The provider attempts to delete the
+temporary file after the write or import finishes. Destroy imports an empty file
+to remove the module configuration.
+
+Read exports the module with `sysrepocfg --export --defaults explicit`.
+Read removes an uninstalled module from state. A different canonical export
+replaces `content` in state, and the next plan restores the declaration.
+Matching canonical content retains the declared XML formatting.
+
+Canonical comparison preserves element order, namespace URIs, local names,
+and text after trimming its leading and trailing whitespace. It combines
+adjacent text and CDATA sections, sorts attributes by namespace URI and local
+name, and ignores whitespace-only text, comments, processing instructions,
+directives, namespace prefixes, and namespace declarations. Content must use
+a representation compatible with the export.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `datastore` | string | yes | Select `startup` or `running`. A change replaces the resource. |
+| `module` | string | yes | The installed YANG module must define the content. A change replaces the resource. |
+| `content` | string | yes | Supply the complete module configuration as XML. |
+
 ## Development
 
 | Command | Action |
@@ -349,6 +408,9 @@ items at the end:
 - The package `hello`. The cleanup purges it.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
+- The sysrepo module `pveguest-acc` and its data in the `running` datastore.
+  `TestAccSysrepoModuleAndData` skips when the guest has no `sysrepoctl` or
+  `sysrepocfg`.
 
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
