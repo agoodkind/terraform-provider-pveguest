@@ -20,7 +20,10 @@ import (
 	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
 )
 
-const maximumErrorOutputBytes = 4000
+const (
+	maximumErrorOutputBytes = 4000
+	maximumStdoutTailBytes  = 1000
+)
 
 // A changed node, vmid, or kind selects another guest. Each of the three
 // attributes forces replacement of the resource.
@@ -127,16 +130,20 @@ func commandFailure(guest transport.Guest, command transport.Command, result tra
 }
 
 func combinedOutput(result transport.Result) string {
-	text := strings.TrimSpace(string(result.Stderr))
-	stdout := strings.TrimSpace(string(result.Stdout))
+	text := lastBytes(strings.TrimSpace(string(result.Stderr)), maximumErrorOutputBytes)
+	stdout := lastBytes(strings.TrimSpace(string(result.Stdout)), maximumStdoutTailBytes)
 	if stdout != "" {
 		if text != "" {
 			text += "\n"
 		}
 		text += stdout
 	}
-	if len(text) > maximumErrorOutputBytes {
-		text = text[len(text)-maximumErrorOutputBytes:]
+	return text
+}
+
+func lastBytes(text string, limit int) string {
+	if len(text) > limit {
+		return text[len(text)-limit:]
 	}
 	return text
 }
