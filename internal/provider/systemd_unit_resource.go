@@ -214,6 +214,11 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 			return err
 		}
 	}
+	if current == enablementEnabled && wantEnabled && restart {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("reenable", "--", name)); err != nil {
+			return err
+		}
+	}
 	if current == enablementEnabled && !wantEnabled {
 		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
 			return err
