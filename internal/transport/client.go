@@ -79,7 +79,15 @@ type apiRequest struct {
 	method    string
 	operation string
 	query     url.Values
-	body      *execStartBody
+	body      []byte
+	path      string
+}
+
+func (request apiRequest) apiPath(guest Guest, nodeName string) string {
+	if request.path != "" {
+		return request.path
+	}
+	return guest.apiPath(nodeName, request.operation)
 }
 
 type apiEnvelope struct {
@@ -152,7 +160,7 @@ func (connection *nodeConnection) call(
 	guest Guest,
 	request apiRequest,
 ) (json.RawMessage, error) {
-	apiPath := guest.apiPath(connection.nodeName, request.operation)
+	apiPath := request.apiPath(guest, connection.nodeName)
 
 	select {
 	case connection.slots <- struct{}{}:
@@ -205,11 +213,7 @@ func (connection *nodeConnection) newHTTPRequest(
 	}
 	var bodyReader io.Reader
 	if request.body != nil {
-		document, err := encodeJSON(request.body)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
-		}
-		bodyReader = bytes.NewReader(document)
+		bodyReader = bytes.NewReader(request.body)
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, request.method, address, bodyReader)
 	if err != nil {
@@ -226,7 +230,7 @@ func (connection *nodeConnection) newHTTPRequest(
 
 // encodeJSON leaves the characters <, >, and & unescaped, because the request
 // body limit of the API counts the encoded size.
-func encodeJSON(value *execStartBody) ([]byte, error) {
+func encodeJSON[T execStartBody | kernelModulesBody](value *T) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)

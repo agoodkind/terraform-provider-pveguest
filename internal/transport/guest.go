@@ -260,11 +260,15 @@ func (connection *nodeConnection) startExec(
 		body.Timeout = &timeout
 	}
 
+	document, err := encodeJSON(&body)
+	if err != nil {
+		return 0, fmt.Errorf("%s: POST exec: %w", guest, err)
+	}
 	data, err := connection.call(ctx, guest, apiRequest{
 		method:    http.MethodPost,
 		operation: "exec",
 		query:     nil,
-		body:      &body,
+		body:      document,
 	})
 	if err != nil {
 		return 0, err

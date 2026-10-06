@@ -102,6 +102,14 @@ permissions, not only in those of its user.
 | `lxc` | `exec`, `exec-status` | `VM.Guest.Exec` |
 | `qemu` | `agent/exec`, `agent/exec-status` | `VM.GuestAgent.Unrestricted` |
 
+The token needs these privileges on `/nodes/<node>` for
+`pveguest_host_kernel_modules`.
+
+| API method | Privilege |
+| --- | --- |
+| `GET /nodes/{node}/kernel-modules` | `Sys.KernelModules.Audit` |
+| `PUT /nodes/{node}/kernel-modules` | `Sys.KernelModules.Modify` |
+
 The provider runs every guest operation through `exec` and `exec-status`. The
 file-write and file-read methods are not used.
 
@@ -362,6 +370,24 @@ a representation compatible with the export.
 | `datastore` | string | yes | Select `startup` or `running`. A change replaces the resource. |
 | `module` | string | yes | The installed YANG module must define the content. A change replaces the resource. |
 | `content` | string | yes | Supply the complete module configuration as XML. |
+
+## pveguest_host_kernel_modules
+
+This resource replaces the node's complete kernel module list. Apply loads
+the modules and configures loading at boot. Delete empties the list. The node
+never unloads modules. The node must provide the overlay methods `GET` and
+`PUT /nodes/{node}/kernel-modules`. Stock Proxmox VE does not provide these
+methods. The token needs `Sys.KernelModules.Audit` and
+`Sys.KernelModules.Modify` on `/nodes/<node>`. Import uses the node key.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | yes | Select a key in the provider's `nodes` map. A change replaces the resource. |
+| `modules` | set of string | yes | Supply the complete module set. An empty set clears the list. Each name must match `^[a-z0-9_]+$`. The node rejects the entire request if any module is absent from its allowlist, unknown to `modinfo`, or built into the kernel. Read stores only loaded entries in `modules`. A configured module that is listed but not loaded produces a planned update. The next apply removes unconfigured entries that are not loaded. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `loaded` | The computed map reports each listed module as true when `/sys/module/<name>` exists and false otherwise. |
 
 ## Development
 
