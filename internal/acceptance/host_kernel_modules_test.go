@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,12 +14,14 @@ import (
 )
 
 const (
-	testKernelModule = "dummy"
+	kernelModuleVariable    = "PVEGUEST_ACC_KERNEL_MODULE"
+	auditTokenFileVariable  = "PVEGUEST_ACC_AUDIT_TOKEN_FILE"
+	forbiddenStatusFragment = "HTTP 403"
 
 	kernelModulesAddress = "pveguest_host_kernel_modules.test"
 )
 
-func hostKernelModulesConfig(node string, nodeConfig transport.NodeConfig) string {
+func hostKernelModulesConfig(node string, nodeConfig transport.NodeConfig, module string) string {
 	return fmt.Sprintf(`
 terraform {
   required_providers {
@@ -42,12 +45,16 @@ resource "pveguest_host_kernel_modules" "test" {
   node    = %q
   modules = [%q]
 }
-`, providerSource, node, nodeConfig.Endpoint, nodeConfig.APIToken, nodeConfig.Insecure, node, testKernelModule)
+`, providerSource, node, nodeConfig.Endpoint, nodeConfig.APIToken, nodeConfig.Insecure, node, module)
 }
 
 func TestAccHostKernelModules(t *testing.T) {
 	if os.Getenv(acceptanceVariable) == "" {
 		t.Skipf("%s is not set", acceptanceVariable)
+	}
+	module := os.Getenv(kernelModuleVariable)
+	if module == "" {
+		t.Skipf("%s is not set", kernelModuleVariable)
 	}
 	node := requireVariable(t, nodeVariable)
 	nodeConfig := nodeConfigFromEnvironment(t)
@@ -66,36 +73,86 @@ func TestAccHostKernelModules(t *testing.T) {
 	t.Cleanup(func() {
 		if _, err := client.SetKernelModules(context.Background(), node, original.Modules); err != nil {
 			t.Errorf("restore kernel modules: %v", err)
+			return
+		}
+		restored, err := client.GetKernelModules(context.Background(), node)
+		if err != nil {
+			t.Errorf("read restored kernel modules: %v", err)
+			return
+		}
+		if !slices.Equal(restored.Modules, original.Modules) {
+			t.Errorf("restored modules %v differ from original %v", restored.Modules, original.Modules)
 		}
 	})
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy: checkGuest(func() error {
-			current, err := client.GetKernelModules(context.Background(), node)
-			if err != nil {
-				return err
-			}
-			if len(current.Modules) != 0 {
-				return fmt.Errorf("modules %v remain after destroy", current.Modules)
-			}
-			return nil
-		}),
 		Steps: []resource.TestStep{
 			{
-				Config: hostKernelModulesConfig(node, nodeConfig),
+				Config: hostKernelModulesConfig(node, nodeConfig, module),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(kernelModulesAddress, "modules.#", "1"),
-					resource.TestCheckResourceAttr(kernelModulesAddress, "loaded."+testKernelModule, "true"),
+					resource.TestCheckResourceAttr(kernelModulesAddress, "loaded."+module, "true"),
 				),
 			},
 			{
-				Config:            hostKernelModulesConfig(node, nodeConfig),
+				Config:            hostKernelModulesConfig(node, nodeConfig, module),
 				ResourceName:      kernelModulesAddress,
 				ImportState:       true,
 				ImportStateId:     node,
 				ImportStateVerify: true,
+
+				ImportStateVerifyIdentifierAttribute: "node",
 			},
 		},
 	})
+}
+
+func TestAccHostKernelModulesDenied(t *testing.T) {
+	if os.Getenv(acceptanceVariable) == "" {
+		t.Skipf("%s is not set", acceptanceVariable)
+	}
+	auditTokenFile := os.Getenv(auditTokenFileVariable)
+	if auditTokenFile == "" {
+		t.Skipf("%s is not set", auditTokenFileVariable)
+	}
+	node := requireVariable(t, nodeVariable)
+	adminConfig := nodeConfigFromEnvironment(t)
+	tokenBytes, err := os.ReadFile(auditTokenFile)
+	if err != nil {
+		t.Fatalf("%s: %v", auditTokenFileVariable, err)
+	}
+	auditConfig := adminConfig
+	auditConfig.APIToken = strings.TrimSpace(string(tokenBytes))
+	auditClient, err := transport.NewClient(map[string]transport.NodeConfig{node: auditConfig}, transport.DefaultMaxRequests)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := auditClient.GetKernelModules(context.Background(), node)
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") || strings.Contains(err.Error(), "HTTP 501") {
+			t.Skipf("node %s does not serve the kernel-modules endpoint: %v", node, err)
+		}
+		t.Fatalf("audit token read: %v", err)
+	}
+	_, err = auditClient.SetKernelModules(context.Background(), node, before.Modules)
+	if err == nil {
+		t.Fatal("audit token write succeeded")
+	}
+	if !strings.Contains(err.Error(), forbiddenStatusFragment) {
+		t.Fatalf("audit token write error %q does not contain %q", err, forbiddenStatusFragment)
+	}
+
+	adminClient, err := transport.NewClient(map[string]transport.NodeConfig{node: adminConfig}, transport.DefaultMaxRequests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := adminClient.GetKernelModules(context.Background(), node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(after.Modules, before.Modules) {
+		t.Fatalf("modules changed from %v to %v", before.Modules, after.Modules)
+	}
 }

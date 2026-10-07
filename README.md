@@ -422,6 +422,8 @@ make testacc \
 | `PVEGUEST_ACC_VMID` | ID of the test guest. |
 | `PVEGUEST_ACC_KIND` | `lxc` or `qemu`. |
 | `PVEGUEST_ACC_INSECURE` | `true` skips TLS certificate verification. The default is `false`. |
+| `PVEGUEST_ACC_KERNEL_MODULE` | Module from the node allowlist to use in the acceptance test. The test skips when unset. |
+| `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the
