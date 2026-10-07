@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -154,5 +155,75 @@ func TestAccHostKernelModulesDenied(t *testing.T) {
 	}
 	if !slices.Equal(after.Modules, before.Modules) {
 		t.Fatalf("modules changed from %v to %v", before.Modules, after.Modules)
+	}
+}
+
+const (
+	unlistedModuleVariable = "PVEGUEST_ACC_UNLISTED_KERNEL_MODULE"
+	notAllowedFragment     = "is not in /etc/pve-overlay/kernel-modules.allow"
+	notAllowedPattern      = `is\s+not\s+in\s+/etc/pve-overlay/kernel-modules\.allow`
+)
+
+var httpFailureStatus = regexp.MustCompile(`HTTP [45][0-9][0-9]`)
+
+func TestAccHostKernelModulesRejected(t *testing.T) {
+	if os.Getenv(acceptanceVariable) == "" {
+		t.Skipf("%s is not set", acceptanceVariable)
+	}
+	unlisted := os.Getenv(unlistedModuleVariable)
+	if unlisted == "" {
+		t.Skipf("%s is not set", unlistedModuleVariable)
+	}
+	node := requireVariable(t, nodeVariable)
+	nodeConfig := nodeConfigFromEnvironment(t)
+	client, err := transport.NewClient(map[string]transport.NodeConfig{node: nodeConfig}, transport.DefaultMaxRequests)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := client.GetKernelModules(context.Background(), node)
+	if err != nil {
+		if strings.Contains(err.Error(), "HTTP 404") || strings.Contains(err.Error(), "HTTP 501") {
+			t.Skipf("node %s does not serve the kernel-modules endpoint: %v", node, err)
+		}
+		t.Fatal(err)
+	}
+
+	requested := append(slices.Clone(before.Modules), unlisted)
+	_, err = client.SetKernelModules(context.Background(), node, requested)
+	if err == nil {
+		t.Fatalf("write of unlisted module %q succeeded", unlisted)
+	}
+	if !httpFailureStatus.MatchString(err.Error()) {
+		t.Fatalf("write error %q does not contain an HTTP 4xx or 5xx status", err)
+	}
+	if !strings.Contains(err.Error(), notAllowedFragment) {
+		t.Fatalf("write error %q does not contain %q", err, notAllowedFragment)
+	}
+
+	after, err := client.GetKernelModules(context.Background(), node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(after.Modules, before.Modules) {
+		t.Fatalf("modules changed from %v to %v", before.Modules, after.Modules)
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config:      hostKernelModulesConfig(node, nodeConfig, unlisted),
+				ExpectError: regexp.MustCompile(notAllowedPattern),
+			},
+		},
+	})
+
+	final, err := client.GetKernelModules(context.Background(), node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(final.Modules, before.Modules) {
+		t.Fatalf("modules changed from %v to %v", before.Modules, final.Modules)
 	}
 }
