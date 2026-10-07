@@ -389,6 +389,28 @@ methods. The token needs `Sys.KernelModules.Audit` and
 | --- | --- |
 | `loaded` | The computed map reports each listed module as true when `/sys/module/<name>` exists and false otherwise. |
 
+## pveguest_container_options
+
+The resource configures eBPF token delegation with `bpfdelegate` and passes host network interfaces into the container as LXC physical devices with `hostnic0` through `hostnic9`.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | Yes | The node must be a key in the provider `nodes` map. Changing `node` replaces the resource. |
+| `vmid` | number | Yes | The value identifies the container. Changing `vmid` replaces the resource. |
+| `options` | map of string | Yes | Keys must be `bpfdelegate` or `hostnic0` through `hostnic9`. Values are Proxmox property strings, such as `link=nic2,name=wan`. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `pending` | The computed map contains supported options that Proxmox lists as pending for a running container. Values contain the pending value. Pending deletions have an empty value. |
+
+Create and update write the declared options and delete keys present in prior state but absent from the configuration. Destroy deletes every option key in state.
+
+Read stores every supported option from the container configuration in `options`. Changes and deletions on the node plan an update. Keys added on the node that the configuration omits also plan an update.
+
+The resource does not start, stop, or restart the container. Proxmox applies changes to a running container at the next start.
+
+Import IDs use the format `<node>/<vmid>`.
+
 ## Development
 
 | Command | Action |
@@ -423,6 +445,7 @@ make testacc \
 | `PVEGUEST_ACC_KIND` | `lxc` or `qemu`. |
 | `PVEGUEST_ACC_INSECURE` | `true` skips TLS certificate verification. The default is `false`. |
 | `PVEGUEST_ACC_KERNEL_MODULE` | Module from the node allowlist to use in the acceptance test. The test skips when unset. |
+| `PVEGUEST_ACC_HOSTNIC_LINK` | Host interface to use in the acceptance test. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
