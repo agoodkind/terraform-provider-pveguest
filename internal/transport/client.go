@@ -230,7 +230,7 @@ func (connection *nodeConnection) newHTTPRequest(
 
 // encodeJSON leaves the characters <, >, and & unescaped, because the request
 // body limit of the API counts the encoded size.
-func encodeJSON[T execStartBody | kernelModulesBody](value *T) ([]byte, error) {
+func encodeJSON[T execStartBody | kernelModulesBody | containerConfigBody](value *T) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
