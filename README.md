@@ -110,6 +110,15 @@ The token needs these privileges on `/nodes/<node>` for
 | `GET /nodes/{node}/kernel-modules` | `Sys.KernelModules.Audit` |
 | `PUT /nodes/{node}/kernel-modules` | `Sys.KernelModules.Modify` |
 
+The token needs these privileges on `/vms/<vmid>` for
+`pveguest_container_power`.
+
+| API method | Privilege |
+| --- | --- |
+| `POST /nodes/{node}/lxc/{vmid}/status/start` | `VM.PowerMgmt` on `/vms/<vmid>` |
+| `POST /nodes/{node}/lxc/{vmid}/status/shutdown` | `VM.PowerMgmt` on `/vms/<vmid>` |
+| `POST /nodes/{node}/lxc/{vmid}/status/stop` | `VM.PowerMgmt` on `/vms/<vmid>` |
+
 The provider runs every guest operation through `exec` and `exec-status`. The
 file-write and file-read methods are not used.
 
@@ -408,6 +417,27 @@ Create and update write the declared options and delete keys present in prior st
 Read stores every supported option from the container configuration in `options`. Changes and deletions on the node plan an update. Keys added on the node that the configuration omits also plan an update.
 
 The resource does not start, stop, or restart the container. Proxmox applies changes to a running container at the next start.
+
+Import IDs use the format `<node>/<vmid>`.
+
+## pveguest_container_power
+
+`pveguest_container_power` sets the run state of one existing Proxmox LXC container through the Proxmox API. The resource does not create, delete, or configure the container.
+
+The provider waits for the `POST status/start` task to stop and requires exit status `OK`. Shutdown uses `POST status/shutdown` with a 60-second timeout. The provider calls `POST status/stop` if shutdown fails or the container still runs. A failed task produces an error containing the last 10 lines of the Proxmox task log.
+
+Refresh reads `status/current` and sets `running` from the returned status. OpenTofu plans a start when a container stops outside OpenTofu and the configuration has `running = true`. Destroying the resource removes it from state without changing the container run state.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | Yes | The node argument selects the Proxmox node by a key in the provider nodes map. Changing node replaces the resource. |
+| `vmid` | number | Yes | The vmid argument specifies the numeric ID of the container. Changing vmid replaces the resource. |
+| `running` | bool | Yes | A value of true starts a stopped container. A value of false shuts down a running container. |
+| `restart_on` | map of string | No | The restart_on map accepts arbitrary string values, such as the write_id of a file resource. The provider shuts down the container and starts it again when running is true and any map value changes. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `status` | The status attribute reports the Proxmox status/current string from the last apply or refresh. Values include running and stopped. |
 
 Import IDs use the format `<node>/<vmid>`.
 
