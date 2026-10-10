@@ -118,15 +118,16 @@ type Command struct {
 	TimeoutSeconds int
 }
 
-// unreachableError reports that the API could not run a command in the
+// UnreachableError reports that the API could not run a command in the
 // guest: a stopped container, a stopped VM, or a VM without a running guest
 // agent.
-type unreachableError struct {
+type UnreachableError struct {
 	guest  Guest
 	detail string
 }
 
-func (unreachable *unreachableError) Error() string {
+// Error returns a message with the guest and the detail from the Proxmox API.
+func (unreachable *UnreachableError) Error() string {
 	return fmt.Sprintf("%s is unreachable: %s", unreachable.guest, unreachable.detail)
 }
 
