@@ -152,7 +152,7 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 }
 
 // call sends one API request for the guest and returns the data member of the
-// response. An unreachable guest returns an *unreachableError. Every other
+// response. An unreachable guest returns an *UnreachableError. Every other
 // failure returns an error that states the guest, the API path, the HTTP
 // status, and the response text.
 func (connection *nodeConnection) call(
@@ -262,7 +262,7 @@ func apiFailure(
 	detail := fmt.Sprintf("%s %s returned HTTP %d: %s", method, apiPath, response.StatusCode, text)
 	for _, pattern := range unreachablePatterns {
 		if pattern.MatchString(text) {
-			return &unreachableError{guest: guest, detail: detail}
+			return &UnreachableError{guest: guest, detail: detail}
 		}
 	}
 	return fmt.Errorf("%s: %s", guest, detail)

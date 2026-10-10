@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
-	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 type pveguestProvider struct {

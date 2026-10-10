@@ -12,7 +12,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 
 	"github.com/agoodkind/terraform-provider-pveguest/internal/provider"
-	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (
