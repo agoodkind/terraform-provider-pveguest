@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (

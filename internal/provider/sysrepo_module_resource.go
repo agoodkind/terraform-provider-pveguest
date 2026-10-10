@@ -19,7 +19,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/agoodkind/terraform-provider-pveguest/internal/sysrepo"
-	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 type sysrepoModuleResource struct {

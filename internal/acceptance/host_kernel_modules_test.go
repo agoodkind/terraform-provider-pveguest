@@ -11,7 +11,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 
-	"github.com/agoodkind/terraform-provider-pveguest/internal/transport"
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (
