@@ -196,6 +196,7 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newAptPackagesResource,
 		newDebPackagesResource,
 		newSystemdUnitResource,
+		newLocalesResource,
 		newSysrepoModuleResource,
 		newSysrepoDataResource,
 		newHostKernelModulesResource,

@@ -317,6 +317,19 @@ Create requests a restart when `restart_on` has at least one entry. It also
 rebuilds installation links when the unit is already enabled and the
 declaration requires it to remain enabled.
 
+## pveguest_locales
+
+The resource declares a set of generated locales in a guest. Read runs `locale -a` and stores the declared entries that exist. An absent declared locale produces a planned update.
+
+Read compares each entry's first field with `locale -a` output after normalizing the codeset. The normalized names include `en_US.utf8` for `en_US.UTF-8` and `de_DE.iso885915@euro` for `de_DE.ISO-8859-15@euro`. A name without a codeset remains unchanged.
+
+The guest requires the `locales` package and the declared entries in `/etc/locale.gen`. Create and Update run `locale-gen` with a 600-second timeout when a declared locale is absent. Update also runs `locale-gen` when `generate_on` changes. The apply fails if a declared locale remains absent after generation. Destroy removes the resource from state without deleting generated locales.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `locales` | set of string | yes | Each entry uses the form `<locale> <charmap>`, for example `en_US.UTF-8 UTF-8`. The guest's `/etc/locale.gen` must contain each declared entry. |
+| `generate_on` | map of string | no | The map accepts arbitrary string values, usually the `write_id` of the `/etc/locale.gen` file. A changed map runs `locale-gen` during Update even when every declared locale exists. Create does not use the map. |
+
 ## pveguest_sysrepo_module
 
 This resource manages a YANG module and its enabled features in a guest.
