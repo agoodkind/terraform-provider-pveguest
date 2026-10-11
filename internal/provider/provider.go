@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -26,6 +27,9 @@ type providerModel struct {
 	MaxRequests types.Int64 `tfsdk:"max_requests"`
 
 	ControllerCAFile types.String `tfsdk:"controller_ca_file"`
+
+	SMTP2GOAPIKey types.String `tfsdk:"smtp2go_api_key"`
+	SMTP2GOAPIURL types.String `tfsdk:"smtp2go_api_url"`
 }
 
 type nodeModel struct {
@@ -41,6 +45,8 @@ type providerData struct {
 	sysrepoLocks *guestLocks
 
 	controllerCAFile string
+
+	smtp2go *smtp2goClient
 }
 
 // guestLocks serializes mutations for one guest within this provider instance.
@@ -120,6 +126,15 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 				Description: "Path of a PEM file with certificate authorities that the controller trusts in addition to " +
 					"the system roots when a pveguest_download with fetch = \"controller\" downloads a URL.",
 			},
+			"smtp2go_api_key": schema.StringAttribute{
+				Optional:    true,
+				Sensitive:   true,
+				Description: "The SMTP2GO API key authenticates requests for pveguest_mail_relay. The provider reads PVEGUEST_SMTP2GO_API_KEY when smtp2go_api_key is unset or empty.",
+			},
+			"smtp2go_api_url": schema.StringAttribute{
+				Optional:    true,
+				Description: "The SMTP2GO API base URL defaults to https://api.smtp2go.com/v3. The URL must use HTTPS, or HTTP with a loopback host.",
+			},
 		},
 	}
 }
@@ -141,6 +156,13 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		resp.Diagnostics.AddError(
 			"Unknown provider configuration",
 			"The controller_ca_file argument must be known when the provider is configured.",
+		)
+		return
+	}
+	if config.SMTP2GOAPIKey.IsUnknown() || config.SMTP2GOAPIURL.IsUnknown() {
+		resp.Diagnostics.AddError(
+			"Unknown provider configuration",
+			"The smtp2go_api_key and smtp2go_api_url arguments must be known when the provider is configured.",
 		)
 		return
 	}
@@ -179,12 +201,28 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
 		return
 	}
+
+	smtp2goAPIKey := config.SMTP2GOAPIKey.ValueString()
+	if smtp2goAPIKey == "" {
+		smtp2goAPIKey = os.Getenv(smtp2goEnvironmentName)
+	}
+	smtp2goAPIURL := config.SMTP2GOAPIURL.ValueString()
+	if smtp2goAPIURL == "" {
+		smtp2goAPIURL = defaultSMTP2GOAPIURL
+	}
+	smtp2go, err := newSMTP2GOClient(smtp2goAPIURL, smtp2goAPIKey)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
+		return
+	}
 	resp.ResourceData = &providerData{
 		client:       client,
 		aptLocks:     &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
 		sysrepoLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
 
 		controllerCAFile: config.ControllerCAFile.ValueString(),
+
+		smtp2go: smtp2go,
 	}
 }
 
@@ -197,6 +235,7 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newDebPackagesResource,
 		newSystemdUnitResource,
 		newLocalesResource,
+		newMailRelayResource,
 		newSysrepoModuleResource,
 		newSysrepoDataResource,
 		newHostKernelModulesResource,

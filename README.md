@@ -89,6 +89,8 @@ resource "pveguest_systemd_unit" "ssh" {
 | `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
 | `max_requests` | number | no | `4` | Concurrent API requests per hypervisor. |
 | `controller_ca_file` | string | no | | Path of a PEM file with certificate authorities that the controller trusts in addition to the system roots when `pveguest_download` uses `fetch = "controller"`. |
+| `smtp2go_api_key` | string, sensitive | no | | The key authenticates SMTP2GO requests for `pveguest_mail_relay`. The provider uses `PVEGUEST_SMTP2GO_API_KEY` when the argument is empty. |
+| `smtp2go_api_url` | string | no | `https://api.smtp2go.com/v3` | The URL selects the SMTP2GO endpoint. The provider accepts HTTPS, or HTTP for localhost and loopback addresses. |
 
 ## API privileges
 
@@ -329,6 +331,31 @@ The guest requires the `locales` package and the declared entries in `/etc/local
 | --- | --- | --- | --- |
 | `locales` | set of string | yes | Each entry uses the form `<locale> <charmap>`, for example `en_US.UTF-8 UTF-8`. The guest's `/etc/locale.gen` must contain each declared entry. |
 | `generate_on` | map of string | no | The map accepts arbitrary string values, usually the `write_id` of the `/etc/locale.gen` file. A changed map runs `locale-gen` during Update even when every declared locale exists. Create does not use the map. |
+
+## pveguest_mail_relay
+
+The `pveguest_mail_relay` resource manages one SMTP2GO user and one guest configuration file at `/etc/msmtprc` by default. The provider generates a 32-character password from letters and digits with `crypto/rand`. State stores `password_version`, the file hash, and the non-secret arguments without storing the password. The resource requires `smtp2go_api_key` or `PVEGUEST_SMTP2GO_API_KEY`.
+
+The provider runs `mkdir -p` in the guest before `POST /users/smtp/add`. An existing user requires `POST /users/smtp/edit`. The provider writes a temporary file, sets mode `0600` and owner `root:root`, and renames the file to the destination. A failure after the SMTP2GO request plans another password update and file write at the next apply with a new password.
+
+Read runs `sha256sum` and `POST /users/smtp/view`. A missing file removes the resource from state. A different file hash plans a rewrite with a new password. A missing SMTP2GO user produces a warning and removes the resource from state. A failed view request or a status other than `allowed` produces a warning without itself planning a change.
+
+Destroy deletes the guest file without deleting the SMTP2GO user. A change to `description` alone sends no request. A decrease in `password_version` fails the plan.
+
+| Argument | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `username` | string | yes | | The username selects the SMTP2GO user that msmtp authenticates as. A changed value replaces the resource. |
+| `description` | string | no | | The description applies when SMTP2GO creates the user. |
+| `host` | string | yes | | The host sets the mail server hostname or address in the guest configuration. |
+| `port` | number | yes | | The port sets the mail server port from 1 through 65535. |
+| `from` | string | yes | | The address sets the sender email address in the guest configuration. |
+| `path` | string | no | `/etc/msmtprc` | The path sets the absolute destination of the guest configuration file. A changed value replaces the resource. |
+| `password_version` | number | yes | | An increase in `password_version` generates a new password and rewrites the guest file. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `sha256` | The attribute records the SHA-256 hash of the guest file content in hexadecimal. |
+| `write_id` | The attribute records a new random identifier after each successful file write. |
 
 ## pveguest_sysrepo_module
 
