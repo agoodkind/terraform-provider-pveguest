@@ -79,7 +79,7 @@ func (r *downloadResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Default:  stringdefault.StaticString(fetchGuest),
 				Description: "Where the download runs. guest, the default, runs curl in the guest. controller " +
 					"downloads on the machine that runs OpenTofu, caches the object, and sends the file to the " +
-					"guest through the exec API. controller requires kind lxc.",
+					"guest through the exec API.",
 				Validators: []validator.String{
 					stringvalidator.OneOf(fetchGuest, fetchController),
 				},
@@ -152,14 +152,6 @@ func (r *downloadResource) ValidateConfig(ctx context.Context, req resource.Vali
 		if err := validateArchiveMember(config.ArchiveMember.ValueString()); err != nil {
 			resp.Diagnostics.AddAttributeError(fwpath.Root("archive_member"), "Invalid archive_member", err.Error())
 		}
-	}
-	controllerFetch := config.Fetch.ValueString() == fetchController
-	if controllerFetch && config.Kind.ValueString() == string(transport.KindQEMU) {
-		resp.Diagnostics.AddAttributeError(
-			fwpath.Root("fetch"),
-			"Unsupported fetch for a VM",
-			"fetch = \"controller\" sends binary data through the exec API, which the QEMU guest agent API does not accept. Use kind = \"lxc\" or fetch = \"guest\".",
-		)
 	}
 }
 
