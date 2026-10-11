@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"time"
-	"unicode/utf8"
 )
 
 // Kind selects the API that runs commands in a guest.
@@ -39,20 +38,12 @@ const (
 	// characters, which is 98304 raw bytes.
 	lxcStdinLimit = 96 * 1024
 
-	// The QEMU guest agent API accepts input-data of at most 65536 characters
-	// in a request body of at most 64 KiB. The limit leaves room for JSON
-	// escapes.
-	qemuStdinLimit = 16 * 1024
-
 	// The exec call returns at once, and the guest command can run for its
 	// timeout. The poll ends this long after the timeout.
 	pollTimeoutMargin = 15 * time.Second
 
 	pollInitialDelay = 200 * time.Millisecond
 	pollMaximumDelay = 2 * time.Second
-
-	// A command killed by a signal has the exit status 128 plus the signal.
-	signalExitCodeBase = 128
 )
 
 // Guest identifies one container or VM by the node that runs it, its Proxmox
@@ -69,42 +60,28 @@ func (guest Guest) String() string {
 }
 
 // apiPath returns the API path of an operation on the guest. The path uses the
-// Proxmox node name, which can differ from the node key of the guest. The QEMU
-// guest agent operations live under agent.
+// Proxmox node name, which can differ from the node key of the guest.
 func (guest Guest) apiPath(nodeName string, operation string) string {
 	node := url.PathEscape(nodeName)
 	vmid := strconv.FormatInt(guest.VMID, 10)
-	if guest.Kind == KindQEMU {
-		return "/api2/json/nodes/" + node + "/qemu/" + vmid + "/agent/" + operation
-	}
-	return "/api2/json/nodes/" + node + "/lxc/" + vmid + "/" + operation
+	return "/api2/json/nodes/" + node + "/" + string(guest.Kind) + "/" + vmid + "/" + operation
 }
 
 // StdinLimit returns the largest standard input in bytes that one command
 // accepts for the kind.
 func (kind Kind) StdinLimit() int {
-	if kind == KindQEMU {
-		return qemuStdinLimit
-	}
 	return lxcStdinLimit
 }
 
 // SplitStdin cuts content into pieces that one command accepts as standard
-// input. The pieces of QEMU content end at character boundaries, because the
-// guest agent API takes text.
+// input.
 func SplitStdin(kind Kind, content []byte) [][]byte {
 	limit := kind.StdinLimit()
 	var pieces [][]byte
 	remaining := content
 	for len(remaining) > limit {
-		end := limit
-		if kind == KindQEMU {
-			for end > 0 && !utf8.RuneStart(remaining[end]) {
-				end--
-			}
-		}
-		pieces = append(pieces, remaining[:end])
-		remaining = remaining[end:]
+		pieces = append(pieces, remaining[:limit])
+		remaining = remaining[limit:]
 	}
 	return append(pieces, remaining)
 }
@@ -168,24 +145,11 @@ func (value *flag) UnmarshalJSON(document []byte) error {
 type execStatus struct {
 	Exited       flag   `json:"exited"`
 	ExitCode     *int   `json:"exitcode"`
-	Signal       *int   `json:"signal"`
 	OutData      string `json:"out-data"`
 	ErrData      string `json:"err-data"`
 	OutTruncated flag   `json:"out-truncated"`
 	ErrTruncated flag   `json:"err-truncated"`
 	TimedOut     flag   `json:"timed-out"`
-}
-
-// exitCode returns the exit code, or 128 plus the signal number for a command
-// that a signal ended.
-func (status execStatus) exitCode() (int, bool) {
-	if status.ExitCode != nil {
-		return *status.ExitCode, true
-	}
-	if status.Signal != nil {
-		return signalExitCodeBase + *status.Signal, true
-	}
-	return 0, false
 }
 
 // Run starts the command in the guest, polls until it exits, and returns its
@@ -235,9 +199,6 @@ func (client *Client) prepare(guest Guest, command Command) (*nodeConnection, in
 			guest, len(command.Stdin), limit,
 		)
 	}
-	if guest.Kind == KindQEMU && !utf8.Valid(command.Stdin) {
-		return nil, 0, fmt.Errorf("%s: stdin is not valid UTF-8, which the QEMU guest agent API requires", guest)
-	}
 	return connection, timeout, nil
 }
 
@@ -247,18 +208,10 @@ func (connection *nodeConnection) startExec(
 	command Command,
 	timeout int,
 ) (int64, error) {
-	body := execStartBody{Command: command.Argv}
+	body := execStartBody{Command: command.Argv, InputData: nil, Timeout: &timeout}
 	if len(command.Stdin) > 0 {
-		var input string
-		if guest.Kind == KindQEMU {
-			input = string(command.Stdin)
-		} else {
-			input = base64.StdEncoding.EncodeToString(command.Stdin)
-		}
+		input := base64.StdEncoding.EncodeToString(command.Stdin)
 		body.InputData = &input
-	}
-	if guest.Kind == KindLXC {
-		body.Timeout = &timeout
 	}
 
 	document, err := encodeJSON(&body)
@@ -339,8 +292,7 @@ func resultOf(guest Guest, command Command, status execStatus, timeout int) (Res
 		return Result{}, fmt.Errorf("%s: the output of command %s exceeded the capture limit", guest, quoted)
 	}
 
-	exitCode, hasExitCode := status.exitCode()
-	if !hasExitCode {
+	if status.ExitCode == nil {
 		return Result{}, fmt.Errorf("%s: command %s exited without an exit code", guest, quoted)
 	}
 
@@ -352,15 +304,10 @@ func resultOf(guest Guest, command Command, status execStatus, timeout int) (Res
 	if err != nil {
 		return Result{}, err
 	}
-	return Result{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}, nil
+	return Result{Stdout: stdout, Stderr: stderr, ExitCode: *status.ExitCode}, nil
 }
 
-// The container exec API returns base64. The QEMU guest agent API decodes the
-// streams before it returns them.
 func decodeStream(guest Guest, data string) ([]byte, error) {
-	if guest.Kind == KindQEMU {
-		return []byte(data), nil
-	}
 	decoded, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		slog.Error("exec-status stream is not base64", "guest", guest.String(), "err", err)

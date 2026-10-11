@@ -2,8 +2,7 @@
 
 `pveguest` is an OpenTofu provider that declares files, downloads, symbolic links, apt
 packages, deb packages, systemd units, and sysrepo modules and data inside Proxmox guests. The provider calls the
-Proxmox VE API with an API token. A container runs each command through its
-`exec` API, and a VM runs each command through the QEMU guest agent API. The
+Proxmox VE API with an API token. The provider runs each command through `exec` and `exec-status` under `/nodes/{node}/lxc/{vmid}/` for containers or `/nodes/{node}/qemu/{vmid}/` for virtual machines. The node uses the QEMU guest agent to run virtual machine commands. The
 provider does not require SSH access to the hypervisor or the guest.
 
 The provider address is `tofu.home.arpa/agoodkind/pveguest`. The provider
@@ -18,7 +17,7 @@ supports Debian guests.
 - For `kind = "lxc"`: a Proxmox VE node that provides the container `exec`,
   `exec-status`, `file-write`, and `file-read` API methods. Stock Proxmox VE does
   not provide them.
-- For `kind = "qemu"`: a running QEMU guest agent in the VM.
+- A guest with `kind = "qemu"` requires a Proxmox VE node that provides the virtual machine `exec` and `exec-status` methods and a running QEMU guest agent in the virtual machine. Stock Proxmox VE does not provide these methods.
 
 ## Install
 
@@ -100,7 +99,7 @@ permissions, not only in those of its user.
 | Guest kind | API methods | Privileges |
 | --- | --- | --- |
 | `lxc` | `exec`, `exec-status` | `VM.Guest.Exec` |
-| `qemu` | `agent/exec`, `agent/exec-status` | `VM.GuestAgent.Unrestricted` |
+| `qemu` | `exec`, `exec-status` | `VM.Guest.Exec` |
 
 The token needs these privileges on `/nodes/<node>` for
 `pveguest_host_kernel_modules`.
@@ -136,9 +135,7 @@ error that states the guest and the command. Every API error states the guest
 stopped container, a stopped VM, and a VM without a running guest agent produce
 an error that starts with the guest and contains "is unreachable".
 
-The container API accepts at most 96 KiB of standard input per command. The
-QEMU guest agent API accepts text of at most 64 KiB per request, and the
-provider limits each command to 16 KiB.
+The exec API accepts at most 96 KiB (98304 bytes) of standard input per command for either guest kind because `input-data` has a limit of 131072 base64 characters.
 
 ## Guest arguments
 
@@ -188,7 +185,7 @@ changes.
 
 Content larger than the standard input limit of one command takes several
 commands. One command truncates the temporary file, and one command per piece
-appends to it. A piece has at most 96 KiB for a container and 16 KiB for a VM.
+appends to it. Each piece has at most 96 KiB for either guest kind.
 The validate, mode, owner, and rename steps run after the last piece.
 
 ## pveguest_download
@@ -224,8 +221,7 @@ and `compress/gzip`, and rejects a member path that is absolute or contains
 stream to a temporary file in the guest in chunks of at most 96 KiB. The guest
 runs `gzip -dc` into the second temporary file. The provider compares the
 SHA-256 hash of that file with the hash that the controller computed from the
-payload. `fetch = "controller"` requires `kind = "lxc"`, because the QEMU guest agent
-API accepts only text.
+payload.
 
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
