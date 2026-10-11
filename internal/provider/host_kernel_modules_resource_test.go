@@ -68,6 +68,8 @@ func TestHostKernelModulesReadDropsModuleThatIsNotLoaded(t *testing.T) {
 		}),
 		"max_requests":       tftypes.NewValue(tftypes.Number, nil),
 		"controller_ca_file": tftypes.NewValue(tftypes.String, nil),
+		"smtp2go_api_key":    tftypes.NewValue(tftypes.String, nil),
+		"smtp2go_api_url":    tftypes.NewValue(tftypes.String, nil),
 	}))
 	if err != nil {
 		t.Fatal(err)

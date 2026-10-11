@@ -59,6 +59,17 @@ func (api *optionsAPI) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 
 func configuredOptionsServer(t *testing.T, endpoint string) tfprotov6.ProviderServer {
 	t.Helper()
+	unset := tftypes.NewValue(tftypes.String, nil)
+	return configuredProviderServer(t, endpoint, unset, unset)
+}
+
+func configuredProviderServer(
+	t *testing.T,
+	endpoint string,
+	smtp2goAPIKey tftypes.Value,
+	smtp2goAPIURL tftypes.Value,
+) tfprotov6.ProviderServer {
+	t.Helper()
 	ctx := context.Background()
 	server, err := providerserver.NewProtocol6WithError(provider.New("test")())()
 	if err != nil {
@@ -87,6 +98,8 @@ func configuredOptionsServer(t *testing.T, endpoint string) tfprotov6.ProviderSe
 		}),
 		"max_requests":       tftypes.NewValue(tftypes.Number, nil),
 		"controller_ca_file": tftypes.NewValue(tftypes.String, nil),
+		"smtp2go_api_key":    smtp2goAPIKey,
+		"smtp2go_api_url":    smtp2goAPIURL,
 	}))
 	if err != nil {
 		t.Fatal(err)
