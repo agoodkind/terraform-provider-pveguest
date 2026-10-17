@@ -486,6 +486,8 @@ VM. The existing transport package starts the command with `POST exec` and
 polls `GET exec-status`. The command returns the Docker daemon's HTTP
 status, response headers, and body.
 
+### Start the command
+
 The guest must have `curl` and a Docker daemon that listens on
 `/var/run/docker.sock`. The token file must contain
 `user@realm!tokenid=secret`. The token needs these privileges:
@@ -515,6 +517,8 @@ The guest must have `curl` and a Docker daemon that listens on
    }
    ```
 
+### Flags
+
 | Flag | Requirement or default | Behavior |
 |---|---|---|
 | `-node` | Required | The command uses this provider node key for the guest. |
@@ -528,6 +532,8 @@ The guest must have `curl` and a Docker daemon that listens on
 | `-get-only` | `false` | The command allows only GET and HEAD when this flag is true. |
 | `-max-body-bytes` | `268435456` (256 MiB) | The command rejects larger request bodies with HTTP 501 before starting any guest exec. |
 
+### Rejected and failed requests
+
 The command returns HTTP 501 with a reason before starting a guest exec
 when any of these conditions apply:
 
@@ -539,14 +545,6 @@ when any of these conditions apply:
 - The request body exceeds `-max-body-bytes`.
 - The command uses `-get-only`, and the request method is neither GET nor HEAD.
 
-| Limit | Value |
-|---|---|
-| Request body per exec | 96 KiB on standard input |
-| Largest request body | `-max-body-bytes`, which defaults to 256 MiB |
-| Proxmox exec output | 1 MiB per output stream |
-| Guest command timeout | 60 seconds; staged curl uses 60 seconds plus 2 seconds per complete MiB of body, up to 3600 seconds |
-| Command execution and polling deadline | Each exec timeout plus 30 seconds |
-
 The command returns HTTP 502 when any of these conditions apply:
 
 - A guest exec fails.
@@ -557,6 +555,16 @@ The command returns HTTP 502 when any of these conditions apply:
 
 For mkdir, dd, or curl failures, the response includes the program name and
 the exit code or error.
+
+### Request limits
+
+| Limit | Value |
+|---|---|
+| Request body per exec | 96 KiB on standard input |
+| Largest request body | `-max-body-bytes`, which defaults to 256 MiB |
+| Proxmox exec output | 1 MiB per output stream |
+| Guest command timeout | 60 seconds; staged curl uses 60 seconds plus 2 seconds per complete MiB of body, up to 3600 seconds |
+| Command execution and polling deadline | Each exec timeout plus 30 seconds |
 
 ### Stage larger request bodies
 
@@ -585,9 +593,8 @@ The guest must provide these programs:
 - `dd`
 - `rm`
 
-These execs do not use a shell. Staging uses the existing `VM.Audit` and
-`VM.Guest.Exec` privileges on `/vms/<vmid>`. The command does not call the
-file-write method.
+These execs do not use a shell. Staging uses the existing token privileges.
+The command does not call the file-write method.
 
 ## Development
 
