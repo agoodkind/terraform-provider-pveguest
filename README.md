@@ -528,7 +528,7 @@ The guest must have `curl` and a Docker daemon that listens on
 | `-get-only` | `false` | The command allows only GET and HEAD when this flag is true. |
 
 The command returns HTTP 501 with a reason before starting a guest exec
-when any of these conditions applies:
+when any of these conditions apply:
 
 - The request sets an `Upgrade` header or includes `upgrade` in the `Connection` header.
 - The `follow` query value is `1` or `true`, with any letter case for `true`.

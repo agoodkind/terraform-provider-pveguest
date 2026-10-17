@@ -20,13 +20,8 @@ import (
 )
 
 const (
-	// socketFileMode sets the local Unix socket permissions to 0600.
-	socketFileMode = 0o600
-
-	// shutdownTimeout limits the server shutdown wait to five seconds.
-	shutdownTimeout = 5 * time.Second
-
-	// readHeaderTimeout limits the time to read request headers to ten seconds.
+	socketFileMode    = 0o600
+	shutdownTimeout   = 5 * time.Second
 	readHeaderTimeout = 10 * time.Second
 
 	exitFailure = 1
