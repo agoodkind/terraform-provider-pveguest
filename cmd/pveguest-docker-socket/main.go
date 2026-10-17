@@ -170,7 +170,6 @@ func run(arguments []string) error {
 }
 
 // shutdownOnStop waits for the stop context to end, then shuts down the server
-
 // with shutdownTimeout.
 func shutdownOnStop(stop context.Context, server *http.Server) {
 	<-stop.Done()

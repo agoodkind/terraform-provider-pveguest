@@ -22,7 +22,6 @@ const (
 	commandTimeoutSeconds = 60
 
 	// requestDeadlineMargin extends each exec deadline 30 seconds beyond the
-
 	// command timeout for command execution and status polling.
 	requestDeadlineMargin = 30 * time.Second
 
@@ -51,9 +50,7 @@ var droppedRequestHeaders = map[string]bool{
 }
 
 // droppedResponseHeaders contains the response headers that relay does not copy.
-
 // relay sets Content-Length from the buffered body, except that HEAD requests
-
 // use the daemon value.
 var droppedResponseHeaders = map[string]bool{
 	"Connection":        true,
@@ -168,7 +165,6 @@ func reject(writer http.ResponseWriter, request *http.Request, status int, reaso
 }
 
 // unsupportedReason returns a reason for requests that need a streaming or
-
 // hijacked connection. It returns an empty string for other requests.
 func unsupportedReason(request *http.Request) string {
 	if request.Header.Get("Upgrade") != "" || headerHasToken(request.Header, "Connection", upgradeToken) {
@@ -208,7 +204,6 @@ func headerHasToken(header http.Header, name string, token string) bool {
 }
 
 // curlArguments builds the curl command line for the guest socket and request.
-
 // It adds --data-binary @- when curl must read a body from standard input.
 func curlArguments(guestSocket string, request *http.Request, bodySource string) []string {
 	arguments := []string{"curl", "-sS", "--raw", "-i", "--unix-socket", guestSocket}
@@ -234,7 +229,6 @@ func curlArguments(guestSocket string, request *http.Request, bodySource string)
 }
 
 // relay parses curl output, including headers, as an HTTP response and writes
-
 // the response to the client.
 func relay(writer http.ResponseWriter, request *http.Request, output []byte) int {
 	response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(output)), request)

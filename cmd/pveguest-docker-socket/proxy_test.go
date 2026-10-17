@@ -104,7 +104,6 @@ func startCommand(t *testing.T, getOnly bool, endpoint string) *http.Client {
 }
 
 // TestRejectedRequests checks that each rejected request class returns HTTP 501
-
 // before the command attempts a guest exec.
 func TestRejectedRequests(t *testing.T) {
 	oversize := strings.Repeat("a", testMaxBodyBytes+1)
@@ -210,7 +209,6 @@ func TestGuestResponseBody(t *testing.T) {
 }
 
 // guestCommand records the arguments and standard input of one command that
-
 // the fake Proxmox API received.
 type guestCommand struct {
 	argv  []string
@@ -223,11 +221,8 @@ type execRequestBody struct {
 }
 
 // newFakeProxmox starts a local TLS server that simulates the Proxmox exec API
-
 // and records each command. The server assigns exit code 1 to every command
-
 // that runs failProgram. An empty failProgram does not match any program.
-
 // The server supplies an HTTP 200 response as curl output.
 func newFakeProxmox(t *testing.T, failProgram string) (*httptest.Server, func() []guestCommand) {
 	t.Helper()
@@ -277,13 +272,9 @@ func newFakeProxmox(t *testing.T, failProgram string) (*httptest.Server, func() 
 }
 
 // TestStagedRequestBody sends a body of two stdin pieces plus 1000 bytes
-
 // through the public handler. It checks that the dd inputs reconstruct the
-
 // complete body in order and that curl uses @<directory>/body. It also checks
-
 // that the last command requests directory removal after success or a dd
-
 // failure, and that the dd failure returns HTTP 502.
 func TestStagedRequestBody(t *testing.T) {
 	pieceSize := transport.KindLXC.StdinLimit()

@@ -25,7 +25,6 @@ const (
 	cleanupTimeoutSeconds = 30
 
 	// curlSecondsPerMiB adds two seconds to the staged curl timeout for each
-
 	// complete MiB of body data. bytesPerMiB converts the body size to MiB.
 	curlSecondsPerMiB = 2
 	bytesPerMiB       = 1 << 20
@@ -35,9 +34,7 @@ const (
 )
 
 // handleStaged stages the request body in a guest file, runs curl with that
-
 // file, and relays the response. It defers removal before creating the
-
 // directory.
 func (handler *proxy) handleStaged(writer http.ResponseWriter, request *http.Request, body []byte) int {
 	directory, err := newStagingDirectory()
@@ -75,9 +72,7 @@ func newStagingDirectory() (string, error) {
 }
 
 // stageBody creates a guest directory with mode 0700 and appends body pieces
-
 // to bodyPath with dd. Each dd exec reads one piece from standard input,
-
 // within the guest exec stdin limit. These commands do not use a shell.
 func (handler *proxy) stageBody(ctx context.Context, directory string, bodyPath string, body []byte) error {
 	_, err := handler.runGuest(
@@ -98,9 +93,7 @@ func (handler *proxy) stageBody(ctx context.Context, directory string, bodyPath 
 }
 
 // removeStagingDirectory runs rm to remove the guest directory and its files,
-
 // even after request cancellation. It logs failures at error level without
-
 // changing the response.
 func (handler *proxy) removeStagingDirectory(ctx context.Context, directory string) {
 	_, err := handler.runGuest(
