@@ -477,6 +477,77 @@ Refresh reads `status/current` and sets `running` from the returned status. Open
 
 Import IDs use the format `<node>/<vmid>`.
 
+## pveguest-docker-socket
+
+`pveguest-docker-socket` serves the Docker Engine API on a local Unix socket
+with mode `0600`. Each supported request runs one
+`curl --unix-socket /var/run/docker.sock` command in a Proxmox container or
+VM. The existing transport package starts the command with `POST exec` and
+polls `GET exec-status`. The command returns the Docker daemon's HTTP
+status, response headers, and body.
+
+The guest must have `curl` and a Docker daemon that listens on
+`/var/run/docker.sock`. The token file must contain
+`user@realm!tokenid=secret`. The token needs these privileges:
+
+| Privilege | Scope |
+|---|---|
+| `VM.Audit` | `/vms/<vmid>` |
+| `VM.Guest.Exec` | `/vms/<vmid>` |
+
+1. Start the command before running `tofu plan`:
+
+   ```sh
+   go run ./cmd/pveguest-docker-socket \
+     -node suburban \
+     -endpoint https://pve.example.com:8006/ \
+     -node-name suburban \
+     -token-file /path/to/token \
+     -vmid 217 \
+     -socket /tmp/pveguest-docker.sock
+   ```
+
+2. Configure the `kreuzwerker/docker` provider to use the local socket:
+
+   ```hcl
+   provider "docker" {
+     host = "unix:///tmp/pveguest-docker.sock"
+   }
+   ```
+
+| Flag | Requirement or default | Behavior |
+|---|---|---|
+| `-node` | Required | The command uses this provider node key for the guest. |
+| `-endpoint` | Required | The transport uses this Proxmox API base URL. |
+| `-node-name` | Optional | The transport uses this Proxmox node name in API paths. |
+| `-token-file` | Required | The command reads the API token from this file. |
+| `-vmid` | Required | The command selects this guest ID. |
+| `-kind` | `lxc` | The command selects an `lxc` container or a `qemu` VM. |
+| `-insecure` | `false` | The transport skips TLS certificate verification when this flag is true. |
+| `-socket` | Required | The command listens on this local Unix socket. |
+| `-get-only` | `false` | The command allows only GET and HEAD when this flag is true. |
+
+The command returns HTTP 501 with a reason before starting a guest exec
+when any of these conditions applies:
+
+- The request sets an `Upgrade` header or includes `upgrade` in the `Connection` header.
+- The `follow` query value is `1` or `true`, with any letter case for `true`.
+- The last path segment is `events`.
+- Any path segment is `attach`.
+- The last path segment is `stats`, and the `stream` query value is neither `0` nor `false`, with any letter case for `false`.
+- The request body exceeds the stdin limit for one exec.
+- The command uses `-get-only`, and the request method is neither GET nor HEAD.
+
+| Limit | Value |
+|---|---|
+| Request body | 96 KiB per exec |
+| Proxmox exec output | 1 MiB per output stream |
+| Guest command timeout | 60 seconds |
+| Command execution and polling deadline | 90 seconds |
+
+The command returns HTTP 502 when a guest exec fails, curl exits with a
+nonzero code, or Proxmox truncates an output stream.
+
 ## Development
 
 | Command | Action |
