@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -36,6 +38,21 @@ const (
 	statusClassSuccess  = 2
 	statusClassDivisor  = 100
 	authorizationHeader = "Authorization"
+
+	// maxReadAttempts limits a GET to at most three attempts when its
+	// connection closes before a response. retryInitialDelay and
+	// retryDelayFactor set a 250 ms delay before the second attempt and a 1 s
+	// delay before the third.
+	maxReadAttempts   = 3
+	retryInitialDelay = 250 * time.Millisecond
+	retryDelayFactor  = 4
+
+	execStartOperation = "exec"
+
+	// closedIdleConnectionText is the text net/http returns when the server
+	// closes a kept-alive connection. net/http does not export an error value
+	// for this condition.
+	closedIdleConnectionText = "server closed idle connection"
 )
 
 // The token has the form user@realm!tokenid=secret.
@@ -170,14 +187,9 @@ func (connection *nodeConnection) call(
 	}
 	defer func() { <-connection.slots }()
 
-	httpRequest, err := connection.newHTTPRequest(ctx, guest, request, apiPath)
+	response, err := connection.send(ctx, guest, request, apiPath)
 	if err != nil {
 		return nil, err
-	}
-	response, err := connection.httpClient.Do(httpRequest)
-	if err != nil {
-		slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "err", err)
-		return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 
@@ -199,6 +211,66 @@ func (connection *nodeConnection) call(
 		)
 	}
 	return envelope.Data, nil
+}
+
+// send repeats a GET on a new connection when the connection closes before a
+// response. It sends every other method once.
+func (connection *nodeConnection) send(
+	ctx context.Context,
+	guest Guest,
+	request apiRequest,
+	apiPath string,
+) (*http.Response, error) {
+	maxAttempts := 1
+	if request.method == http.MethodGet {
+		maxAttempts = maxReadAttempts
+	}
+	delay := retryInitialDelay
+	for attempt := 1; ; attempt++ {
+		httpRequest, err := connection.newHTTPRequest(ctx, guest, request, apiPath)
+		if err != nil {
+			return nil, err
+		}
+		response, err := connection.httpClient.Do(httpRequest)
+		if err == nil {
+			return response, nil
+		}
+		if !isConnectionClosed(err) {
+			slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "err", err)
+			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
+		}
+		if request.method == http.MethodPost && request.operation == execStartOperation {
+			slog.ErrorContext(ctx, "exec start request lost its connection before a response", "guest", guest.String(), "path", apiPath, "err", err)
+			return nil, fmt.Errorf("%s: %s %s: guest command may have started; the next plan reads the guest state again: %w", guest, request.method, apiPath, err)
+		}
+		if attempt >= maxAttempts {
+			slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "attempt", attempt, "err", err)
+			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
+		}
+
+		slog.WarnContext(
+			ctx, "provider retries api read after a closed connection",
+			"method", request.method, "path", apiPath, "attempt", attempt, "err", err,
+		)
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			slog.ErrorContext(ctx, "context ended during the retry delay", "guest", guest.String(), "path", apiPath, "err", ctx.Err())
+			return nil, fmt.Errorf("%s: %s %s: retry stopped because the context ended: %w", guest, request.method, apiPath, ctx.Err())
+		case <-timer.C:
+		}
+		delay *= retryDelayFactor
+	}
+}
+
+// isConnectionClosed returns true for a connection reset, an EOF, an
+// unexpected EOF, or a closed idle connection.
+func isConnectionClosed(err error) bool {
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return strings.Contains(err.Error(), closedIdleConnectionText)
 }
 
 func (connection *nodeConnection) newHTTPRequest(
