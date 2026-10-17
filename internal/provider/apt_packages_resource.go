@@ -31,8 +31,10 @@ const (
 	dpkgQueryFormat = `${Package}\t${db:Status-Abbrev}\n`
 
 	// The first two characters of the status abbreviation are the desired
-	// action and the current status. "ii" is an installed package.
-	dpkgInstalledPrefix = "ii"
+	// action and the current status. "ii" is an installed package, and "hi" is
+	// an installed package with a hold.
+	dpkgInstalledPrefix     = "ii"
+	dpkgHeldInstalledPrefix = "hi"
 
 	dpkgNoMatchMessage = "no packages found matching"
 
@@ -634,6 +636,10 @@ func readInstalledPackages(
 	return parseDpkgQueryOutput(string(result.Stdout)), nil
 }
 
+func dpkgStatusInstalled(status string) bool {
+	return strings.HasPrefix(status, dpkgInstalledPrefix) || strings.HasPrefix(status, dpkgHeldInstalledPrefix)
+}
+
 func parseDpkgQueryOutput(output string) map[string]bool {
 	installed := make(map[string]bool)
 	for line := range strings.SplitSeq(output, "\n") {
@@ -641,7 +647,7 @@ func parseDpkgQueryOutput(output string) map[string]bool {
 		if !hasStatus {
 			continue
 		}
-		if strings.HasPrefix(status, dpkgInstalledPrefix) {
+		if dpkgStatusInstalled(status) {
 			installed[name] = true
 		}
 	}

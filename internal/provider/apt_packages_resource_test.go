@@ -122,7 +122,11 @@ func (api *aptGuestAPI) query(arguments []string, names []string) localeExecStat
 			stderr = "dpkg-query: no packages found matching " + name
 			continue
 		}
-		line := name + "\tii "
+		status := "ii "
+		if api.held[name] {
+			status = "hi "
+		}
+		line := name + "\t" + status
 		if withVersion {
 			line += "\t" + version
 		}

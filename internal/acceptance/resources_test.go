@@ -26,6 +26,10 @@ const (
 	// packages.
 	testSecondPackage = "sl"
 
+	// The version test needs a package with at least two versions in the apt
+	// sources of the test guest.
+	testVersionPackage = "rsync"
+
 	// madisonFieldCount sets the minimum number of fields that
 	// availableVersions accepts from an apt-cache madison output line.
 	madisonFieldCount = 3
@@ -498,15 +502,15 @@ func (g *testGuest) expectHeld(name string, want bool) resource.TestCheckFunc {
 func TestAccAptPackagesVersions(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.mustRun("apt-get", "update")
-	available := guest.availableVersions(testPackage)
+	available := guest.availableVersions(testVersionPackage)
 	if len(available) < 2 {
-		t.Skipf("apt lists %d versions of %s, want at least 2", len(available), testPackage)
+		t.Skipf("apt lists %d versions of %s, want at least 2", len(available), testVersionPackage)
 	}
 	newest := available[0]
 	oldest := available[len(available)-1]
-	t.Cleanup(guest.purgeTestPackage)
+	t.Cleanup(func() { guest.run(nil, "apt-get", "purge", "-y", "--", testVersionPackage) })
 	versionConfig := func(version string) string {
-		return guest.aptPackagesConfig([]string{testPackage}, fmt.Sprintf("versions = { %s = %q }", testPackage, version))
+		return guest.aptPackagesConfig([]string{testVersionPackage}, fmt.Sprintf("versions = { %s = %q }", testVersionPackage, version))
 	}
 
 	resource.Test(t, resource.TestCase{
@@ -515,24 +519,24 @@ func TestAccAptPackagesVersions(t *testing.T) {
 			{
 				Config: versionConfig(oldest),
 				Check: resource.ComposeAggregateTestCheckFunc(
-					guest.expectVersion(testPackage, oldest),
-					resource.TestCheckResourceAttr("pveguest_apt_packages.test", "versions."+testPackage, oldest),
+					guest.expectVersion(testVersionPackage, oldest),
+					resource.TestCheckResourceAttr("pveguest_apt_packages.test", "versions."+testVersionPackage, oldest),
 				),
 			},
 			{
 				// The test upgrades the guest package outside OpenTofu and
 				// checks that apply restores the configured older version.
 				PreConfig: func() {
-					guest.mustRun("apt-get", "install", "-y", "--allow-downgrades", "--", testPackage+"="+newest)
+					guest.mustRun("apt-get", "install", "-y", "--allow-downgrades", "--", testVersionPackage+"="+newest)
 				},
 				Config:           versionConfig(oldest),
 				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
-				Check:            guest.expectVersion(testPackage, oldest),
+				Check:            guest.expectVersion(testVersionPackage, oldest),
 			},
 			{
 				Config:           versionConfig(newest),
 				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
-				Check:            guest.expectVersion(testPackage, newest),
+				Check:            guest.expectVersion(testVersionPackage, newest),
 			},
 		},
 	})
