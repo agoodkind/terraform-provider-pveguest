@@ -87,6 +87,7 @@ resource "pveguest_systemd_unit" "ssh" {
 | `nodes.<name>.endpoint` | string | yes | | URL of the Proxmox VE API, for example `https://10.230.0.254:8006`. |
 | `nodes.<name>.api_token` | string, sensitive | yes | | API token in the form `user@realm!tokenid=secret`. |
 | `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
+| `nodes.<name>.max_exec_requests` | number | no | `4` | This setting limits concurrent guest commands for this node configuration and requires a value of at least 1. |
 | `max_requests` | number | no | `4` | Concurrent API requests per hypervisor. |
 | `controller_ca_file` | string | no | | Path of a PEM file with certificate authorities that the controller trusts in addition to the system roots when `pveguest_download` uses `fetch = "controller"`. |
 | `smtp2go_api_key` | string, sensitive | no | | The key authenticates SMTP2GO requests for `pveguest_mail_relay`. The provider uses `PVEGUEST_SMTP2GO_API_KEY` when the argument is empty. |
@@ -130,6 +131,8 @@ An exec call starts the command and returns an identifier. The provider polls
 and doubles up to 2 s. A command has a timeout of 120 seconds by default. The
 wait ends 15 seconds after that timeout, or when OpenTofu cancels the
 operation.
+
+Each command reserves an exec slot before its POST exec request and releases the slot after the command exits or fails. The slot covers that request and every exec-status poll. `max_exec_requests` limits concurrent commands across all resources that use the same node configuration in one provider process. A caller waits for a slot until it can reserve one or its context ends. `max_requests` limits individual API requests in flight and releases each request slot between exec-status polls.
 
 A result with a truncated output stream or a timed-out command fails with an
 error that states the guest and the command. Every API error states the guest

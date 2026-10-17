@@ -85,12 +85,16 @@ func configuredProviderServer(
 		"api_token": tftypes.String,
 		"insecure":  tftypes.Bool,
 		"node_name": tftypes.String,
+
+		"max_exec_requests": tftypes.Number,
 	}}
 	node := tftypes.NewValue(nodeType, map[string]tftypes.Value{
 		"endpoint":  tftypes.NewValue(tftypes.String, endpoint),
 		"api_token": tftypes.NewValue(tftypes.String, optionsToken),
 		"insecure":  tftypes.NewValue(tftypes.Bool, nil),
 		"node_name": tftypes.NewValue(tftypes.String, nil),
+
+		"max_exec_requests": tftypes.NewValue(tftypes.Number, nil),
 	})
 	providerConfig, err := tfprotov6.NewDynamicValue(providerType, tftypes.NewValue(providerType, map[string]tftypes.Value{
 		"nodes": tftypes.NewValue(tftypes.Map{ElementType: nodeType}, map[string]tftypes.Value{

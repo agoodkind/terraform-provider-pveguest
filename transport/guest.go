@@ -153,12 +153,21 @@ type execStatus struct {
 }
 
 // Run starts the command in the guest, polls until it exits, and returns its
-// output and exit status. A nonzero exit status is part of the Result.
+// output and exit status. A nonzero exit status is part of the Result. Each
+// command reserves an exec slot before the POST exec request and releases the
+// slot after the command exits or fails. The slot covers the POST exec request
+// and every exec-status poll.
 func (client *Client) Run(ctx context.Context, guest Guest, command Command) (Result, error) {
 	connection, timeout, err := client.prepare(guest, command)
 	if err != nil {
 		return Result{}, err
 	}
+
+	err = connection.acquireExecSlot(ctx, guest)
+	if err != nil {
+		return Result{}, err
+	}
+	defer connection.releaseExecSlot()
 
 	processID, err := connection.startExec(ctx, guest, command, timeout)
 	if err != nil {

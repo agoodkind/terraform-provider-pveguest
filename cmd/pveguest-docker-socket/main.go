@@ -28,7 +28,6 @@ const (
 
 	defaultKind        = string(transport.KindLXC)
 	defaultGuestSocket = "/var/run/docker.sock"
-	maxRequestsPerNode = 4
 
 	defaultMaxBodyBytes = 256 << 20
 )
@@ -120,7 +119,7 @@ func run(arguments []string) error {
 			Insecure: settings.insecure,
 			NodeName: settings.nodeName,
 		},
-	}, maxRequestsPerNode)
+	}, transport.DefaultMaxRequests)
 	if err != nil {
 		slog.Error("create transport client failed", "err", err)
 		return fmt.Errorf("create transport client: %w", err)
