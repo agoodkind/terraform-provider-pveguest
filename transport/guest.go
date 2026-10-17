@@ -220,7 +220,7 @@ func (connection *nodeConnection) startExec(
 	}
 	data, err := connection.call(ctx, guest, apiRequest{
 		method:    http.MethodPost,
-		operation: "exec",
+		operation: execStartOperation,
 		query:     nil,
 		body:      document,
 	})
