@@ -23,12 +23,10 @@ const (
 	largeLineFillBytes = 80
 
 	// testSecondPackage selects the package that the removal test drops from
-
 	// packages.
 	testSecondPackage = "sl"
 
 	// madisonFieldCount sets the minimum number of fields that
-
 	// availableVersions accepts from an apt-cache madison output line.
 	madisonFieldCount = 3
 )
@@ -461,7 +459,6 @@ func (g *testGuest) packageHeld(name string) bool {
 }
 
 // availableVersions returns distinct versions from apt-cache madison in
-
 // command output order.
 func (g *testGuest) availableVersions(name string) []string {
 	g.t.Helper()

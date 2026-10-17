@@ -48,9 +48,7 @@ const (
 var packageNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9+.-]+$`)
 
 // packageVersionPattern accepts an optional numeric epoch and colon before a
-
 // required digit. It permits letters, digits, periods, plus signs, tildes, and
-
 // hyphens after that digit.
 var packageVersionPattern = regexp.MustCompile(`^([0-9]+:)?[0-9][A-Za-z0-9.+~-]*$`)
 
@@ -69,7 +67,6 @@ type aptPackagesModel struct {
 }
 
 // aptDesired stores package names, exact versions, lock selections, and the
-
 // removal setting as Go values.
 type aptDesired struct {
 	Packages       []string
@@ -172,7 +169,6 @@ func (r *aptPackagesResource) ValidateConfig(
 }
 
 // ModifyPlan warns which declared packages apply or destroy will remove when
-
 // remove_on_delete is true.
 func (r *aptPackagesResource) ModifyPlan(
 	ctx context.Context,
@@ -334,9 +330,7 @@ func (r *aptPackagesResource) Delete(ctx context.Context, req resource.DeleteReq
 }
 
 // apply changes packages under the guest apt lock. It unholds packages removed
-
 // from locked, installs missing packages or corrects version differences,
-
 // removes dropped packages when enabled, and applies the requested holds.
 func (r *aptPackagesResource) apply(ctx context.Context, plan aptPackagesModel, prior *aptPackagesModel) diag.Diagnostics {
 	desired, diagnostics := desiredFrom(ctx, plan)
@@ -479,7 +473,6 @@ func aptCommand(arguments ...string) transport.Command {
 }
 
 // aptInstallCommand adds options that permit downgrades and changes to held
-
 // packages when changesVersions is true.
 func aptInstallCommand(specs []string, changesVersions bool) transport.Command {
 	arguments := []string{"install", "-y", "--no-install-recommends"}
@@ -570,7 +563,6 @@ func subtractNames(names []string, removed []string) []string {
 }
 
 // readInstalledState maps installed package names to versions when
-
 // withVersions is true and to empty strings otherwise.
 func readInstalledState(
 	ctx context.Context,

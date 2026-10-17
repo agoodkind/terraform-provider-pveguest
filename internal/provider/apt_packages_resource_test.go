@@ -224,7 +224,6 @@ func aptServer(t *testing.T, guest *aptGuestAPI) (tfprotov6.ProviderServer, tfty
 }
 
 // aptSpec stores test inputs and distinguishes null attributes from empty
-
 // collections and false.
 type aptSpec struct {
 	packages       []string
