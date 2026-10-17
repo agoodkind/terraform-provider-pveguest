@@ -315,7 +315,7 @@ func readInstalledVersions(
 		if len(fields) != debVersionFieldCount {
 			continue
 		}
-		if strings.HasPrefix(fields[1], dpkgInstalledPrefix) {
+		if dpkgStatusInstalled(fields[1]) {
 			installed[fields[0]] = strings.TrimSpace(fields[2])
 		}
 	}
