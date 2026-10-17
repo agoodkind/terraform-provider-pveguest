@@ -116,7 +116,7 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"locked": schema.SetAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Apply runs apt-mark hold for each package in locked. Every package name must also appear in packages.",
+				Description: "The provider runs apt-mark hold on the guest for each package in locked. Every package name must also appear in packages.",
 				Validators: []validator.Set{
 					setvalidator.ValueStringsAre(
 						stringvalidator.RegexMatches(packageNamePattern, "must be a Debian package name"),
@@ -443,7 +443,7 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 			"Installed package versions differ from requested versions.",
 			fmt.Sprintf(
 				"After apt-get install, some packages on guest %s have installed versions that differ "+
-					"from the versions that the versions attribute requests: %s. "+
+					"from their requested versions: %s. "+
 					"Each entry lists the package name, installed version, and requested version.",
 				guest, strings.Join(wrongVersion, "; "),
 			),
