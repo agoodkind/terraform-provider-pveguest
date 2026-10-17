@@ -12,14 +12,12 @@ import (
 )
 
 const (
-	// stagingDirectoryPrefix is the path prefix for temporary guest directories.
 	stagingDirectoryPrefix = "/tmp/pveguest-docker-socket-"
 
 	stagingBodyFile      = "body"
 	stagingRandomBytes   = 8
 	stagingDirectoryMode = "0700"
 
-	// stagingCommandTimeoutSeconds limits each mkdir and dd exec to 30 seconds.
 	stagingCommandTimeoutSeconds = 30
 
 	cleanupTimeoutSeconds = 30
