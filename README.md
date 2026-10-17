@@ -526,6 +526,7 @@ The guest must have `curl` and a Docker daemon that listens on
 | `-insecure` | `false` | The transport skips TLS certificate verification when this flag is true. |
 | `-socket` | Required | The command listens on this local Unix socket. |
 | `-get-only` | `false` | The command allows only GET and HEAD when this flag is true. |
+| `-max-body-bytes` | `268435456` (256 MiB) | The command rejects larger request bodies with HTTP 501 before starting any guest exec. |
 
 The command returns HTTP 501 with a reason before starting a guest exec
 when any of these conditions apply:
@@ -535,18 +536,58 @@ when any of these conditions apply:
 - The last path segment is `events`.
 - Any path segment is `attach`.
 - The last path segment is `stats`, and the `stream` query value is neither `0` nor `false`, with any letter case for `false`.
-- The request body exceeds the stdin limit for one exec.
+- The request body exceeds `-max-body-bytes`.
 - The command uses `-get-only`, and the request method is neither GET nor HEAD.
 
 | Limit | Value |
 |---|---|
-| Request body | 96 KiB per exec |
+| Request body per exec | 96 KiB on standard input |
+| Largest request body | `-max-body-bytes`, which defaults to 256 MiB |
 | Proxmox exec output | 1 MiB per output stream |
-| Guest command timeout | 60 seconds |
-| Command execution and polling deadline | 90 seconds |
+| Guest command timeout | 60 seconds; staged curl uses 60 seconds plus 2 seconds per complete MiB of body, up to 3600 seconds |
+| Command execution and polling deadline | Each exec timeout plus 30 seconds |
 
-The command returns HTTP 502 when a guest exec fails, curl exits with a
-nonzero code, or Proxmox truncates an output stream.
+The command returns HTTP 502 when any of these conditions apply:
+
+- A guest exec fails.
+- curl exits with a nonzero code.
+- A staging step fails.
+- Proxmox truncates an output stream.
+- The guest response body is incomplete.
+
+For mkdir, dd, or curl failures, the response includes the program name and
+the exit code or error.
+
+### Stage larger request bodies
+
+The command sends a body of at most 96 KiB directly to curl on standard
+input with `--data-binary @-`. For a larger body, the command performs
+these steps:
+
+1. It runs `mkdir -m 0700 -- <directory>` to create a directory with the path
+   `/tmp/pveguest-docker-socket-<16 random hex characters>`.
+2. It runs
+   `dd of=<directory>/body oflag=append conv=notrunc status=none`
+   once per body piece, in order. Each exec supplies at most 96 KiB on
+   standard input. dd appends each piece without a shell redirect.
+3. It runs
+   `curl --unix-socket /var/run/docker.sock --data-binary @<directory>/body`
+   for the request.
+4. It attempts `rm -r -f -- <directory>` after every outcome, including
+   a failure.
+
+A failed removal produces an error log entry and does not change the response.
+
+The guest must provide these programs:
+
+- `curl`
+- `mkdir`
+- `dd`
+- `rm`
+
+These execs do not use a shell. Staging uses the existing `VM.Audit` and
+`VM.Guest.Exec` privileges on `/vms/<vmid>`. The command does not call the
+file-write method.
 
 ## Development
 

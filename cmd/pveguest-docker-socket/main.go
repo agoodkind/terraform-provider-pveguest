@@ -29,18 +29,22 @@ const (
 	defaultKind        = string(transport.KindLXC)
 	defaultGuestSocket = "/var/run/docker.sock"
 	maxRequestsPerNode = 4
+
+	// defaultMaxBodyBytes sets the default maximum request body size to 256 MiB.
+	defaultMaxBodyBytes = 256 << 20
 )
 
 type config struct {
-	node       string
-	endpoint   string
-	nodeName   string
-	tokenFile  string
-	vmid       int64
-	kind       string
-	insecure   bool
-	socketPath string
-	getOnly    bool
+	node         string
+	endpoint     string
+	nodeName     string
+	tokenFile    string
+	vmid         int64
+	kind         string
+	insecure     bool
+	socketPath   string
+	getOnly      bool
+	maxBodyBytes int64
 }
 
 func main() {
@@ -63,6 +67,7 @@ func parseConfig(arguments []string) (config, error) {
 	flags.BoolVar(&settings.insecure, "insecure", false, "skip TLS certificate verification")
 	flags.StringVar(&settings.socketPath, "socket", "", "local Unix socket path")
 	flags.BoolVar(&settings.getOnly, "get-only", false, "allow only GET and HEAD requests")
+	flags.Int64Var(&settings.maxBodyBytes, "max-body-bytes", defaultMaxBodyBytes, "largest request body in bytes")
 	err := flags.Parse(arguments)
 	if err != nil {
 		slog.Error("parse flags failed", "err", err)
@@ -123,7 +128,7 @@ func run(arguments []string) error {
 	}
 
 	guest := transport.Guest{Node: settings.node, VMID: settings.vmid, Kind: transport.Kind(settings.kind)}
-	proxy := newProxy(client, guest, defaultGuestSocket, settings.getOnly)
+	proxy := newProxy(client, guest, defaultGuestSocket, settings.getOnly, settings.maxBodyBytes)
 
 	stop, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

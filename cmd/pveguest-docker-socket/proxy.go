@@ -21,10 +21,13 @@ const (
 	// commandTimeoutSeconds limits each curl exec in the guest to 60 seconds.
 	commandTimeoutSeconds = 60
 
-	// requestDeadline limits command execution and status polling to the command
+	// requestDeadlineMargin extends each exec deadline 30 seconds beyond the
 
-	// timeout plus 30 seconds.
-	requestDeadline = (commandTimeoutSeconds + 30) * time.Second
+	// command timeout for command execution and status polling.
+	requestDeadlineMargin = 30 * time.Second
+
+	// stdinBodySource selects standard input as the request body source for curl.
+	stdinBodySource = "@-"
 
 	queryFollow = "follow"
 	queryStream = "stream"
@@ -59,14 +62,27 @@ var droppedResponseHeaders = map[string]bool{
 }
 
 type proxy struct {
-	client      *transport.Client
-	guest       transport.Guest
-	guestSocket string
-	getOnly     bool
+	client       *transport.Client
+	guest        transport.Guest
+	guestSocket  string
+	getOnly      bool
+	maxBodyBytes int64
 }
 
-func newProxy(client *transport.Client, guest transport.Guest, guestSocket string, getOnly bool) *proxy {
-	return &proxy{client: client, guest: guest, guestSocket: guestSocket, getOnly: getOnly}
+func newProxy(
+	client *transport.Client,
+	guest transport.Guest,
+	guestSocket string,
+	getOnly bool,
+	maxBodyBytes int64,
+) *proxy {
+	return &proxy{
+		client:       client,
+		guest:        guest,
+		guestSocket:  guestSocket,
+		getOnly:      getOnly,
+		maxBodyBytes: maxBodyBytes,
+	}
 }
 
 // ServeHTTP handles each request and logs its method, URL, status, and duration.
@@ -91,32 +107,58 @@ func (handler *proxy) handle(writer http.ResponseWriter, request *http.Request) 
 		return reject(writer, request, http.StatusNotImplemented, reason)
 	}
 
-	limit := handler.guest.Kind.StdinLimit()
-	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, int64(limit)))
+	body, err := io.ReadAll(http.MaxBytesReader(writer, request.Body, handler.maxBodyBytes))
 	if err != nil {
 		return reject(
 			writer, request, http.StatusNotImplemented,
-			fmt.Sprintf("request body exceeds the stdin limit of %d bytes: %v", limit, err),
+			fmt.Sprintf("request body exceeds the limit of %d bytes: %v", handler.maxBodyBytes, err),
 		)
 	}
+	if len(body) > handler.guest.Kind.StdinLimit() {
+		return handler.handleStaged(writer, request, body)
+	}
 
-	ctx, cancel := context.WithTimeout(request.Context(), requestDeadline)
-	defer cancel()
-	result, err := handler.client.Run(ctx, handler.guest, transport.Command{
-		Argv:           curlArguments(handler.guestSocket, request, len(body) > 0),
-		Stdin:          body,
-		TimeoutSeconds: commandTimeoutSeconds,
-	})
+	bodySource := ""
+	if len(body) > 0 {
+		bodySource = stdinBodySource
+	}
+	result, err := handler.runGuest(
+		request.Context(), curlArguments(handler.guestSocket, request, bodySource), body, commandTimeoutSeconds,
+	)
 	if err != nil {
-		slog.Error("guest command failed", "err", err)
 		return reject(writer, request, http.StatusBadGateway, err.Error())
 	}
-	if result.ExitCode != 0 {
-		failure := fmt.Errorf("curl exited with code %d: %s", result.ExitCode, strings.TrimSpace(string(result.Stderr)))
-		slog.Error("guest curl failed", "err", failure)
-		return reject(writer, request, http.StatusBadGateway, failure.Error())
-	}
 	return relay(writer, request, result.Stdout)
+}
+
+// runGuest runs one command in the guest and fails on a transport error or a
+// nonzero exit code.
+func (handler *proxy) runGuest(
+	ctx context.Context,
+	argv []string,
+	stdin []byte,
+	timeoutSeconds int,
+) (transport.Result, error) {
+	deadline := time.Duration(timeoutSeconds)*time.Second + requestDeadlineMargin
+	commandContext, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+	result, err := handler.client.Run(commandContext, handler.guest, transport.Command{
+		Argv:           argv,
+		Stdin:          stdin,
+		TimeoutSeconds: timeoutSeconds,
+	})
+	if err != nil {
+		slog.Error("guest command failed", "program", argv[0], "err", err)
+		return transport.Result{}, fmt.Errorf("guest command %s failed: %w", argv[0], err)
+	}
+	if result.ExitCode != 0 {
+		failure := fmt.Errorf(
+			"%s exited with code %d: %s", argv[0], result.ExitCode, strings.TrimSpace(string(result.Stderr)),
+		)
+		slog.Error("guest command exited with an error", "err", failure)
+		return transport.Result{}, failure
+	}
+	return result, nil
 }
 
 func reject(writer http.ResponseWriter, request *http.Request, status int, reason string) int {
@@ -168,7 +210,7 @@ func headerHasToken(header http.Header, name string, token string) bool {
 // curlArguments builds the curl command line for the guest socket and request.
 
 // It adds --data-binary @- when curl must read a body from standard input.
-func curlArguments(guestSocket string, request *http.Request, hasBody bool) []string {
+func curlArguments(guestSocket string, request *http.Request, bodySource string) []string {
 	arguments := []string{"curl", "-sS", "--raw", "-i", "--unix-socket", guestSocket}
 	if request.Method == http.MethodHead {
 		arguments = append(arguments, "--head")
@@ -184,8 +226,8 @@ func curlArguments(guestSocket string, request *http.Request, hasBody bool) []st
 			arguments = append(arguments, "-H", name+": "+value)
 		}
 	}
-	if hasBody {
-		arguments = append(arguments, "--data-binary", "@-")
+	if bodySource != "" {
+		arguments = append(arguments, "--data-binary", bodySource)
 	}
 	target := url.URL{Scheme: "http", Host: "localhost", Path: "", RawPath: "", RawQuery: ""}
 	return append(arguments, target.String()+request.URL.RequestURI())
