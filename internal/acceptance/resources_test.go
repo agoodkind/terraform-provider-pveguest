@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,6 +21,16 @@ const (
 	// 200 KiB, about twice the 96 KiB limit of one exec call for a container.
 	largeContentBytes  = 200 * 1024
 	largeLineFillBytes = 80
+
+	// testSecondPackage selects the package that the removal test drops from
+
+	// packages.
+	testSecondPackage = "sl"
+
+	// madisonFieldCount sets the minimum number of fields that
+
+	// availableVersions accepts from an apt-cache madison output line.
+	madisonFieldCount = 3
 )
 
 func sha256Hex(content string) string {
@@ -418,6 +429,188 @@ resource "pveguest_apt_packages" "test" {
 				Config:           config,
 				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
 				Check:            expectInstalled,
+			},
+		},
+	})
+}
+
+func (g *testGuest) aptPackagesConfig(packages []string, extra string) string {
+	quoted := make([]string, 0, len(packages))
+	for _, name := range packages {
+		quoted = append(quoted, fmt.Sprintf("%q", name))
+	}
+	return g.providerBlock() + fmt.Sprintf(`
+resource "pveguest_apt_packages" "test" {
+  node     = local.node
+  vmid     = local.vmid
+  kind     = local.kind
+  packages = [%s]
+  %s
+}
+`, strings.Join(quoted, ", "), extra)
+}
+
+func (g *testGuest) packageVersion(name string) string {
+	g.t.Helper()
+	return strings.TrimSpace(g.mustRun("dpkg-query", "--show", "--showformat", "${Version}", "--", name))
+}
+
+func (g *testGuest) packageHeld(name string) bool {
+	g.t.Helper()
+	return slices.Contains(strings.Fields(g.mustRun("apt-mark", "showhold")), name)
+}
+
+// availableVersions returns distinct versions from apt-cache madison in
+
+// command output order.
+func (g *testGuest) availableVersions(name string) []string {
+	g.t.Helper()
+	var versions []string
+	for line := range strings.SplitSeq(g.mustRun("apt-cache", "madison", "--", name), "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) < madisonFieldCount {
+			continue
+		}
+		version := strings.TrimSpace(fields[1])
+		if !slices.Contains(versions, version) {
+			versions = append(versions, version)
+		}
+	}
+	return versions
+}
+
+func (g *testGuest) expectVersion(name string, want string) resource.TestCheckFunc {
+	return checkGuest(func() error {
+		got := g.packageVersion(name)
+		if got != want {
+			return fmt.Errorf("package %s has version %s, want %s", name, got, want)
+		}
+		return nil
+	})
+}
+
+func (g *testGuest) expectHeld(name string, want bool) resource.TestCheckFunc {
+	return checkGuest(func() error {
+		if g.packageHeld(name) != want {
+			return fmt.Errorf("package %s held is %t, want %t", name, !want, want)
+		}
+		return nil
+	})
+}
+
+func TestAccAptPackagesVersions(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.mustRun("apt-get", "update")
+	available := guest.availableVersions(testPackage)
+	if len(available) < 2 {
+		t.Skipf("apt lists %d versions of %s, want at least 2", len(available), testPackage)
+	}
+	newest := available[0]
+	oldest := available[len(available)-1]
+	t.Cleanup(guest.purgeTestPackage)
+	versionConfig := func(version string) string {
+		return guest.aptPackagesConfig([]string{testPackage}, fmt.Sprintf("versions = { %s = %q }", testPackage, version))
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: versionConfig(oldest),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					guest.expectVersion(testPackage, oldest),
+					resource.TestCheckResourceAttr("pveguest_apt_packages.test", "versions."+testPackage, oldest),
+				),
+			},
+			{
+				// The test upgrades the guest package outside OpenTofu and
+				// checks that apply restores the configured older version.
+				PreConfig: func() {
+					guest.mustRun("apt-get", "install", "-y", "--allow-downgrades", "--", testPackage+"="+newest)
+				},
+				Config:           versionConfig(oldest),
+				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
+				Check:            guest.expectVersion(testPackage, oldest),
+			},
+			{
+				Config:           versionConfig(newest),
+				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
+				Check:            guest.expectVersion(testPackage, newest),
+			},
+		},
+	})
+}
+
+func TestAccAptPackagesLocked(t *testing.T) {
+	guest := newTestGuest(t)
+	t.Cleanup(guest.purgeTestPackage)
+	// The cleanup runs apt-mark unhold before purgeTestPackage removes the
+	// package.
+	t.Cleanup(func() { guest.run(nil, "apt-mark", "unhold", "--", testPackage) })
+	lockedConfig := guest.aptPackagesConfig([]string{testPackage}, fmt.Sprintf("locked = [%q]", testPackage))
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: lockedConfig,
+				Check:  guest.expectHeld(testPackage, true),
+			},
+			{
+				// The test removes the hold outside OpenTofu and checks that
+				// apply restores it.
+				PreConfig:        func() { guest.mustRun("apt-mark", "unhold", "--", testPackage) },
+				Config:           lockedConfig,
+				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
+				Check:            guest.expectHeld(testPackage, true),
+			},
+			{
+				// The test removes the package from locked and checks that
+				// apply removes the hold.
+				Config:           guest.aptPackagesConfig([]string{testPackage}, "locked = []"),
+				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
+				Check:            guest.expectHeld(testPackage, false),
+			},
+		},
+	})
+}
+
+func TestAccAptPackagesRemoveOnDelete(t *testing.T) {
+	guest := newTestGuest(t)
+	t.Cleanup(guest.purgeTestPackage)
+	t.Cleanup(func() { guest.run(nil, "apt-get", "purge", "-y", "--", testSecondPackage) })
+	removeConfig := func(packages ...string) string {
+		return guest.aptPackagesConfig(packages, "remove_on_delete = true")
+	}
+	expectState := func(name string, want bool) resource.TestCheckFunc {
+		return checkGuest(func() error {
+			if guest.packageInstalled(name) != want {
+				return fmt.Errorf("package %s installed is %t, want %t", name, !want, want)
+			}
+			return nil
+		})
+	}
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		CheckDestroy:             expectState(testPackage, false),
+		Steps: []resource.TestStep{
+			{
+				Config: removeConfig(testPackage, testSecondPackage),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					expectState(testPackage, true),
+					expectState(testSecondPackage, true),
+				),
+			},
+			{
+				// The test drops testSecondPackage from packages and checks
+				// that apply removes it while testPackage remains installed.
+				Config:           removeConfig(testPackage),
+				ConfigPlanChecks: expectAction("pveguest_apt_packages.test", plancheck.ResourceActionUpdate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					expectState(testPackage, true),
+					expectState(testSecondPackage, false),
+				),
 			},
 		},
 	})

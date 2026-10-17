@@ -262,12 +262,16 @@ An apply with at least one missing package runs `apt-get update` and then
 with its own error. The provider runs one apt operation per guest at a time.
 apt-get waits up to 300 seconds for the package lock during installation.
 
-A package remains installed after its name is removed from `packages` and
-after destroy.
+Apply installs the exact package versions in `versions`, including downgrades. Read records the installed versions for those packages. Apply runs `apt-mark hold` for each package in `locked` and runs `apt-mark unhold` for packages removed from `locked`. Read reports which packages in `locked` still appear in `apt-mark showhold`.
+
+When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. The plan warns which declared packages apply or destroy will remove.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `packages` | set of string | yes | Specify Debian package names without version or architecture suffixes. |
+| `versions` | map of string | no | Map package names to exact Debian versions. Every key must also appear in `packages`. |
+| `locked` | set of string | no | Select packages to lock with `apt-mark hold`. Every name must also appear in `packages`. |
+| `remove_on_delete` | bool | no | Set to `true` to remove packages dropped from `packages` during apply and all listed packages during destroy. When `false` or unset, these removal operations change only OpenTofu state. |
 
 ## pveguest_deb_packages
 
@@ -523,7 +527,7 @@ The tests change only these items in the guest, and each test removes its
 items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
-- The package `hello`. The cleanup purges it.
+- The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 - The sysrepo module `pveguest-acc` and its data in the `running` datastore.
