@@ -494,7 +494,7 @@ func (g *testGuest) expectVersion(name string, want string) resource.TestCheckFu
 func (g *testGuest) expectHeld(name string, want bool) resource.TestCheckFunc {
 	return checkGuest(func() error {
 		if g.packageHeld(name) != want {
-			return fmt.Errorf("package %s held is %t, want %t", name, !want, want)
+			return fmt.Errorf("Package %s has an apt-mark hold state of %t; the test expects %t.", name, !want, want)
 		}
 		return nil
 	})
@@ -505,7 +505,7 @@ func TestAccAptPackagesVersions(t *testing.T) {
 	guest.mustRun("apt-get", "update")
 	available := guest.availableVersions(testVersionPackage)
 	if len(available) < 2 {
-		t.Skipf("apt lists %d versions of %s, want at least 2", len(available), testVersionPackage)
+		t.Skipf("apt lists %d versions of package %s, but the test needs at least 2.", len(available), testVersionPackage)
 	}
 	newest := available[0]
 	oldest := available[len(available)-1]
@@ -587,7 +587,7 @@ func TestAccAptPackagesRemoveOnDelete(t *testing.T) {
 	expectState := func(name string, want bool) resource.TestCheckFunc {
 		return checkGuest(func() error {
 			if guest.packageInstalled(name) != want {
-				return fmt.Errorf("package %s installed is %t, want %t", name, !want, want)
+				return fmt.Errorf("Package %s has an installation state of %t; the test expects %t.", name, !want, want)
 			}
 			return nil
 		})

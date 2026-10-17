@@ -264,7 +264,7 @@ apt-get waits up to 300 seconds for the package lock during installation.
 
 Apply installs the exact package versions in `versions`, including downgrades. Read records the installed versions for those packages. Apply runs `apt-mark hold` for each package in `locked` and runs `apt-mark unhold` for packages removed from `locked`. Read reports which packages in `locked` still appear in `apt-mark showhold`.
 
-When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. The plan warns which declared packages apply or destroy will remove.
+When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. When remove_on_delete is true, the plan for pveguest_apt_packages shows a warning that lists the declared packages that the provider removes during apply or destroy.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |

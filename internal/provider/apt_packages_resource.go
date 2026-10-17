@@ -125,7 +125,7 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 			},
 			"remove_on_delete": schema.BoolAttribute{
 				Optional:    true,
-				Description: "When remove_on_delete is true, apply runs apt-get remove for packages removed from packages, and destroy removes all listed packages. When false or unset, these removal operations change only OpenTofu state.",
+				Description: "When remove_on_delete is true, the provider runs apt-get remove during apply for packages that the configuration removes from packages and removes all listed packages during destroy. When remove_on_delete is false or unset, the provider keeps the packages installed and changes only OpenTofu state.",
 			},
 		}),
 	}
@@ -332,9 +332,12 @@ func (r *aptPackagesResource) Delete(ctx context.Context, req resource.DeleteReq
 	resp.Diagnostics.Append(r.removePackages(ctx, guest, desired.Packages)...)
 }
 
-// apply changes packages under the guest apt lock. It unholds packages removed
-// from locked, installs missing packages or corrects version differences,
-// removes dropped packages when enabled, and applies the requested holds.
+// apply is the aptPackagesResource method that the provider runs under the
+// guest apt lock. The provider runs apt-mark unhold for packages that the
+// locked attribute no longer includes. The provider installs missing packages
+// or corrects version differences. The provider removes dropped packages when
+// remove_on_delete is true. The provider runs apt-mark hold for the packages in
+// locked.
 func (r *aptPackagesResource) apply(ctx context.Context, plan aptPackagesModel, prior *aptPackagesModel) diag.Diagnostics {
 	desired, diagnostics := desiredFrom(ctx, plan)
 	if diagnostics.HasError() {
@@ -421,9 +424,10 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 	var stillMissing []string
 	var wrongVersion []string
 	for _, name := range pendingPackages(desired.Packages, desired.Versions, installed) {
-		_, isInstalled := installed[name]
+		installedVersion, isInstalled := installed[name]
 		if isInstalled {
-			wrongVersion = append(wrongVersion, name)
+			entry := fmt.Sprintf("%s, %s, %s", name, installedVersion, desired.Versions[name])
+			wrongVersion = append(wrongVersion, entry)
 		} else {
 			stillMissing = append(stillMissing, name)
 		}
@@ -435,7 +439,15 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 		)
 	}
 	if len(wrongVersion) > 0 {
-		diagnostics.AddError("Package versions differ from versions after apt-get install", fmt.Sprintf("%s: %s", guest, strings.Join(wrongVersion, ", ")))
+		diagnostics.AddError(
+			"Installed package versions differ from requested versions.",
+			fmt.Sprintf(
+				"After apt-get install, some packages on guest %s have installed versions that differ "+
+					"from the versions that the versions attribute requests: %s. "+
+					"Each entry lists the package name, installed version, and requested version.",
+				guest, strings.Join(wrongVersion, "; "),
+			),
+		)
 	}
 	return diagnostics
 }
