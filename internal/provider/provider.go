@@ -37,6 +37,8 @@ type nodeModel struct {
 	APIToken types.String `tfsdk:"api_token"`
 	Insecure types.Bool   `tfsdk:"insecure"`
 	NodeName types.String `tfsdk:"node_name"`
+
+	MaxExecRequests types.Int64 `tfsdk:"max_exec_requests"`
 }
 
 type providerData struct {
@@ -113,6 +115,11 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 							Optional:    true,
 							Description: "Skips TLS certificate verification. The default is false.",
 						},
+						"max_exec_requests": schema.Int64Attribute{
+							Optional:    true,
+							Description: "This setting limits concurrent guest commands for this node configuration. The default is 4, and the minimum is 1.",
+							Validators:  []validator.Int64{int64validator.AtLeast(1)},
+						},
 					},
 				},
 			},
@@ -176,10 +183,10 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	nodes := make(map[string]transport.NodeConfig, len(nodeModels))
 	for name, model := range nodeModels {
 		if model.Endpoint.IsUnknown() || model.APIToken.IsUnknown() || model.Insecure.IsUnknown() ||
-			model.NodeName.IsUnknown() {
+			model.NodeName.IsUnknown() || model.MaxExecRequests.IsUnknown() {
 			resp.Diagnostics.AddError(
 				"Unknown provider configuration",
-				fmt.Sprintf("The endpoint, api_token, insecure, and node_name arguments of node %q must be known when the provider is configured.", name),
+				fmt.Sprintf("The endpoint, api_token, insecure, node_name, and max_exec_requests arguments of node %q must be known when the provider is configured.", name),
 			)
 			return
 		}
@@ -188,6 +195,8 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 			APIToken: model.APIToken.ValueString(),
 			Insecure: model.Insecure.ValueBool(),
 			NodeName: model.NodeName.ValueString(),
+
+			MaxExecRequests: int(model.MaxExecRequests.ValueInt64()),
 		}
 	}
 
