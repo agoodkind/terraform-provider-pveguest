@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -203,9 +202,9 @@ func relay(writer http.ResponseWriter, request *http.Request, output []byte) int
 	}
 	defer func() { _ = response.Body.Close() }()
 	body, err := io.ReadAll(response.Body)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) {
+	if err != nil {
 		slog.Error("read guest response body failed", "err", err)
-		return reject(writer, request, http.StatusBadGateway, "read guest response body: "+err.Error())
+		return reject(writer, request, http.StatusBadGateway, "guest response body is incomplete: "+err.Error())
 	}
 
 	for name, values := range response.Header {

@@ -3,9 +3,11 @@ package main_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,10 +30,10 @@ const (
 	requestTimeout = 10 * time.Second
 )
 
-// startCommand builds and starts the command against an unreachable endpoint.
-
-// It returns an HTTP client that connects to the command's Unix socket.
-func startCommand(t *testing.T, getOnly bool) *http.Client {
+// startCommand builds the command and starts it with the given Proxmox API
+// endpoint and a token file. It waits for the Unix socket and returns an HTTP
+// client that connects to that socket.
+func startCommand(t *testing.T, getOnly bool, endpoint string) *http.Client {
 	t.Helper()
 	directory, err := os.MkdirTemp("", "pg")
 	if err != nil {
@@ -54,7 +56,7 @@ func startCommand(t *testing.T, getOnly bool) *http.Client {
 	}
 	socketPath := filepath.Join(directory, "d.sock")
 	arguments := []string{
-		"-node", testNode, "-endpoint", testEndpoint, "-token-file", tokenFile,
+		"-node", testNode, "-endpoint", endpoint, "-token-file", tokenFile,
 		"-vmid", testVMID, "-socket", socketPath, "-insecure",
 	}
 	if getOnly {
@@ -117,7 +119,7 @@ func TestRejectedRequests(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			client := startCommand(t, testCase.getOnly)
+			client := startCommand(t, testCase.getOnly, testEndpoint)
 			request, err := http.NewRequestWithContext(
 				t.Context(), testCase.method, "http://docker"+testCase.path, bytes.NewBufferString(testCase.body),
 			)
@@ -135,6 +137,65 @@ func TestRejectedRequests(t *testing.T) {
 			if response.StatusCode != testCase.want {
 				text, _ := io.ReadAll(response.Body)
 				t.Fatalf("status = %d, want %d: %s", response.StatusCode, testCase.want, text)
+			}
+		})
+	}
+}
+
+// TestGuestResponseBody starts the command against a local TLS server that
+// simulates the Proxmox exec API. POST exec returns a process ID. GET exec-status
+// returns the status and curl output of an exited command. The curl output
+// contains an HTTP response with Content-Length 10.
+//
+// For a complete 10-byte body, the test requires HTTP 200 and the body. For a
+// 5-byte body, the test requires HTTP 502 and a message containing "incomplete".
+// It also checks that the response does not include the partial body.
+func TestGuestResponseBody(t *testing.T) {
+	const (
+		completeBody  = "0123456789"
+		truncatedBody = "01234"
+	)
+	cases := []struct {
+		name       string
+		guestBody  string
+		want       int
+		wantInBody string
+	}{
+		{"complete body", completeBody, http.StatusOK, completeBody},
+		{"truncated body", truncatedBody, http.StatusBadGateway, "incomplete"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			guestOutput := "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n" + testCase.guestBody
+			encodedOutput := base64.StdEncoding.EncodeToString([]byte(guestOutput))
+			proxmox := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if strings.HasSuffix(request.URL.Path, "/exec") {
+					_, _ = io.WriteString(writer, `{"data":{"pid":1}}`)
+					return
+				}
+				_, _ = io.WriteString(writer, `{"data":{"exited":1,"exitcode":0,"out-data":"`+encodedOutput+`","err-data":""}}`)
+			}))
+			t.Cleanup(proxmox.Close)
+
+			client := startCommand(t, true, proxmox.URL)
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://docker/version", nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatalf("send request: %v", err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			text, _ := io.ReadAll(response.Body)
+			if response.StatusCode != testCase.want {
+				t.Fatalf("status = %d, want %d: %s", response.StatusCode, testCase.want, text)
+			}
+			if !strings.Contains(string(text), testCase.wantInBody) {
+				t.Fatalf("body = %q, want it to contain %q", text, testCase.wantInBody)
+			}
+			if testCase.want != http.StatusOK && strings.Contains(string(text), testCase.guestBody) {
+				t.Fatalf("body = %q, must not contain the partial guest body %q", text, testCase.guestBody)
 			}
 		})
 	}
