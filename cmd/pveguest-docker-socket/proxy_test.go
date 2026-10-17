@@ -77,9 +77,11 @@ func startCommand(t *testing.T, getOnly bool, endpoint string) *http.Client {
 		runCancel()
 		t.Fatalf("start command: %v", err)
 	}
+	startedCommands.add(command)
 	t.Cleanup(func() {
 		runCancel()
 		_ = command.Wait()
+		startedCommands.remove(command)
 	})
 
 	deadline := time.Now().Add(socketWait)
