@@ -18,7 +18,6 @@ import (
 )
 
 const (
-	// commandTimeoutSeconds limits each curl exec in the guest to 60 seconds.
 	commandTimeoutSeconds = 60
 
 	// requestDeadlineMargin extends each exec deadline 30 seconds beyond the
