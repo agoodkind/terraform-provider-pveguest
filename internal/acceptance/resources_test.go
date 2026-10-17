@@ -26,8 +26,9 @@ const (
 	// packages.
 	testSecondPackage = "sl"
 
-	// The version test needs a package with at least two versions in the apt
-	// sources of the test guest.
+	// TestAccAptPackagesVersions needs a package with at least two versions in the
+	// apt sources of the test guest. The package hello has only one version in
+	// those sources. The test uses rsync instead.
 	testVersionPackage = "rsync"
 
 	// madisonFieldCount sets the minimum number of fields that

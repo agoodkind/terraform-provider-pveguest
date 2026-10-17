@@ -30,9 +30,10 @@ const (
 	// dpkg-query expands this format itself, including the escapes.
 	dpkgQueryFormat = `${Package}\t${db:Status-Abbrev}\n`
 
-	// The first two characters of the status abbreviation are the desired
-	// action and the current status. "ii" is an installed package, and "hi" is
-	// an installed package with a hold.
+	// dpkg-query prints a status abbreviation for each package with the format
+	// ${db:Status-Abbrev}. The first two characters of the status abbreviation are
+	// the desired action and the current status. "ii" is an installed package.
+	// "hi" is an installed package with a hold that apt-mark hold sets.
 	dpkgInstalledPrefix     = "ii"
 	dpkgHeldInstalledPrefix = "hi"
 
