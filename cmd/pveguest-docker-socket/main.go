@@ -30,7 +30,6 @@ const (
 	defaultGuestSocket = "/var/run/docker.sock"
 	maxRequestsPerNode = 4
 
-	// defaultMaxBodyBytes sets the default maximum request body size to 256 MiB.
 	defaultMaxBodyBytes = 256 << 20
 )
 
