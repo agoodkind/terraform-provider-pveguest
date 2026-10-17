@@ -82,7 +82,6 @@ func newProxy(
 	}
 }
 
-// ServeHTTP handles each request and logs its method, URL, status, and duration.
 func (handler *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	started := time.Now()
 	status := handler.handle(writer, request)
