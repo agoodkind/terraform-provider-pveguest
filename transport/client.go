@@ -23,6 +23,10 @@ import (
 // max_requests.
 const DefaultMaxRequests = 4
 
+// DefaultMaxExecRequests limits concurrent guest commands per node when
+// NodeConfig.MaxExecRequests is zero.
+const DefaultMaxExecRequests = 4
+
 const (
 	// The Proxmox proxy closes a request after 30 seconds.
 	requestTimeout        = 45 * time.Second
@@ -67,6 +71,11 @@ type NodeConfig struct {
 	APIToken string
 	Insecure bool
 	NodeName string
+
+	// MaxExecRequests limits concurrent guest commands for this node
+	// configuration. Zero selects DefaultMaxExecRequests; a negative value makes
+	// NewClient return an error.
+	MaxExecRequests int
 }
 
 // Result is the outcome of a command that ran to its end. ExitCode is the
@@ -90,6 +99,7 @@ type nodeConnection struct {
 	authorization string
 	httpClient    *http.Client
 	slots         chan struct{}
+	execSlots     chan struct{}
 }
 
 type apiRequest struct {
@@ -145,6 +155,14 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		return nil, fmt.Errorf("node %q: api_token must have the form user@realm!tokenid=secret", name)
 	}
 
+	maxExecRequests := config.MaxExecRequests
+	if maxExecRequests == 0 {
+		maxExecRequests = DefaultMaxExecRequests
+	}
+	if maxExecRequests < 1 {
+		return nil, fmt.Errorf("node %q: max_exec_requests must be at least 1, got %d", name, maxExecRequests)
+	}
+
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	tlsConfig.InsecureSkipVerify = config.Insecure
 	dialer := &net.Dialer{Timeout: dialTimeout}
@@ -165,6 +183,7 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		authorization: authorizationScheme + config.APIToken,
 		httpClient:    &http.Client{Transport: transport, Timeout: requestTimeout},
 		slots:         make(chan struct{}, maxRequests),
+		execSlots:     make(chan struct{}, maxExecRequests),
 	}, nil
 }
 
@@ -211,6 +230,22 @@ func (connection *nodeConnection) call(
 		)
 	}
 	return envelope.Data, nil
+}
+
+// acquireExecSlot waits to reserve an exec slot for the node and returns an
+// error if ctx ends first.
+func (connection *nodeConnection) acquireExecSlot(ctx context.Context, guest Guest) error {
+	select {
+	case connection.execSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		slog.ErrorContext(ctx, "wait for an exec slot ended", "node", guest.Node, "err", ctx.Err())
+		return fmt.Errorf("%s: wait for an exec slot: %w", guest, ctx.Err())
+	}
+}
+
+func (connection *nodeConnection) releaseExecSlot() {
+	<-connection.execSlots
 }
 
 // send repeats a GET on a new connection when the connection closes before a
