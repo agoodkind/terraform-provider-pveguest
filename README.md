@@ -441,6 +441,23 @@ methods. The token needs `Sys.KernelModules.Audit` and
 | --- | --- |
 | `loaded` | The computed map reports each listed module as true when `/sys/module/<name>` exists and false otherwise. |
 
+## pveguest_host_kernel_modules data source
+
+The data source reads the node's persistent kernel module list and load states
+with `GET /nodes/{node}/kernel-modules`. It requires
+`Sys.KernelModules.Audit` on `/nodes/<node>`. The data source does not change
+the list or load modules. A module can appear in `modules` while its `loaded`
+value is false.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | yes | Select a key in the provider's `nodes` map. |
+
+| Attribute | Type | Meaning |
+| --- | --- | --- |
+| `modules` | set of string | The set contains every module in the persistent list. |
+| `loaded` | map of bool | Each value reports whether the listed module is loaded. |
+
 ## pveguest_container_options
 
 The resource configures eBPF token delegation with `bpfdelegate` and passes host network interfaces into the container as LXC physical devices with `hostnic0` through `hostnic9`.
