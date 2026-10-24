@@ -224,7 +224,7 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
 		return
 	}
-	resp.ResourceData = &providerData{
+	data := &providerData{
 		client:       client,
 		aptLocks:     &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
 		sysrepoLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
@@ -233,6 +233,8 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 
 		smtp2go: smtp2go,
 	}
+	resp.ResourceData = data
+	resp.DataSourceData = data
 }
 
 func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resource {
@@ -254,5 +256,7 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 }
 
 func (p *pveguestProvider) DataSources(_ context.Context) []func() datasource.DataSource {
-	return nil
+	return []func() datasource.DataSource{
+		newHostKernelModulesDataSource,
+	}
 }
