@@ -98,16 +98,18 @@ type nodeConnection struct {
 	endpoint      string
 	authorization string
 	httpClient    *http.Client
+	statusClient  *http.Client
 	slots         chan struct{}
 	execSlots     chan struct{}
 }
 
 type apiRequest struct {
-	method    string
-	operation string
-	query     url.Values
-	body      []byte
-	path      string
+	method        string
+	operation     string
+	query         url.Values
+	body          []byte
+	path          string
+	retryAtCaller bool
 }
 
 func (request apiRequest) apiPath(guest Guest, nodeName string) string {
@@ -173,6 +175,10 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		IdleConnTimeout:     idleConnectionTimeout,
 		MaxIdleConnsPerHost: maxRequests,
 	}
+	statusTransport := transport.Clone()
+	// A status read can delete its result. A fresh connection prevents
+	// net/http from automatically repeating that GET after a lost response.
+	statusTransport.DisableKeepAlives = true
 	nodeName := config.NodeName
 	if nodeName == "" {
 		nodeName = name
@@ -182,6 +188,7 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		endpoint:      strings.TrimRight(config.Endpoint, "/"),
 		authorization: authorizationScheme + config.APIToken,
 		httpClient:    &http.Client{Transport: transport, Timeout: requestTimeout},
+		statusClient:  &http.Client{Transport: statusTransport, Timeout: requestTimeout},
 		slots:         make(chan struct{}, maxRequests),
 		execSlots:     make(chan struct{}, maxExecRequests),
 	}, nil
@@ -215,6 +222,9 @@ func (connection *nodeConnection) call(
 	body, err := io.ReadAll(io.LimitReader(response.Body, responseBodyLimit))
 	if err != nil {
 		slog.ErrorContext(ctx, "read api response failed", "guest", guest.String(), "path", apiPath, "err", err)
+		if isConnectionClosed(err) {
+			err = &closedConnectionError{cause: err}
+		}
 		return nil, fmt.Errorf("%s: %s %s: read response: %w", guest, request.method, apiPath, err)
 	}
 	if response.StatusCode/statusClassDivisor != statusClassSuccess {
@@ -248,8 +258,8 @@ func (connection *nodeConnection) releaseExecSlot() {
 	<-connection.execSlots
 }
 
-// send repeats a GET on a new connection when the connection closes before a
-// response. It sends every other method once.
+// send retries a GET after a closed connection unless the command caller
+// handles recovery. It sends other methods once.
 func (connection *nodeConnection) send(
 	ctx context.Context,
 	guest Guest,
@@ -257,8 +267,12 @@ func (connection *nodeConnection) send(
 	apiPath string,
 ) (*http.Response, error) {
 	maxAttempts := 1
-	if request.method == http.MethodGet {
+	if request.method == http.MethodGet && !request.retryAtCaller {
 		maxAttempts = maxReadAttempts
+	}
+	client := connection.httpClient
+	if request.retryAtCaller {
+		client = connection.statusClient
 	}
 	delay := retryInitialDelay
 	for attempt := 1; ; attempt++ {
@@ -266,7 +280,7 @@ func (connection *nodeConnection) send(
 		if err != nil {
 			return nil, err
 		}
-		response, err := connection.httpClient.Do(httpRequest)
+		response, err := client.Do(httpRequest)
 		if err == nil {
 			return response, nil
 		}
@@ -274,13 +288,14 @@ func (connection *nodeConnection) send(
 			slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "err", err)
 			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
 		}
+		closed := &closedConnectionError{cause: err}
 		if request.method == http.MethodPost && request.operation == execStartOperation {
 			slog.ErrorContext(ctx, "exec start request lost its connection before a response", "guest", guest.String(), "path", apiPath, "err", err)
-			return nil, fmt.Errorf("%s: %s %s: guest command may have started; the next plan reads the guest state again: %w", guest, request.method, apiPath, err)
+			return nil, fmt.Errorf("%s: %s %s: guest command may have started; the next plan reads the guest state again: %w", guest, request.method, apiPath, closed)
 		}
 		if attempt >= maxAttempts {
 			slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "attempt", attempt, "err", err)
-			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
+			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, closed)
 		}
 
 		slog.WarnContext(

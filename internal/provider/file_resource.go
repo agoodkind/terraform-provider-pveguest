@@ -483,7 +483,7 @@ func readFileStatus(
 	filePath string,
 ) (fileStatus, bool, error) {
 	statCommand := guestCommand("stat", "-L", "-c", "%a %U %G", "--", filePath)
-	statResult, err := runGuest(ctx, client, guest, statCommand)
+	statResult, err := runReadOnlyGuest(ctx, client, guest, statCommand)
 	if err != nil {
 		return fileStatus{}, false, err
 	}
@@ -518,7 +518,7 @@ func readGuestSHA256(
 	filePath string,
 ) (string, bool, error) {
 	hashCommand := guestCommand("sha256sum", "--", filePath)
-	hashResult, err := runGuest(ctx, client, guest, hashCommand)
+	hashResult, err := runReadOnlyGuest(ctx, client, guest, hashCommand)
 	if err != nil {
 		return "", false, err
 	}
