@@ -93,6 +93,20 @@ func runGuest(
 	command transport.Command,
 ) (transport.Result, error) {
 	result, err := client.Run(ctx, guest, command)
+	return guestResult(ctx, guest, result, err)
+}
+
+func runReadOnlyGuest(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	command transport.Command,
+) (transport.Result, error) {
+	result, err := client.RunReadOnly(ctx, guest, command)
+	return guestResult(ctx, guest, result, err)
+}
+
+func guestResult(ctx context.Context, guest transport.Guest, result transport.Result, err error) (transport.Result, error) {
 	if err != nil {
 		slog.ErrorContext(
 			ctx, "guest command failed",

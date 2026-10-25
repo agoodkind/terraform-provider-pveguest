@@ -158,6 +158,10 @@ type execStatus struct {
 // slot after the command exits or fails. The slot covers the POST exec request
 // and every exec-status poll.
 func (client *Client) Run(ctx context.Context, guest Guest, command Command) (Result, error) {
+	return client.run(ctx, guest, command, false)
+}
+
+func (client *Client) run(ctx context.Context, guest Guest, command Command, readOnly bool) (Result, error) {
 	connection, timeout, err := client.prepare(guest, command)
 	if err != nil {
 		return Result{}, err
@@ -173,7 +177,7 @@ func (client *Client) Run(ctx context.Context, guest Guest, command Command) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	status, err := connection.waitForExit(ctx, guest, command, processID, timeout)
+	status, err := connection.waitForExit(ctx, guest, command, processID, timeout, readOnly)
 	if err != nil {
 		return Result{}, err
 	}
@@ -252,6 +256,7 @@ func (connection *nodeConnection) waitForExit(
 	command Command,
 	processID int64,
 	timeout int,
+	retryAtCaller bool,
 ) (execStatus, error) {
 	waitContext, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+pollTimeoutMargin)
 	defer cancel()
@@ -260,10 +265,11 @@ func (connection *nodeConnection) waitForExit(
 	delay := pollInitialDelay
 	for {
 		data, err := connection.call(waitContext, guest, apiRequest{
-			method:    http.MethodGet,
-			operation: "exec-status",
-			query:     query,
-			body:      nil,
+			method:        http.MethodGet,
+			operation:     "exec-status",
+			query:         query,
+			body:          nil,
+			retryAtCaller: retryAtCaller,
 		})
 		if err != nil {
 			return execStatus{}, err

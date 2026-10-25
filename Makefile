@@ -11,7 +11,7 @@ include bootstrap.mk
 
 .DEFAULT_GOAL := check
 
-PROVIDER_VERSION   := 0.1.0
+PROVIDER_VERSION   := 0.1.1
 PROVIDER_HOST      := tofu.home.arpa
 PROVIDER_NAMESPACE := agoodkind
 PROVIDER_ADDRESS   := $(PROVIDER_HOST)/$(PROVIDER_NAMESPACE)/pveguest

@@ -26,8 +26,8 @@ make install-mirror
 ```
 
 `make install-mirror` builds the provider for the host platform with version
-`0.1.0` and writes the binary to
-`~/.terraform.d/plugins/tofu.home.arpa/agoodkind/pveguest/0.1.0/<os>_<arch>/terraform-provider-pveguest_v0.1.0`.
+`0.1.1` and writes the binary to
+`~/.terraform.d/plugins/tofu.home.arpa/agoodkind/pveguest/0.1.1/<os>_<arch>/terraform-provider-pveguest_v0.1.1`.
 OpenTofu reads that directory as an implied local mirror.
 
 A configuration selects the provider by its address:
@@ -37,7 +37,7 @@ terraform {
   required_providers {
     pveguest = {
       source  = "tofu.home.arpa/agoodkind/pveguest"
-      version = "0.1.0"
+      version = "0.1.1"
     }
   }
 }
@@ -160,6 +160,9 @@ container, a stopped VM, and a VM with a stopped guest agent.
 
 A regular file. Read runs `stat` and `sha256sum`. Read removes a missing file
 from state, and the next plan creates it. Destroy deletes the file.
+
+If an API connection closes, each file inspection command can run at most
+three times. The provider stops retrying when OpenTofu cancels the operation.
 
 An apply runs `mkdir -p` for the directory of `path`, writes a temporary file
 in that directory, sets mode and owner, runs `validate`, and renames the
@@ -628,7 +631,7 @@ The command does not call the file-write method.
 | `make test` | Runs `go test ./...`. The acceptance tests skip unless `TF_ACC` is set. |
 | `make check` | Runs every lint gate. |
 | `make fmt` | Applies the configured Go formatters. |
-| `make install-mirror` | Builds the provider with version `0.1.0` and writes it to the implied local mirror. |
+| `make install-mirror` | Builds the provider with version `0.1.1` and writes it to the implied local mirror. |
 | `make testacc` | Runs `make install-mirror` and then the acceptance tests. |
 | `make help` | Lists every target. |
 
