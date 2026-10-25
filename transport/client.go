@@ -98,7 +98,6 @@ type nodeConnection struct {
 	endpoint      string
 	authorization string
 	httpClient    *http.Client
-	statusClient  *http.Client
 	slots         chan struct{}
 	execSlots     chan struct{}
 }
@@ -175,10 +174,6 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		IdleConnTimeout:     idleConnectionTimeout,
 		MaxIdleConnsPerHost: maxRequests,
 	}
-	statusTransport := transport.Clone()
-	// A status read can delete its result. A fresh connection prevents
-	// net/http from automatically repeating that GET after a lost response.
-	statusTransport.DisableKeepAlives = true
 	nodeName := config.NodeName
 	if nodeName == "" {
 		nodeName = name
@@ -188,7 +183,6 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		endpoint:      strings.TrimRight(config.Endpoint, "/"),
 		authorization: authorizationScheme + config.APIToken,
 		httpClient:    &http.Client{Transport: transport, Timeout: requestTimeout},
-		statusClient:  &http.Client{Transport: statusTransport, Timeout: requestTimeout},
 		slots:         make(chan struct{}, maxRequests),
 		execSlots:     make(chan struct{}, maxExecRequests),
 	}, nil
@@ -219,13 +213,16 @@ func (connection *nodeConnection) call(
 	}
 	defer func() { _ = response.Body.Close() }()
 
-	body, err := io.ReadAll(io.LimitReader(response.Body, responseBodyLimit))
+	body, err := io.ReadAll(io.LimitReader(response.Body, responseBodyLimit+1))
 	if err != nil {
 		slog.ErrorContext(ctx, "read api response failed", "guest", guest.String(), "path", apiPath, "err", err)
 		if isConnectionClosed(err) {
 			err = &closedConnectionError{cause: err}
 		}
 		return nil, fmt.Errorf("%s: %s %s: read response: %w", guest, request.method, apiPath, err)
+	}
+	if len(body) > responseBodyLimit {
+		return nil, fmt.Errorf("%s: %s %s: response exceeds the body limit", guest, request.method, apiPath)
 	}
 	if response.StatusCode/statusClassDivisor != statusClassSuccess {
 		return nil, apiFailure(guest, request.method, apiPath, response, body)
@@ -271,9 +268,6 @@ func (connection *nodeConnection) send(
 		maxAttempts = maxReadAttempts
 	}
 	client := connection.httpClient
-	if request.retryAtCaller {
-		client = connection.statusClient
-	}
 	delay := retryInitialDelay
 	for attempt := 1; ; attempt++ {
 		httpRequest, err := connection.newHTTPRequest(ctx, guest, request, apiPath)
@@ -352,7 +346,7 @@ func (connection *nodeConnection) newHTTPRequest(
 
 // encodeJSON leaves the characters <, >, and & unescaped, because the request
 // body limit of the API counts the encoded size.
-func encodeJSON[T execStartBody | kernelModulesBody | containerConfigBody | containerShutdownBody](value *T) ([]byte, error) {
+func encodeJSON[T execStartBody | execAckBody | kernelModulesBody | containerConfigBody | containerShutdownBody](value *T) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)

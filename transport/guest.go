@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -120,10 +121,27 @@ type execStartBody struct {
 	Command   []string `json:"command"`
 	InputData *string  `json:"input-data,omitempty"`
 	Timeout   *int     `json:"timeout,omitempty"`
+	Retention string   `json:"result-retention"`
 }
 
 type execStartResponse struct {
 	PID int64 `json:"pid"`
+}
+
+type execAckBody struct {
+	PID int64 `json:"pid"`
+}
+
+type resultReadError struct {
+	cause error
+}
+
+func (failure *resultReadError) Error() string {
+	return failure.cause.Error()
+}
+
+func (failure *resultReadError) Unwrap() error {
+	return failure.cause
 }
 
 // flag reads a boolean that the API prints as 1, 0, true, or false.
@@ -131,25 +149,22 @@ type flag bool
 
 func (value *flag) UnmarshalJSON(document []byte) error {
 	text := string(document)
-	if text == "null" {
-		return nil
-	}
 	parsed, err := strconv.ParseBool(text)
 	if err != nil {
-		return fmt.Errorf("unexpected boolean value %s: %w", text, err)
+		return errors.New("exec-status contains an invalid boolean")
 	}
 	*value = flag(parsed)
 	return nil
 }
 
 type execStatus struct {
-	Exited       flag   `json:"exited"`
-	ExitCode     *int   `json:"exitcode"`
-	OutData      string `json:"out-data"`
-	ErrData      string `json:"err-data"`
-	OutTruncated flag   `json:"out-truncated"`
-	ErrTruncated flag   `json:"err-truncated"`
-	TimedOut     flag   `json:"timed-out"`
+	Exited       *flag   `json:"exited"`
+	ExitCode     *int    `json:"exitcode"`
+	OutData      *string `json:"out-data"`
+	ErrData      *string `json:"err-data"`
+	OutTruncated flag    `json:"out-truncated"`
+	ErrTruncated flag    `json:"err-truncated"`
+	TimedOut     flag    `json:"timed-out"`
 }
 
 // Run starts the command in the guest, polls until it exits, and returns its
@@ -158,10 +173,10 @@ type execStatus struct {
 // slot after the command exits or fails. The slot covers the POST exec request
 // and every exec-status poll.
 func (client *Client) Run(ctx context.Context, guest Guest, command Command) (Result, error) {
-	return client.run(ctx, guest, command, false)
+	return client.run(ctx, guest, command)
 }
 
-func (client *Client) run(ctx context.Context, guest Guest, command Command, readOnly bool) (Result, error) {
+func (client *Client) run(ctx context.Context, guest Guest, command Command) (Result, error) {
 	connection, timeout, err := client.prepare(guest, command)
 	if err != nil {
 		return Result{}, err
@@ -177,11 +192,28 @@ func (client *Client) run(ctx context.Context, guest Guest, command Command, rea
 	if err != nil {
 		return Result{}, err
 	}
-	status, err := connection.waitForExit(ctx, guest, command, processID, timeout, readOnly)
+	status, err := connection.waitForExit(ctx, guest, command, processID, timeout)
 	if err != nil {
 		return Result{}, err
 	}
-	return resultOf(guest, command, status, timeout)
+	result, err := decodeExecResult(guest, status)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := connection.acknowledgeExec(ctx, guest, processID); err != nil {
+		failureClass := "api"
+		if isConnectionClosed(err) {
+			failureClass = "connection"
+		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			failureClass = "context"
+		}
+		slog.WarnContext(ctx, "command result acknowledgment failed",
+			"guest", guest.String(), "pid", processID, "class", failureClass)
+	}
+	if err := resultError(guest, command, status, timeout); err != nil {
+		return Result{}, err
+	}
+	return result, nil
 }
 
 func (client *Client) prepare(guest Guest, command Command) (*nodeConnection, int, error) {
@@ -221,7 +253,7 @@ func (connection *nodeConnection) startExec(
 	command Command,
 	timeout int,
 ) (int64, error) {
-	body := execStartBody{Command: command.Argv, InputData: nil, Timeout: &timeout}
+	body := execStartBody{Command: command.Argv, InputData: nil, Timeout: &timeout, Retention: "acknowledged"}
 	if len(command.Stdin) > 0 {
 		input := base64.StdEncoding.EncodeToString(command.Stdin)
 		body.InputData = &input
@@ -245,18 +277,20 @@ func (connection *nodeConnection) startExec(
 		slog.ErrorContext(ctx, "exec response has no pid", "guest", guest.String(), "err", err)
 		return 0, fmt.Errorf("%s: exec response has no pid: %w", guest, err)
 	}
+	if started.PID <= 0 {
+		return 0, fmt.Errorf("%s: exec response has an invalid pid; guest command may have started", guest)
+	}
 	return started.PID, nil
 }
 
 // waitForExit polls exec-status with a delay that doubles from 200 ms to 2 s.
-// The first read after the exit returns the result, and the API deletes it.
+// Completed results remain available until acknowledgment or expiry.
 func (connection *nodeConnection) waitForExit(
 	ctx context.Context,
 	guest Guest,
 	command Command,
 	processID int64,
 	timeout int,
-	retryAtCaller bool,
 ) (execStatus, error) {
 	waitContext, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+pollTimeoutMargin)
 	defer cancel()
@@ -264,12 +298,11 @@ func (connection *nodeConnection) waitForExit(
 	query := url.Values{"pid": {strconv.FormatInt(processID, 10)}}
 	delay := pollInitialDelay
 	for {
-		data, err := connection.call(waitContext, guest, apiRequest{
-			method:        http.MethodGet,
-			operation:     "exec-status",
-			query:         query,
-			body:          nil,
-			retryAtCaller: retryAtCaller,
+		data, err := connection.readExecStatus(waitContext, guest, apiRequest{
+			method:    http.MethodGet,
+			operation: "exec-status",
+			query:     query,
+			body:      nil,
 		})
 		if err != nil {
 			return execStatus{}, err
@@ -279,7 +312,10 @@ func (connection *nodeConnection) waitForExit(
 			slog.ErrorContext(ctx, "exec-status response is malformed", "guest", guest.String(), "err", err)
 			return execStatus{}, fmt.Errorf("%s: parse exec-status response: %w", guest, err)
 		}
-		if status.Exited {
+		if status.Exited == nil {
+			return execStatus{}, fmt.Errorf("%s: exec-status response omits the exited flag", guest)
+		}
+		if *status.Exited {
 			return status, nil
 		}
 
@@ -298,24 +334,70 @@ func (connection *nodeConnection) waitForExit(
 	}
 }
 
-func resultOf(guest Guest, command Command, status execStatus, timeout int) (Result, error) {
+func (connection *nodeConnection) readExecStatus(
+	ctx context.Context,
+	guest Guest,
+	request apiRequest,
+) (json.RawMessage, error) {
+	request.retryAtCaller = true
+	delay := retryInitialDelay
+	for attempt := 1; ; attempt++ {
+		data, err := connection.call(ctx, guest, request)
+		if err == nil {
+			return data, nil
+		}
+		var closed *closedConnectionError
+		if !errors.As(err, &closed) {
+			return nil, err
+		}
+		if attempt >= maxReadAttempts {
+			return nil, &resultReadError{cause: fmt.Errorf("%s: command result read failed after %d attempts; pid %s requires another status read: %w",
+				guest, attempt, request.query.Get("pid"), err)}
+		}
+		slog.WarnContext(ctx, "retry command result read after a closed connection",
+			"guest", guest.String(), "attempt", attempt)
+		if err := waitReadCommandRetry(ctx, delay); err != nil {
+			return nil, err
+		}
+		delay *= retryDelayFactor
+	}
+}
+
+func (connection *nodeConnection) acknowledgeExec(ctx context.Context, guest Guest, processID int64) error {
+	document, err := encodeJSON(&execAckBody{PID: processID})
+	if err != nil {
+		return err
+	}
+	_, err = connection.call(ctx, guest, apiRequest{
+		method: http.MethodPost, operation: "exec-ack", body: document,
+	})
+	return err
+}
+
+func resultError(guest Guest, command Command, status execStatus, timeout int) error {
 	quoted := QuoteCommand(command.Argv)
 	if status.TimedOut {
-		return Result{}, fmt.Errorf("%s: command %s timed out after %d seconds", guest, quoted, timeout)
+		return fmt.Errorf("%s: command %s timed out after %d seconds", guest, quoted, timeout)
 	}
 	if status.OutTruncated || status.ErrTruncated {
-		return Result{}, fmt.Errorf("%s: the output of command %s exceeded the capture limit", guest, quoted)
+		return fmt.Errorf("%s: the output of command %s exceeded the capture limit", guest, quoted)
 	}
+	return nil
+}
 
+func decodeExecResult(guest Guest, status execStatus) (Result, error) {
 	if status.ExitCode == nil {
-		return Result{}, fmt.Errorf("%s: command %s exited without an exit code", guest, quoted)
+		return Result{}, fmt.Errorf("%s: command exited without an exit code", guest)
+	}
+	if status.OutData == nil || status.ErrData == nil {
+		return Result{}, fmt.Errorf("%s: completed command result omits an output stream", guest)
 	}
 
-	stdout, err := decodeStream(guest, status.OutData)
+	stdout, err := decodeStream(guest, *status.OutData)
 	if err != nil {
 		return Result{}, err
 	}
-	stderr, err := decodeStream(guest, status.ErrData)
+	stderr, err := decodeStream(guest, *status.ErrData)
 	if err != nil {
 		return Result{}, err
 	}

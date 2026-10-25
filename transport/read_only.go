@@ -28,9 +28,13 @@ func (failure *closedConnectionError) Unwrap() error {
 func (client *Client) RunReadOnly(ctx context.Context, guest Guest, command Command) (Result, error) {
 	delay := retryInitialDelay
 	for attempt := 1; ; attempt++ {
-		result, err := client.run(ctx, guest, command, true)
+		result, err := client.run(ctx, guest, command)
 		if err == nil {
 			return result, nil
+		}
+		var resultRead *resultReadError
+		if errors.As(err, &resultRead) {
+			return Result{}, err
 		}
 		var closed *closedConnectionError
 		if !errors.As(err, &closed) {
