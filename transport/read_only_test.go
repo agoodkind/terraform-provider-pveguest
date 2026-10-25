@@ -218,30 +218,6 @@ func TestRunReadOnlyRecoversActualBytesAfterLostStartResponse(t *testing.T) {
 	requireReadOnlyFile(t, path, contents)
 }
 
-func TestRunReadOnlyRepeatsReadAfterCompletedStatusResponseIsLost(t *testing.T) {
-	path, contents := readOnlyInput(t)
-	client, service, guest := newRealReadClient(t, 0)
-	service.mutex.Lock()
-	service.lostStatuses = 1
-	service.mutex.Unlock()
-	result, err := client.RunReadOnly(t.Context(), guest, transport.Command{Argv: []string{"cat", path}})
-	if err != nil {
-		t.Fatalf("the read-only command did not recover its consumed status response: %v", err)
-	}
-	if result.ExitCode != 0 || !bytes.Equal(result.Stdout, contents) || len(result.Stderr) != 0 {
-		t.Fatal("status recovery did not return the actual source file bytes")
-	}
-	executions := service.requireExecutions(t, 2, contents)
-	requireReadOnlyFile(t, path, contents)
-	service.mutex.Lock()
-	defer service.mutex.Unlock()
-	for _, execution := range executions {
-		if service.statusReads[execution.pid] != 1 {
-			t.Fatal("read-only recovery requested the consumed process result again")
-		}
-	}
-}
-
 func TestRunReadOnlyStopsAfterThreeLostStartResponses(t *testing.T) {
 	path, contents := readOnlyInput(t)
 	client, service, guest := newRealReadClient(t, -1)

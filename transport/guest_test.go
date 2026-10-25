@@ -113,8 +113,8 @@ func runAgainstQEMUOverlayAPI(
 
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
-	if !slices.Equal(api.requests, []string{qemuExecRequest, qemuStatusRequest}) {
-		t.Fatalf("the Run call did not send the QEMU exec request followed by the exec-status request")
+	if !slices.Equal(api.requests, []string{qemuExecRequest, qemuStatusRequest, http.MethodPost + " " + qemuExecPath + "-ack"}) {
+		t.Fatalf("the Run call did not send the QEMU execution, status, and acknowledgment requests")
 	}
 	return result, err
 }
