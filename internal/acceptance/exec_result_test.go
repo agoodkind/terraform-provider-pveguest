@@ -112,6 +112,7 @@ func (proxy *resultFaultProxy) ServeHTTP(writer http.ResponseWriter, incoming *h
 	request.URL.Scheme, request.URL.Host = target.Scheme, target.Host
 	request.Host = target.Host
 	request.RequestURI = ""
+	request.Header.Del("Accept-Encoding")
 	response, err := proxy.upstream.Do(request)
 	if err != nil {
 		http.Error(writer, "the testbed API request failed", http.StatusBadGateway)

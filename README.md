@@ -2,7 +2,7 @@
 
 `pveguest` is an OpenTofu provider that declares files, downloads, symbolic links, apt
 packages, deb packages, systemd units, and sysrepo modules and data inside Proxmox guests. The provider calls the
-Proxmox VE API with an API token. The provider runs each command through `exec` and `exec-status` under `/nodes/{node}/lxc/{vmid}/` for containers or `/nodes/{node}/qemu/{vmid}/` for virtual machines. The node uses the QEMU guest agent to run virtual machine commands. The
+Proxmox VE API with an API token. The provider uses the guest command API under `/nodes/{node}/lxc/{vmid}/` for containers or `/nodes/{node}/qemu/{vmid}/` for virtual machines. The node uses the QEMU guest agent to run virtual machine commands. The
 provider does not require SSH access to the hypervisor or the guest.
 
 The provider address is `tofu.home.arpa/agoodkind/pveguest`. The provider
@@ -14,10 +14,10 @@ supports Debian guests.
 - OpenTofu 1.11 or later. `content_wo` requires write-only attribute support.
 - A Proxmox VE API token for each hypervisor, with the privileges in
   [API privileges](#api-privileges).
-- For `kind = "lxc"`: a Proxmox VE node that provides the container `exec`,
-  `exec-status`, `file-write`, and `file-read` API methods. Stock Proxmox VE does
-  not provide them.
-- A guest with `kind = "qemu"` requires a Proxmox VE node that provides the virtual machine `exec` and `exec-status` methods and a running QEMU guest agent in the virtual machine. Stock Proxmox VE does not provide these methods.
+- The Proxmox VE node must provide `exec`, `exec-status`, and `exec-ack` for
+  each guest kind and support acknowledged result retention. Stock Proxmox VE
+  does not provide these methods.
+- A guest with `kind = "qemu"` requires a running QEMU guest agent.
 
 ## Install
 
@@ -101,8 +101,8 @@ permissions, not only in those of its user.
 
 | Guest kind | API methods | Privileges |
 | --- | --- | --- |
-| `lxc` | `exec`, `exec-status` | `VM.Guest.Exec` |
-| `qemu` | `exec`, `exec-status` | `VM.Guest.Exec` |
+| `lxc` | `exec`, `exec-status`, `exec-ack` | `VM.Guest.Exec` |
+| `qemu` | `exec`, `exec-status`, `exec-ack` | `VM.Guest.Exec` |
 
 The token needs these privileges on `/nodes/<node>` for
 `pveguest_host_kernel_modules`.
@@ -121,16 +121,23 @@ The token needs these privileges on `/vms/<vmid>` for
 | `POST /nodes/{node}/lxc/{vmid}/status/shutdown` | `VM.PowerMgmt` on `/vms/<vmid>` |
 | `POST /nodes/{node}/lxc/{vmid}/status/stop` | `VM.PowerMgmt` on `/vms/<vmid>` |
 
-The provider runs every guest operation through `exec` and `exec-status`. The
-file-write and file-read methods are not used.
-
 ## Command execution
+
+Each `POST exec` request includes `"result-retention": "acknowledged"`.
+Older overlays reject this parameter before starting a command.
 
 An exec call starts the command and returns an identifier. The provider polls
 `exec-status` until the command exits. The delay between polls starts at 200 ms
 and doubles up to 2 s. A command has a timeout of 120 seconds by default. The
 wait ends 15 seconds after that timeout, or when OpenTofu cancels the
 operation.
+
+`GET exec-status` returns the completed result repeatedly until acknowledgment
+or expiry after one hour. After a lost result reply, the provider reads the
+same identifier again. The provider validates the complete response and decodes
+both output streams before sending `POST exec-ack` with a numeric `pid`.
+An acknowledgment failure logs a cleanup warning without repeating the command.
+The provider returns the decoded result or the command timeout or capture-limit error.
 
 Each command reserves an exec slot before its POST exec request and releases the slot after the command exits or fails. The slot covers that request and every exec-status poll. `max_exec_requests` limits concurrent commands across all resources that use the same node configuration in one provider process. A caller waits for a slot until it can reserve one or its context ends. `max_requests` limits individual API requests in flight and releases each request slot between exec-status polls.
 
