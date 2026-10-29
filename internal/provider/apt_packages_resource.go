@@ -4,7 +4,9 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"sort"
@@ -43,6 +45,26 @@ const (
 	aptMarkUnhold = "unhold"
 
 	architectureSeparator = ":"
+
+	// invoke-rc.d runs policy-rc.d before a service start or restart.
+	// Exit status 101 tells invoke-rc.d that policy forbids the action.
+	policyRCPath    = "/usr/sbin/policy-rc.d"
+	policyRCContent = "#!/bin/sh\nexit 101\n"
+	policyRCMode    = "0755"
+
+	// Both scripts take the path as $1. test -L also detects a dangling link.
+	// set -C makes the shell refuse to overwrite an existing file.
+	policyRCExistsScript = `test -e "$1" || test -L "$1"`
+	policyRCCreateScript = `set -C && cat > "$1"`
+
+	policyRCExistsStatus  = 0
+	policyRCMissingStatus = 1
+
+	startServicesDescription = "When start_services is true or unset, apt-get install starts services as " +
+		"packages normally do. Set start_services to false to prevent package maintainer scripts from " +
+		"starting or restarting services during installations in this apply; a later " +
+		"pveguest_systemd_unit resource can start the service. " +
+		"This setting does not change packages that are already installed."
 )
 
 // The pattern is the Debian policy pattern for package names. The pattern
@@ -67,15 +89,17 @@ type aptPackagesModel struct {
 	Versions       types.Map    `tfsdk:"versions"`
 	Locked         types.Set    `tfsdk:"locked"`
 	RemoveOnDelete types.Bool   `tfsdk:"remove_on_delete"`
+	StartServices  types.Bool   `tfsdk:"start_services"`
 }
 
 // aptDesired stores package names, exact versions, lock selections, and the
-// removal setting as Go values.
+// removal and service start settings as Go values.
 type aptDesired struct {
 	Packages       []string
 	Versions       map[string]string
 	Locked         []string
 	RemoveOnDelete bool
+	StartServices  bool
 }
 
 func newAptPackagesResource() resource.Resource {
@@ -126,6 +150,10 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"remove_on_delete": schema.BoolAttribute{
 				Optional:    true,
 				Description: "When remove_on_delete is true, the provider runs apt-get remove during apply for packages that the configuration removes from packages and removes all listed packages during destroy. When remove_on_delete is false or unset, the provider keeps the packages installed and changes only OpenTofu state.",
+			},
+			"start_services": schema.BoolAttribute{
+				Optional:    true,
+				Description: startServicesDescription,
 			},
 		}),
 	}
@@ -411,7 +439,7 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 
 	changesVersions := versioned || len(desired.Locked) > 0
 	installCommand := aptInstallCommand(installSpecs(pending, desired.Versions), changesVersions)
-	if err := runChecked(ctx, r.data.client, guest, installCommand); err != nil {
+	if err := runInstallCommand(ctx, r.data.client, guest, installCommand, desired.StartServices); err != nil {
 		diagnostics.AddError("apt-get install failed", err.Error())
 		return diagnostics
 	}
@@ -498,6 +526,97 @@ func aptInstallCommand(specs []string, changesVersions bool) transport.Command {
 	return aptCommand(append(arguments, specs...)...)
 }
 
+// startServicesEnabled returns true when start_services is unset.
+func startServicesEnabled(value types.Bool) bool {
+	if value.IsNull() {
+		return true
+	}
+	return value.ValueBool()
+}
+
+// runInstallCommand runs apt-get install. When startServices is false,
+// policy-rc.d blocks service starts during the command.
+// The function deletes the file after the command succeeds or fails.
+func runInstallCommand(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	command transport.Command,
+	startServices bool,
+) error {
+	if startServices {
+		return runChecked(ctx, client, guest, command)
+	}
+	if err := createPolicyFile(ctx, client, guest); err != nil {
+		return err
+	}
+	installErr := runChecked(ctx, client, guest, command)
+	// Ignore cancellation because a canceled apply must still delete the file.
+	removeErr := removePolicyFile(context.WithoutCancel(ctx), client, guest)
+	combined := errors.Join(installErr, removeErr)
+	if combined != nil {
+		slog.ErrorContext(
+			ctx, "apt-get install or policy-rc.d deletion returned an error",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", combined,
+		)
+	}
+	return combined
+}
+
+// createPolicyFile fails if the path already exists because the provider must not
+// replace or delete a file it did not create. The exclusive create script fails if
+// a file appears between the check and the write. The function deletes the file
+// it wrote if setting the mode fails.
+func createPolicyFile(ctx context.Context, client *transport.Client, guest transport.Guest) error {
+	existsCommand := guestCommand("sh", "-c", policyRCExistsScript, "sh", policyRCPath)
+	existsResult, err := runReadOnlyGuest(ctx, client, guest, existsCommand)
+	if err != nil {
+		return err
+	}
+	if existsResult.ExitCode == policyRCExistsStatus {
+		return fmt.Errorf(
+			"%s: %s already exists and the provider does not replace it; "+
+				"delete the file or set start_services to true",
+			guest, policyRCPath,
+		)
+	}
+	// Exit status 1 means the path does not exist, so continue.
+	if existsResult.ExitCode != policyRCMissingStatus {
+		return commandFailure(guest, existsCommand, existsResult)
+	}
+
+	createCommand := guestCommand("sh", "-c", policyRCCreateScript, "sh", policyRCPath)
+	createCommand.Stdin = []byte(policyRCContent)
+	if err := runChecked(ctx, client, guest, createCommand); err != nil {
+		return err
+	}
+	modeCommand := guestCommand("chmod", policyRCMode, "--", policyRCPath)
+	if err := runChecked(ctx, client, guest, modeCommand); err != nil {
+		slog.ErrorContext(
+			ctx, "provider failed to set the mode of policy-rc.d and will delete the file",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+		)
+		return errors.Join(err, removePolicyFile(context.WithoutCancel(ctx), client, guest))
+	}
+	return nil
+}
+
+func removePolicyFile(ctx context.Context, client *transport.Client, guest transport.Guest) error {
+	err := runChecked(ctx, client, guest, guestCommand("rm", "-f", "--", policyRCPath))
+	if err != nil {
+		slog.ErrorContext(
+			ctx, "provider failed to delete policy-rc.d after installation",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+		)
+		return fmt.Errorf(
+			"%s: %s is still in the guest and blocks every service start in the guest. "+
+				"Delete the file. Removal failed: %w",
+			guest, policyRCPath, err,
+		)
+	}
+	return nil
+}
+
 func aptRemoveCommand(names []string) transport.Command {
 	return aptCommand(append([]string{"remove", "-y", "--"}, names...)...)
 }
@@ -536,6 +655,7 @@ func desiredFrom(ctx context.Context, model aptPackagesModel) (aptDesired, diag.
 	desired := aptDesired{
 		Versions:       map[string]string{},
 		RemoveOnDelete: model.RemoveOnDelete.ValueBool(),
+		StartServices:  startServicesEnabled(model.StartServices),
 	}
 	diagnostics.Append(model.Packages.ElementsAs(ctx, &desired.Packages, false)...)
 	if !model.Versions.IsNull() {

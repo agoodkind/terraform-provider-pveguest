@@ -307,12 +307,15 @@ Apply installs the exact package versions in `versions`, including downgrades. R
 
 When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. When remove_on_delete is true, the plan for pveguest_apt_packages shows a warning that lists the declared packages that the provider removes during apply or destroy.
 
+When `start_services` is `false`, the provider writes `/usr/sbin/policy-rc.d` as an executable shell script that exits with status `101`, which tells `invoke-rc.d` to prevent package scripts from starting or restarting services. The provider deletes the file after `apt-get install` finishes, even if the command fails. If the path already contains a file or link, including a dangling link, the apply fails before `apt-get install` and leaves the guest unchanged. This setting affects only packages installed during that apply; it does not change packages that are already installed, and a later `pveguest_systemd_unit` resource can start the service.
+
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `packages` | set of string | yes | Specify Debian package names without version or architecture suffixes. |
 | `versions` | map of string | no | Map package names to exact Debian versions. Every key must also appear in `packages`. |
 | `locked` | set of string | no | Select packages to lock with `apt-mark hold`. Every name must also appear in `packages`. |
 | `remove_on_delete` | bool | no | Set to `true` to remove packages dropped from `packages` during apply and all listed packages during destroy. When `false` or unset, these removal operations change only OpenTofu state. |
+| `start_services` | bool | no | Defaults to `true`, which permits packages to start services normally. Set to `false` to prevent package scripts from starting or restarting services during installation. |
 
 ## pveguest_deb_packages
 
@@ -328,9 +331,12 @@ The install excludes recommended packages and rejects dependencies that
 require a download. The provider serializes apt operations per guest.
 Destroy removes the resource from state and retains the installed packages.
 
+The `start_services` argument has the same behavior as in `pveguest_apt_packages`. When `start_services` is `false`, the provider creates `/usr/sbin/policy-rc.d` immediately before `apt-get install` and deletes it after the command finishes.
+
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `packages` | map of string | yes | Map from Debian package name to the absolute guest path of its `.deb` file. |
+| `start_services` | bool | no | Defaults to `true`, which permits packages to start services normally. Set to `false` to prevent package scripts from starting or restarting services during installation. |
 
 | Attribute | Meaning |
 | --- | --- |
