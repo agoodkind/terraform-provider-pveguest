@@ -30,6 +30,8 @@ const (
 
 	controllerDownloadTimeout = 10 * time.Minute
 
+	maximumRedirects = 10
+
 	// The controller reads the extracted member into memory.
 	maximumArchiveMemberBytes = 1 << 30
 
@@ -105,7 +107,26 @@ func fileHasHash(filePath string, wantHash string) bool {
 	return hex.EncodeToString(hasher.Sum(nil)) == wantHash
 }
 
-func newControllerHTTPClient(caFile string) (*http.Client, error) {
+// dropHeadersOnOtherOrigin returns a CheckRedirect function that stops after 10
+// redirects. The function removes the named headers when the redirect target has a
+// different scheme, host, or port from the first request.
+func dropHeadersOnOtherOrigin(names []string) func(*http.Request, []*http.Request) error {
+	return func(request *http.Request, via []*http.Request) error {
+		if len(via) >= maximumRedirects {
+			return fmt.Errorf("stopped after %d redirects", maximumRedirects)
+		}
+		first := via[0].URL
+		if request.URL.Scheme == first.Scheme && request.URL.Host == first.Host {
+			return nil
+		}
+		for _, name := range names {
+			request.Header.Del(name)
+		}
+		return nil
+	}
+}
+
+func newControllerHTTPClient(caFile string, headerNames []string) (*http.Client, error) {
 	roots, err := x509.SystemCertPool()
 	if err != nil {
 		slog.Error("load the system certificate pool failed", "err", err)
@@ -125,12 +146,22 @@ func newControllerHTTPClient(caFile string) (*http.Client, error) {
 		Proxy:           http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 	}
-	return &http.Client{Transport: transport, Timeout: controllerDownloadTimeout}, nil
+	return &http.Client{
+		Transport:     transport,
+		Timeout:       controllerDownloadTimeout,
+		CheckRedirect: dropHeadersOnOtherOrigin(headerNames),
+	}, nil
 }
 
 // cachedArchive returns the path of the downloaded object in the cache. A
 // cached file with the expected hash skips the download.
-func cachedArchive(ctx context.Context, caFile string, url string, wantHash string) (string, error) {
+func cachedArchive(
+	ctx context.Context,
+	caFile string,
+	url string,
+	wantHash string,
+	headers requestHeaders,
+) (string, error) {
 	directory, err := cacheDirectory()
 	if err != nil {
 		return "", err
@@ -147,13 +178,16 @@ func cachedArchive(ctx context.Context, caFile string, url string, wantHash stri
 		return cachedPath, nil
 	}
 
-	client, err := newControllerHTTPClient(caFile)
+	client, err := newControllerHTTPClient(caFile, headers.sortedNames())
 	if err != nil {
 		return "", err
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("build the request for %s: %w", url, err)
+	}
+	for _, name := range headers.sortedNames() {
+		request.Header.Set(name, headers[name])
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -245,8 +279,9 @@ func fetchControllerPayload(
 	url string,
 	wantHash string,
 	member string,
+	headers requestHeaders,
 ) (controllerPayload, error) {
-	archivePath, err := cachedArchive(ctx, caFile, url, wantHash)
+	archivePath, err := cachedArchive(ctx, caFile, url, wantHash, headers)
 	if err != nil {
 		return controllerPayload{}, err
 	}
