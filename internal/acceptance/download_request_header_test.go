@@ -2,21 +2,21 @@ package acceptance_test
 
 import (
 	"bytes"
-	"context"
+	"compress/gzip"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -42,24 +42,35 @@ const (
 	requestHeaderCAName   = "controller-ca.pem"
 	requestHeaderPEMBlock = "CERTIFICATE"
 
-	controllerAddressVariable = "PVEGUEST_ACC_CONTROLLER_ADDRESS"
-	guestCertificatePath      = "/usr/local/share/ca-certificates/pveguest-acc-header.crt"
-	guestCertificateLifetime  = time.Hour
-	cacheDirectoryName        = "pveguest"
-	controllerRejection       = `HTTP status 401`
-	guestRejection            = `returned error: 401`
+	cacheDirectoryName = "pveguest"
+
+	guestWorkDirectory    = "/root/pveguest-acc"
+	guestServerUnit       = "pveguest-acc-https"
+	guestServerPort       = "18443"
+	guestServerBase       = "https://127.0.0.1:" + guestServerPort
+	guestCAPath           = "/usr/local/share/ca-certificates/pveguest-acc-header.crt"
+	guestCALink           = "/etc/ssl/certs/pveguest-acc-header.pem"
+	guestServerSource     = "./testdata/headerserver"
+	guestServerCommonName = "pveguest-acc-header"
+	guestCertificateSpan  = time.Hour
+	guestReadyAttempts    = 40
+	guestReadyDelay       = 500 * time.Millisecond
+	guestSecretMode       = "0600"
+	guestPublicMode       = "0644"
+	guestProgramMode      = "0755"
+)
+
+var (
+	controllerRejection = regexp.MustCompile(`HTTP\s+status\s+401`)
+	guestRejection      = regexp.MustCompile(`returned\s+error:\s+401`)
 )
 
 type requestHeaderServer struct {
-	accepted          atomic.Value
-	authorized        atomic.Int64
-	rejected          atomic.Int64
-	processListChecks atomic.Int64
-	processListLeaks  atomic.Int64
-	processListErrors atomic.Int64
-	inspect           func()
-	url               string
-	cacheHome         string
+	accepted   atomic.Value
+	authorized atomic.Int64
+	rejected   atomic.Int64
+	url        string
+	cacheHome  string
 }
 
 func (s *requestHeaderServer) accept(token string) {
@@ -83,9 +94,6 @@ func (s *requestHeaderServer) handler(content []byte) http.Handler {
 			return
 		}
 		s.authorized.Add(1)
-		if s.inspect != nil {
-			s.inspect()
-		}
 		_, _ = writer.Write(content)
 	})
 	return mux
@@ -109,7 +117,84 @@ func (g *testGuest) serveWithRequestHeader(t *testing.T, content []byte, token s
 	return recorder
 }
 
-func guestServerCertificate(t *testing.T, address net.IP) (tls.Certificate, []byte) {
+type guestHeaderServerState struct {
+	Authorized int `json:"authorized"`
+	Rejected   int `json:"rejected"`
+	Scanned    int `json:"scanned"`
+	Leaks      int `json:"leaks"`
+}
+
+type guestHeaderServer struct {
+	guest     *testGuest
+	url       string
+	statePath string
+}
+
+func (s *guestHeaderServer) state() guestHeaderServerState {
+	s.guest.t.Helper()
+	var state guestHeaderServerState
+	if err := json.Unmarshal([]byte(s.guest.readFile(s.statePath)), &state); err != nil {
+		s.guest.t.Fatal(err)
+	}
+	return state
+}
+
+func (s *guestHeaderServer) checkProcessScan() error {
+	state := s.state()
+	if state.Authorized == 0 || state.Scanned == 0 {
+		return fmt.Errorf("the guest server scanned %d process command lines for %d authorized requests",
+			state.Scanned, state.Authorized)
+	}
+	if state.Leaks != 0 {
+		return fmt.Errorf("%d guest process command lines contained the header value", state.Leaks)
+	}
+	return nil
+}
+
+func goArchitecture(t *testing.T, unameMachine string) string {
+	t.Helper()
+	switch unameMachine {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	default:
+		t.Fatalf("the guest architecture %q has no Go build mapping", unameMachine)
+		return ""
+	}
+}
+
+func buildHeaderServer(t *testing.T, architecture string) []byte {
+	t.Helper()
+	output := filepath.Join(t.TempDir(), "headerserver")
+	command := exec.CommandContext(
+		t.Context(), "go", "build", "-trimpath", "-ldflags=-s -w", "-o", output, guestServerSource,
+	)
+	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+architecture, "CGO_ENABLED=0")
+	if combined, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("go build %s: %v: %s", guestServerSource, err, combined)
+	}
+	content, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
+}
+
+func gzipBytes(t *testing.T, content []byte) []byte {
+	t.Helper()
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return compressed.Bytes()
+}
+
+func guestServerCertificate(t *testing.T) ([]byte, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -117,14 +202,14 @@ func guestServerCertificate(t *testing.T, address net.IP) (tls.Certificate, []by
 	}
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "pveguest-acc-header"},
-		NotBefore:             time.Now().Add(-guestCertificateLifetime),
-		NotAfter:              time.Now().Add(guestCertificateLifetime),
+		Subject:               pkix.Name{CommonName: guestServerCommonName},
+		NotBefore:             time.Now().Add(-guestCertificateSpan),
+		NotAfter:              time.Now().Add(guestCertificateSpan),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
-		IPAddresses:           []net.IP{address},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
 	if err != nil {
@@ -136,96 +221,67 @@ func guestServerCertificate(t *testing.T, address net.IP) (tls.Certificate, []by
 	}
 	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: requestHeaderPEMBlock, Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	pair, err := tls.X509KeyPair(certificatePEM, keyPEM)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pair, certificatePEM
+	return certificatePEM, keyPEM
 }
 
-func (g *testGuest) serveToGuest(t *testing.T, content []byte, token string) *requestHeaderServer {
-	t.Helper()
-	address := net.ParseIP(requireVariable(t, controllerAddressVariable))
-	if address == nil {
-		t.Fatalf("%s must be the controller IP address that the guest connects to", controllerAddressVariable)
-	}
-	recorder := &requestHeaderServer{cacheHome: t.TempDir()}
-	recorder.accept(token)
-	recorder.inspect = func() { g.inspectProcessList(recorder, token) }
-
-	pair, certificatePEM := guestServerCertificate(t, address)
-	listener, err := net.Listen("tcp", net.JoinHostPort(address.String(), "0"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	server := httptest.NewUnstartedServer(recorder.handler(content))
-	server.Listener = listener
-	server.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
-	server.StartTLS()
-	t.Cleanup(server.Close)
-
-	t.Cleanup(func() {
-		g.mustRun("rm", "-f", "--", guestCertificatePath)
-		g.mustRun("update-ca-certificates", "--fresh")
-	})
-	g.mustRun("mkdir", "-p", "--", filepath.Dir(guestCertificatePath))
-	g.writeFile(guestCertificatePath, string(certificatePEM))
-	g.mustRun("update-ca-certificates")
-
-	t.Setenv("XDG_CACHE_HOME", recorder.cacheHome)
-	recorder.url = server.URL
-	return recorder
-}
-
-func (g *testGuest) inspectProcessList(recorder *requestHeaderServer, token string) {
-	command := transport.Command{
-		Argv:           []string{"env", "LC_ALL=C", "ps", "-eo", "args"},
-		TimeoutSeconds: directTimeout,
-	}
-	result, err := g.client.Run(context.Background(), g.guest, command)
-	if err != nil || result.ExitCode != 0 {
-		recorder.processListErrors.Add(1)
-		return
-	}
-	recorder.processListChecks.Add(1)
-	if bytes.Contains(result.Stdout, []byte(token)) {
-		recorder.processListLeaks.Add(1)
-	}
-}
-
-func (s *requestHeaderServer) checkProcessList() error {
-	if s.processListErrors.Load() != 0 || s.processListChecks.Load() == 0 {
-		return fmt.Errorf("the guest process list was not read during an authorized request (errors %d, checks %d)",
-			s.processListErrors.Load(), s.processListChecks.Load())
-	}
-	if s.processListLeaks.Load() != 0 {
-		return errors.New("a guest process argument list contained the header value")
-	}
-	return nil
-}
-
-type rejection struct {
-	expecting atomic.Bool
-	pattern   *regexp.Regexp
-	secrets   []string
-}
-
-func (r *rejection) expect() { r.expecting.Store(true) }
-
-func (r *rejection) clear() { r.expecting.Store(false) }
-
-func (r *rejection) errorCheck(err error) error {
-	if !r.expecting.Load() {
-		return err
-	}
-	for _, secret := range r.secrets {
-		if strings.Contains(err.Error(), secret) {
-			return errors.New("the error text contains a header value")
+func (g *testGuest) putFile(path string, content []byte, mode string) {
+	g.t.Helper()
+	g.mustRun("install", "-m", mode, "/dev/null", path)
+	for _, piece := range transport.SplitStdin(g.guest.Kind, content) {
+		result := g.run(piece, "dd", "of="+path, "oflag=append", "conv=notrunc", "status=none")
+		if result.ExitCode != 0 {
+			g.t.Fatalf("append to %s: status %d: %s", path, result.ExitCode, result.Stderr)
 		}
 	}
-	if !r.pattern.MatchString(err.Error()) {
-		return err
+}
+
+func (g *testGuest) stopHeaderServer() {
+	unit := guestServerUnit + ".service"
+	g.run(nil, "systemctl", "stop", "--", unit)
+	g.run(nil, "systemctl", "reset-failed", "--", unit)
+	g.mustRun("rm", "-f", "--", guestCAPath)
+	g.mustRun("update-ca-certificates", "--fresh")
+	g.mustRun("rm", "-rf", "--", guestWorkDirectory)
+}
+
+func (g *testGuest) startHeaderServer(t *testing.T, content []byte, token string) *guestHeaderServer {
+	t.Helper()
+	t.Cleanup(g.stopHeaderServer)
+	architecture := goArchitecture(t, strings.TrimSpace(g.mustRun("uname", "-m")))
+	program := gzipBytes(t, buildHeaderServer(t, architecture))
+	certificatePEM, keyPEM := guestServerCertificate(t)
+
+	g.mustRun("mkdir", "-m", "0700", "--", guestWorkDirectory)
+	binary := guestWorkDirectory + "/headerserver"
+	g.putFile(binary+".gz", program, guestSecretMode)
+	g.mustRun("gzip", "-df", "--", binary+".gz")
+	g.mustRun("chmod", guestProgramMode, "--", binary)
+	certificatePath := guestWorkDirectory + "/cert.pem"
+	keyPath := guestWorkDirectory + "/key.pem"
+	tokenPath := guestWorkDirectory + "/token"
+	contentPath := guestWorkDirectory + "/content.bin"
+	statePath := guestWorkDirectory + "/state.json"
+	g.putFile(certificatePath, certificatePEM, guestSecretMode)
+	g.putFile(keyPath, keyPEM, guestSecretMode)
+	g.putFile(tokenPath, []byte(token), guestSecretMode)
+	g.putFile(contentPath, content, guestSecretMode)
+
+	g.putFile(guestCAPath, certificatePEM, guestPublicMode)
+	g.mustRun("update-ca-certificates")
+
+	g.mustRun(
+		"systemd-run", "--unit="+guestServerUnit, "--collect", binary,
+		"-addr", "127.0.0.1:"+guestServerPort, "-cert", certificatePath, "-key", keyPath,
+		"-token-file", tokenPath, "-content-file", contentPath, "-state-file", statePath,
+	)
+	for attempt := 0; attempt < guestReadyAttempts; attempt++ {
+		result := g.run(nil, "curl", "-fsS", "-o", "/dev/null", guestServerBase+"/ready")
+		if result.ExitCode == 0 {
+			return &guestHeaderServer{guest: g, url: guestServerBase + requestHeaderObject, statePath: statePath}
+		}
+		time.Sleep(guestReadyDelay)
 	}
+	t.Fatalf("the guest server did not answer %s/ready", guestServerBase)
 	return nil
 }
 
@@ -247,6 +303,82 @@ resource "pveguest_download" %q {
   %s
 }
 `, name, url, hash, path, extra)
+}
+
+func (g *testGuest) workspaceConfig(fetch string, url string, hash string, path string, version int, headers bool) string {
+	extra := ""
+	if headers {
+		extra = fmt.Sprintf(`request_headers_wo         = { %s = "%s${var.secret}" }
+  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix, version)
+	}
+	return g.providerBlock() + fmt.Sprintf(`
+variable "secret" {
+  type      = string
+  sensitive = true
+  ephemeral = true
+}
+
+resource "pveguest_download" "test" {
+  node   = local.node
+  vmid   = local.vmid
+  kind   = local.kind
+  fetch  = %q
+  url    = %q
+  sha256 = %q
+  path   = %q
+  %s
+}
+`, fetch, url, hash, path, extra)
+}
+
+func newHeaderWorkspace(t *testing.T) *tofuWorkspace {
+	t.Helper()
+	return &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
+}
+
+func (w *tofuWorkspace) applyConfig(config string, token string) (string, int) {
+	w.t.Helper()
+	w.variableValue = token
+	w.writeConfig(config)
+	return w.run("apply", "-no-color", "-auto-approve")
+}
+
+func (w *tofuWorkspace) requireRejected(config string, token string, pattern *regexp.Regexp) {
+	w.t.Helper()
+	output, exitCode := w.applyConfig(config, token)
+	if exitCode == 0 {
+		w.t.Fatalf("the apply succeeded, want a rejected download:\n%s", output)
+	}
+	if !pattern.MatchString(output) {
+		w.t.Fatalf("the apply output does not match %s:\n%s", pattern, output)
+	}
+	if token != "" && strings.Contains(output, token) {
+		w.t.Fatal("the apply output contains the header value")
+	}
+	w.requireStateOmitsIfPresent(token)
+}
+
+func (w *tofuWorkspace) requireApplied(config string, token string) {
+	w.t.Helper()
+	output, exitCode := w.applyConfig(config, token)
+	if exitCode != 0 {
+		w.t.Fatalf("the apply exited with status %d:\n%s", exitCode, output)
+	}
+	if strings.Contains(output, token) {
+		w.t.Fatal("the apply output contains the header value")
+	}
+	w.requireStateOmitsIfPresent(token)
+}
+
+func (w *tofuWorkspace) requireStateOmitsIfPresent(token string) {
+	w.t.Helper()
+	if token == "" {
+		return
+	}
+	if _, err := os.Stat(filepath.Join(w.directory, stateFileName)); err != nil {
+		return
+	}
+	w.requireOmits(stateFileName, token)
 }
 
 func requestHeaderPayload(t *testing.T) ([]byte, string) {
@@ -313,33 +445,20 @@ func TestAccDownloadRequestHeaderCacheMissRejected(t *testing.T) {
 	payload, hash := requestHeaderPayload(t)
 	recorder := guest.serveWithRequestHeader(t, payload, requestHeaderToken)
 	path := testDirectory + "/request-header/rejected.bin"
-	config := guest.providerBlock() + guest.controllerDownloadBlock(
-		"test", recorder.url+requestHeaderObject, hash, path, requestHeaderArguments(requestHeaderWrong, 1),
-	)
+	config := guest.workspaceConfig("controller", recorder.url+requestHeaderObject, hash, path, 1, true)
+	workspace := newHeaderWorkspace(t)
+	workspace.writeConfig(config)
+	workspace.mustRun("init", "-no-color")
+	recorder.clearCache(t)
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				PreConfig:   func() { recorder.clearCache(t) },
-				Config:      config,
-				ExpectError: regexp.MustCompile(controllerRejection),
-			},
-			{
-				PreConfig: func() {
-					if recorder.rejected.Load() == 0 || recorder.authorized.Load() != 0 {
-						t.Fatalf("server counts: %d rejected, %d authorized", recorder.rejected.Load(), recorder.authorized.Load())
-					}
-					if guest.exists(path) {
-						t.Fatalf("%s exists after the rejected download", path)
-					}
-				},
-				Config:             config,
-				PlanOnly:           true,
-				ExpectNonEmptyPlan: true,
-			},
-		},
-	})
+	workspace.requireRejected(config, requestHeaderWrong, controllerRejection)
+
+	if recorder.rejected.Load() == 0 || recorder.authorized.Load() != 0 {
+		t.Fatalf("server counts: %d rejected, %d authorized", recorder.rejected.Load(), recorder.authorized.Load())
+	}
+	if guest.exists(path) {
+		t.Fatalf("%s exists after the rejected download", path)
+	}
 }
 
 func TestAccDownloadRequestHeaderRotation(t *testing.T) {
@@ -349,68 +468,53 @@ func TestAccDownloadRequestHeaderRotation(t *testing.T) {
 	recorder := guest.serveWithRequestHeader(t, payload, requestHeaderToken)
 	path := testDirectory + "/request-header/rotation.bin"
 	url := recorder.url + requestHeaderObject
-	download := func(token string, version int) string {
-		return guest.providerBlock() +
-			guest.controllerDownloadBlock("test", url, hash, path, requestHeaderArguments(token, version))
-	}
-	var authorizedBefore int64
+	firstConfig := guest.workspaceConfig("controller", url, hash, path, 1, true)
+	rotatedConfig := guest.workspaceConfig("controller", url, hash, path, 2, true)
+	workspace := newHeaderWorkspace(t)
+	workspace.writeConfig(firstConfig)
+	workspace.mustRun("init", "-no-color")
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: download(requestHeaderToken, 1),
-				Check:  checkGuest(guest.expectFileHash(path, hash)),
-			},
-			{
-				PreConfig: func() {
-					recorder.accept(requestHeaderRotated)
-					recorder.clearCache(t)
-				},
-				Config:      download(requestHeaderToken, 2),
-				ExpectError: regexp.MustCompile(controllerRejection),
-			},
-			{
-				PreConfig: func() {
-					recorder.clearCache(t)
-					authorizedBefore = recorder.authorized.Load()
-				},
-				Config: download(requestHeaderRotated, 2),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("pveguest_download.test", "request_headers_wo_version", "2"),
-					checkStateOmits(requestHeaderRotated),
-					checkGuest(func() error {
-						if recorder.authorized.Load() != authorizedBefore+1 {
-							return fmt.Errorf("the rotated token made %d authorized requests, want 1",
-								recorder.authorized.Load()-authorizedBefore)
-						}
-						return guest.expectFileHash(path, hash)()
-					}),
-				),
-			},
-		},
-	})
+	workspace.requireApplied(firstConfig, requestHeaderToken)
+	if err := guest.expectFileHash(path, hash)(); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder.accept(requestHeaderRotated)
+	recorder.clearCache(t)
+	workspace.requireRejected(rotatedConfig, requestHeaderToken, controllerRejection)
+
+	recorder.clearCache(t)
+	authorizedBefore := recorder.authorized.Load()
+	workspace.requireApplied(rotatedConfig, requestHeaderRotated)
+	if got := recorder.authorized.Load() - authorizedBefore; got != 1 {
+		t.Fatalf("the rotated token made %d authorized requests, want 1", got)
+	}
+	if err := guest.expectFileHash(path, hash)(); err != nil {
+		t.Fatal(err)
+	}
+	workspace.requireOmits(stateFileName, requestHeaderToken)
+
+	workspace.mustRun("destroy", "-no-color", "-auto-approve")
 }
 
 func TestAccDownloadGuestRequestHeader(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
 	payload, hash := requestHeaderPayload(t)
-	recorder := guest.serveToGuest(t, payload, requestHeaderToken)
+	server := guest.startHeaderServer(t, payload, requestHeaderToken)
 	path := testDirectory + "/request-header/guest.bin"
-	url := recorder.url + requestHeaderObject
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
 				Config: guest.providerBlock() +
-					guest.guestDownloadBlock("test", url, hash, path, requestHeaderArguments(requestHeaderToken, 1)),
+					guest.guestDownloadBlock("test", server.url, hash, path, requestHeaderArguments(requestHeaderToken, 1)),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr("pveguest_download.test", "file_sha256", hash),
 					resource.TestCheckNoResourceAttr("pveguest_download.test", "request_headers_wo.%"),
 					checkStateOmits(requestHeaderToken),
-					checkGuest(recorder.checkProcessList),
+					checkGuest(server.checkProcessScan),
 					checkGuest(guest.expectFileHash(path, hash)),
 				),
 			},
@@ -422,39 +526,31 @@ func TestAccDownloadGuestRequestHeaderRejected(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
 	payload, hash := requestHeaderPayload(t)
-	recorder := guest.serveToGuest(t, payload, requestHeaderToken)
-	url := recorder.url + requestHeaderObject
-	wrongPath := testDirectory + "/request-header/wrong.bin"
-	missingPath := testDirectory + "/request-header/missing.bin"
-	expectation := &rejection{pattern: regexp.MustCompile(guestRejection), secrets: []string{requestHeaderWrong}}
+	server := guest.startHeaderServer(t, payload, requestHeaderToken)
+	path := testDirectory + "/request-header/guest-rejected.bin"
+	withHeaders := guest.workspaceConfig("guest", server.url, hash, path, 1, true)
+	withoutHeaders := guest.workspaceConfig("guest", server.url, hash, path, 1, false)
+	workspace := newHeaderWorkspace(t)
+	workspace.writeConfig(withHeaders)
+	workspace.mustRun("init", "-no-color")
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		ErrorCheck:               expectation.errorCheck,
-		Steps: []resource.TestStep{
-			{
-				PreConfig: expectation.expect,
-				Config: guest.providerBlock() +
-					guest.guestDownloadBlock("test", url, hash, wrongPath, requestHeaderArguments(requestHeaderWrong, 1)),
-			},
-			{
-				PreConfig: expectation.expect,
-				Config:    guest.providerBlock() + guest.guestDownloadBlock("test", url, hash, missingPath, ""),
-			},
-			{
-				PreConfig: func() {
-					expectation.clear()
-					if recorder.authorized.Load() != 0 {
-						t.Fatalf("the server authorized %d requests, want 0", recorder.authorized.Load())
-					}
-					if guest.exists(wrongPath) || guest.exists(missingPath) {
-						t.Fatal("a rejected download left a file in the guest")
-					}
-				},
-				Config: guest.providerBlock() +
-					guest.guestDownloadBlock("test", url, hash, wrongPath, requestHeaderArguments(requestHeaderToken, 1)),
-				Check: checkGuest(guest.expectFileHash(wrongPath, hash)),
-			},
-		},
-	})
+	workspace.requireRejected(withHeaders, requestHeaderWrong, guestRejection)
+	workspace.requireRejected(withoutHeaders, "", guestRejection)
+
+	state := server.state()
+	if state.Authorized != 0 || state.Rejected < 2 {
+		t.Fatalf("guest server counts: %d authorized, %d rejected", state.Authorized, state.Rejected)
+	}
+	if guest.exists(path) {
+		t.Fatalf("%s exists after the rejected downloads", path)
+	}
+
+	workspace.requireApplied(withHeaders, requestHeaderToken)
+	if err := guest.expectFileHash(path, hash)(); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.checkProcessScan(); err != nil {
+		t.Fatal(err)
+	}
+	workspace.mustRun("destroy", "-no-color", "-auto-approve")
 }
