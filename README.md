@@ -318,7 +318,7 @@ Create and Update run `systemctl daemon-reload` and reconcile the declared
 unit state. When `restart_on` changes and the unit remains enabled, the
 provider runs `systemctl reenable` to rebuild its installation links before
 reconciling its active state. Create fails when the unit file does not exist.
-Destroy removes the resource from state.
+When `remove_on_delete` is `true`, Destroy stops an active unit, disables an enabled unit, and reads its state again; a missing unit counts as removed. Destroy fails and keeps the resource in OpenTofu state if a guest command fails or the unit remains active or enabled; when `remove_on_delete` is `false` or unset, Destroy removes only the resource from state without running a guest command.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -326,6 +326,7 @@ Destroy removes the resource from state.
 | `enabled` | bool | yes | Whether the unit is enabled. A unit in the state `static`, `alias`, `indirect`, `generated`, or `transient` satisfies both values. |
 | `active` | bool | yes | Whether the unit is active. |
 | `restart_on` | map of string | no | A changed map restarts an active unit during apply. |
+| `remove_on_delete` | bool | no | When `true`, Destroy stops the unit if active and disables it if enabled. Defaults to `false`, which removes only the resource from OpenTofu state. |
 
 The intended `restart_on` value is the `write_id` of each file that the unit
 reads. The `sha256` of a file is the same before a hand edit and after the
@@ -679,6 +680,7 @@ items at the end:
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
+- The unit `pveguest-acc-removal.service` under `/etc/systemd/system/`.
 - The sysrepo module `pveguest-acc` and its data in the `running` datastore.
   `TestAccSysrepoModuleAndData` skips when the guest has no `sysrepoctl` or
   `sysrepocfg`.
