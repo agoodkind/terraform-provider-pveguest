@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -18,12 +22,23 @@ import (
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
-const systemctlTimeoutSeconds = 300
+const (
+	systemctlTimeoutSeconds = 300
+
+	systemdUnitImportFormat = "<node>/<vmid>/<kind>/<name>"
+	systemdUnitImportFields = 4
+
+	// ImportState sets this private state key, and Update deletes it after the
+	// first successful apply.
+	importedEntry = "imported"
+)
 
 var (
 	unitNamePattern = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+\.[a-z]+$`)
 
 	missingUnitMessages = []string{missingFileMessage, "does not exist", "not found"}
+
+	importedMarker = []byte(`true`)
 )
 
 type unitFileState string
@@ -133,6 +148,74 @@ func (r *systemdUnitResource) Configure(_ context.Context, req resource.Configur
 	r.data = providerDataFrom(req, resp)
 }
 
+func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	fields := strings.Split(req.ID, "/")
+	if len(fields) != systemdUnitImportFields || slices.Contains(fields, "") {
+		resp.Diagnostics.AddError("Import systemd unit", systemdUnitImportError(req.ID))
+		return
+	}
+	node, vmidText, kind, name := fields[0], fields[1], fields[2], fields[3]
+	vmid, err := strconv.ParseInt(vmidText, 10, 64)
+	if err != nil {
+		resp.Diagnostics.AddError("Import systemd unit", systemdUnitImportError(req.ID))
+		return
+	}
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	attributes := schemaResp.Schema.Attributes
+	resp.Diagnostics.Append(validateImportedString(ctx, attributes, "kind", kind)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, attributes, "name", name)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	imported := systemdUnitModel{
+		Node:           types.StringValue(node),
+		VMID:           types.Int64Value(vmid),
+		Kind:           types.StringValue(kind),
+		Name:           types.StringValue(name),
+		Enabled:        types.BoolNull(),
+		Active:         types.BoolNull(),
+		RestartOn:      types.MapNull(types.StringType),
+		RemoveOnDelete: types.BoolValue(false),
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &imported)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, importedMarker)...)
+}
+
+func systemdUnitImportError(id string) string {
+	return fmt.Sprintf("import ID %q must use the format %s", id, systemdUnitImportFormat)
+}
+
+// validateImportedString applies the schema validators for a string attribute
+// to an import ID value.
+func validateImportedString(
+	ctx context.Context,
+	attributes map[string]schema.Attribute,
+	name string,
+	value string,
+) diag.Diagnostics {
+	var diagnostics diag.Diagnostics
+	attribute, isString := attributes[name].(schema.StringAttribute)
+	if !isString {
+		diagnostics.AddError("Import systemd unit",
+			fmt.Sprintf("The schema does not define the string attribute %s. The provider contains a defect.", name))
+		return diagnostics
+	}
+	request := validator.StringRequest{
+		Path:           path.Root(name),
+		PathExpression: path.MatchRoot(name),
+		ConfigValue:    types.StringValue(value),
+	}
+	for _, check := range attribute.Validators {
+		var response validator.StringResponse
+		check.ValidateString(ctx, request, &response)
+		diagnostics.Append(response.Diagnostics...)
+	}
+	return diagnostics
+}
+
 func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan systemdUnitModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -191,11 +274,23 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
+	resp.Diagnostics.Append(diagnostics...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	restart := !plan.RestartOn.Equal(state.RestartOn)
+	// The imported unit already runs with its current files. The first
+	// restart_on value after import does not restart it.
+	if imported != nil && state.RestartOn.IsNull() {
+		restart = false
+	}
 	if err := r.apply(ctx, plan, restart); err != nil {
 		resp.Diagnostics.AddError("Update systemd unit state", err.Error())
 		return
 	}
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, nil)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
