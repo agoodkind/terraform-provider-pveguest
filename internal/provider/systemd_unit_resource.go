@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
@@ -47,6 +48,8 @@ const (
 	unitActive     unitActiveState = "active"
 	unitActivating unitActiveState = "activating"
 	unitReloading  unitActiveState = "reloading"
+	unitInactive   unitActiveState = "inactive"
+	unitFailed     unitActiveState = "failed"
 )
 
 // enablement classifies the output of systemctl is-enabled.
@@ -71,13 +74,14 @@ type systemdUnitResource struct {
 }
 
 type systemdUnitModel struct {
-	Node      types.String `tfsdk:"node"`
-	VMID      types.Int64  `tfsdk:"vmid"`
-	Kind      types.String `tfsdk:"kind"`
-	Name      types.String `tfsdk:"name"`
-	Enabled   types.Bool   `tfsdk:"enabled"`
-	Active    types.Bool   `tfsdk:"active"`
-	RestartOn types.Map    `tfsdk:"restart_on"`
+	Node           types.String `tfsdk:"node"`
+	VMID           types.Int64  `tfsdk:"vmid"`
+	Kind           types.String `tfsdk:"kind"`
+	Name           types.String `tfsdk:"name"`
+	Enabled        types.Bool   `tfsdk:"enabled"`
+	Active         types.Bool   `tfsdk:"active"`
+	RestartOn      types.Map    `tfsdk:"restart_on"`
+	RemoveOnDelete types.Bool   `tfsdk:"remove_on_delete"`
 }
 
 func newSystemdUnitResource() resource.Resource {
@@ -91,7 +95,7 @@ func (r *systemdUnitResource) Metadata(_ context.Context, req resource.MetadataR
 func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		Description: "The enabled state and the active state of a systemd unit inside a guest. " +
-			"The unit file must exist. Destroy removes the resource from state.",
+			"The unit file must exist.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required:    true,
@@ -114,6 +118,12 @@ func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest
 				ElementType: types.StringType,
 				Description: "Arbitrary values, usually the write_id of each file that the unit reads. " +
 					"A changed map restarts an active unit during apply.",
+			},
+			"remove_on_delete": schema.BoolAttribute{
+				Optional:    true,
+				Computed:    true,
+				Default:     booldefault.StaticBool(false),
+				Description: "When true, Destroy stops the unit if active and disables it if enabled. Defaults to false, which removes only the resource from OpenTofu state.",
 			},
 		}),
 	}
@@ -167,6 +177,9 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 		// enabled value to state only for enabled and disabled units.
 	}
 	state.Active = types.BoolValue(isActiveState(status.Active))
+	if state.RemoveOnDelete.IsNull() {
+		state.RemoveOnDelete = types.BoolValue(false)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -186,8 +199,57 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// The framework removes the resource from state after Delete returns.
-func (r *systemdUnitResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
+func (r *systemdUnitResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+	var state systemdUnitModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	if !state.RemoveOnDelete.ValueBool() {
+		return
+	}
+	if err := r.remove(ctx, state); err != nil {
+		resp.Diagnostics.AddError("Delete systemd unit", err.Error())
+	}
+}
+
+func (r *systemdUnitResource) remove(ctx context.Context, state systemdUnitModel) error {
+	guest := guestOf(state.Node, state.VMID, state.Kind)
+	name := state.Name.ValueString()
+
+	status, err := readUnitStatus(ctx, r.data.client, guest, name)
+	if err != nil {
+		return err
+	}
+	if !status.Found {
+		return nil
+	}
+
+	if !isStoppedState(status.Active) {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("stop", "--", name)); err != nil {
+			return err
+		}
+	}
+	if classifyEnabledState(status.FileState) == enablementEnabled {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
+			return err
+		}
+	}
+
+	after, err := readUnitStatus(ctx, r.data.client, guest, name)
+	if err != nil {
+		return err
+	}
+	if !after.Found {
+		return nil
+	}
+	if !isStoppedState(after.Active) {
+		return fmt.Errorf("on guest %s, unit %s has active state %s after stop; the active state must be inactive or failed", guest, name, after.Active)
+	}
+	if classifyEnabledState(after.FileState) == enablementEnabled {
+		return fmt.Errorf("on guest %s, unit %s has unit file state %s after disable; the unit file state must not be enabled", guest, name, after.FileState)
+	}
+	return nil
 }
 
 func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, restart bool) error {
@@ -301,10 +363,16 @@ func classifyEnabledState(state unitFileState) enablement {
 	}
 }
 
+func isStoppedState(state unitActiveState) bool {
+	return state == unitInactive || state == unitFailed
+}
+
 func isActiveState(state unitActiveState) bool {
 	switch state {
 	case unitActive, unitActivating, unitReloading:
 		return true
+	case unitInactive, unitFailed:
+		return false
 	default:
 		return false
 	}

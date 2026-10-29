@@ -121,14 +121,28 @@ func requireVariable(t *testing.T, name string) string {
 	return value
 }
 
-func (g *testGuest) run(stdin []byte, argv ...string) transport.Result {
-	g.t.Helper()
-	command := transport.Command{
+func guestCommand(stdin []byte, argv []string) transport.Command {
+	return transport.Command{
 		Argv:           append([]string{"env", "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive"}, argv...),
 		Stdin:          stdin,
 		TimeoutSeconds: directTimeout,
 	}
-	result, err := g.client.Run(context.Background(), g.guest, command)
+}
+
+func (g *testGuest) run(stdin []byte, argv ...string) transport.Result {
+	g.t.Helper()
+	result, err := g.client.Run(context.Background(), g.guest, guestCommand(stdin, argv))
+	if err != nil {
+		g.t.Fatalf("run %q: %v", argv, err)
+	}
+	return result
+}
+
+// runReadOnly retries a closed API connection. Callers pass only commands
+// that cannot change the guest.
+func (g *testGuest) runReadOnly(argv ...string) transport.Result {
+	g.t.Helper()
+	result, err := g.client.RunReadOnly(context.Background(), g.guest, guestCommand(nil, argv))
 	if err != nil {
 		g.t.Fatalf("run %q: %v", argv, err)
 	}
@@ -160,7 +174,7 @@ func (g *testGuest) readFile(path string) string {
 func (g *testGuest) exists(path string) bool {
 	g.t.Helper()
 	// test -e follows links; -L also accepts a dangling link.
-	result := g.run(nil, "sh", "-c", `test -e "$1" || test -L "$1"`, "sh", path)
+	result := g.runReadOnly("sh", "-c", `test -e "$1" || test -L "$1"`, "sh", path)
 	return result.ExitCode == 0
 }
 
@@ -172,7 +186,7 @@ func (g *testGuest) packageInstalled(name string) bool {
 
 func (g *testGuest) systemctlState(verb string, unit string) string {
 	g.t.Helper()
-	result := g.run(nil, "systemctl", verb, "--", unit)
+	result := g.runReadOnly("systemctl", verb, "--", unit)
 	return strings.TrimSpace(string(result.Stdout))
 }
 
