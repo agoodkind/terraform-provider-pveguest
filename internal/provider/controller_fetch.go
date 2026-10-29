@@ -182,21 +182,23 @@ func cachedArchive(
 	if err != nil {
 		return "", err
 	}
+	shownURL := headers.redactText(url)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("build the request for %s: %w", url, err)
+		return "", headers.redact(fmt.Errorf("build the request for %s: %w", url, err))
 	}
 	for _, name := range headers.sortedNames() {
 		request.Header.Set(name, headers[name])
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		slog.ErrorContext(ctx, "controller download failed", "url", url, "err", err)
-		return "", fmt.Errorf("download %s on the controller: %w", url, err)
+		redacted := headers.redact(err)
+		slog.ErrorContext(ctx, "controller download failed", "url", shownURL, "err", redacted)
+		return "", fmt.Errorf("download %s on the controller: %w", shownURL, redacted)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s on the controller: HTTP status %d", url, response.StatusCode)
+		return "", fmt.Errorf("download %s on the controller: HTTP status %d", shownURL, response.StatusCode)
 	}
 
 	part, err := os.CreateTemp(directory, cachePartPattern)
@@ -209,15 +211,16 @@ func cachedArchive(
 	closeErr := part.Close()
 	if err := errors.Join(copyErr, closeErr); err != nil {
 		_ = os.Remove(partPath)
-		slog.ErrorContext(ctx, "write the download cache file failed", "url", url, "err", err)
-		return "", fmt.Errorf("download %s on the controller: %w", url, err)
+		redacted := headers.redact(err)
+		slog.ErrorContext(ctx, "write the download cache file failed", "url", shownURL, "err", redacted)
+		return "", fmt.Errorf("download %s on the controller: %w", shownURL, redacted)
 	}
 	receivedHash := hex.EncodeToString(hasher.Sum(nil))
 	if receivedHash != wantHash {
 		_ = os.Remove(partPath)
 		return "", fmt.Errorf(
 			"the download of %s has sha256 %s, but the configuration expects %s",
-			url, receivedHash, wantHash,
+			shownURL, receivedHash, wantHash,
 		)
 	}
 	if err := os.Rename(partPath, cachedPath); err != nil {
@@ -292,8 +295,10 @@ func fetchControllerPayload(
 		content, err = extractArchiveMember(archivePath, member)
 	}
 	if err != nil {
-		slog.ErrorContext(ctx, "read the controller payload failed", "url", url, "err", err)
-		return controllerPayload{}, fmt.Errorf("read the payload of %s: %w", url, err)
+		shownURL := headers.redactText(url)
+		redacted := headers.redact(err)
+		slog.ErrorContext(ctx, "read the controller payload failed", "url", shownURL, "err", redacted)
+		return controllerPayload{}, fmt.Errorf("read the payload of %s: %w", shownURL, redacted)
 	}
 	return controllerPayload{Content: content, SHA256: hashHex(content)}, nil
 }

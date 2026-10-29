@@ -108,18 +108,21 @@ func (headers requestHeaders) redact(err error) error {
 	if err == nil || len(headers) == 0 {
 		return err
 	}
+	return errors.New(headers.redactText(err.Error()))
+}
+
+func (headers requestHeaders) redactText(text string) string {
 	values := slices.Collect(maps.Values(headers))
 	slices.SortFunc(values, func(left string, right string) int {
 		return len(right) - len(left)
 	})
-	message := err.Error()
 	for _, value := range values {
 		if value == "" {
 			continue
 		}
-		message = strings.ReplaceAll(message, value, redactedHeaderValue)
+		text = strings.ReplaceAll(text, value, redactedHeaderValue)
 	}
-	return errors.New(message)
+	return text
 }
 
 func requestHeadersFrom(ctx context.Context, config tfsdk.Config) (requestHeaders, diag.Diagnostics) {
@@ -623,7 +626,7 @@ func (r *downloadResource) downloadWithHeaders(
 		return err
 	}
 	if result.ExitCode != 0 {
-		return commandFailure(guest, curlCommand, result)
+		return headers.redact(commandFailure(guest, curlCommand, result))
 	}
 	if strings.TrimSpace(string(result.Stdout)) != "" {
 		return fmt.Errorf("%s: %s", guest, guestRedirectMessage)

@@ -87,6 +87,8 @@ func headerDownloadDiagnosticBytes(diagnostics []*tfprotov6.Diagnostic) []byte {
 	return text.Bytes()
 }
 
+const headerDownloadEchoValue = "echoed-token-value-52c1"
+
 type headerDownloadSettings struct {
 	url     string
 	fetch   string
@@ -769,6 +771,66 @@ func TestDownloadGuestRedirectFailsWithHeaders(t *testing.T) {
 	requireHeaderDownload(t, "diagnostic_names_fetch", strings.Contains(applied.Diagnostics[0].Detail, "Set fetch to controller"))
 	_, installed := harness.guest.file(headerDownloadPath)
 	requireHeaderDownload(t, "no_file_installed", !installed)
+}
+
+func headerDownloadHTTPErrorServer(t *testing.T) (*httptest.Server, string) {
+	t.Helper()
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasPrefix(request.URL.Path, "/invalid"):
+			writer.Header().Set("Location", "https://[bad/"+headerDownloadEchoValue)
+			writer.WriteHeader(headerDownloadStatusRedirect)
+		case strings.HasPrefix(request.URL.Path, "/closed"):
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			_ = connection.Close()
+		default:
+			http.NotFound(writer, request)
+		}
+	})
+	return headerDownloadTLSServer(t, handler)
+}
+
+func TestDownloadControllerHTTPErrorsRedactHeaderValue(t *testing.T) {
+	cases := []struct {
+		name    string
+		path    string
+		trusted bool
+	}{
+		{name: "invalid redirect location", path: "/invalid/", trusted: true},
+		{name: "closed connection", path: "/closed/", trusted: true},
+		{name: "untrusted certificate", path: "/closed/", trusted: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			logs := &lockedLogBuffer{}
+			previous := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			t.Cleanup(func() { slog.SetDefault(previous) })
+
+			server, caFile := headerDownloadHTTPErrorServer(t)
+			if !testCase.trusted {
+				caFile = ""
+			}
+			harness := newHeaderDownloadHarness(t, caFile)
+			settings := headerDownloadControllerSettings(
+				server.URL+testCase.path+headerDownloadEchoValue, headerDownloadFirstVersion,
+			)
+			settings.headers = map[string]string{headerDownloadName: headerDownloadEchoValue}
+			prior := powerResourceNull(t, harness.resourceType)
+			plan := harness.plan(t, prior, nil, settings)
+
+			applied := harness.apply(t, prior, plan, settings)
+
+			requireHeaderDownloadCount(t, "diagnostics", len(applied.Diagnostics), 1)
+			requireHeaderDownload(t, "diagnostic_redacts_value", strings.Contains(applied.Diagnostics[0].Detail, "[redacted]"))
+			requireHeaderDownload(t, "diagnostic_without_value", !strings.Contains(applied.Diagnostics[0].Detail, headerDownloadEchoValue))
+			requireHeaderDownload(t, "logs_written", bytes.Contains(logs.contents(), []byte("controller download failed")))
+			requireHeaderDownload(t, "logs_without_value", !bytes.Contains(logs.contents(), []byte(headerDownloadEchoValue)))
+		})
+	}
 }
 
 func TestDownloadRejectsInvalidRequestHeaders(t *testing.T) {
