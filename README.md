@@ -762,6 +762,7 @@ items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
+- `TestAccAptPackagesNoServiceStart` installs and purges `at`. During the test, the provider writes and deletes `/usr/sbin/policy-rc.d`.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 - The unit `pveguest-acc-removal.service` under `/etc/systemd/system/`.

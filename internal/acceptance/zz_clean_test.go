@@ -21,6 +21,7 @@ func TestAccGuestIsClean(t *testing.T) {
 		guestCAPath,
 		guestCALink,
 		guestCAHashLink,
+		policyFilePath,
 	}
 	for _, path := range leftoverPaths {
 		if guest.exists(path) {
@@ -29,6 +30,12 @@ func TestAccGuestIsClean(t *testing.T) {
 	}
 	if guest.packageInstalled(testPackage) {
 		t.Errorf("package %s is installed after the tests", testPackage)
+	}
+	if guest.packageInstalled(noStartPackage) {
+		t.Errorf("package %s is installed after the tests", noStartPackage)
+	}
+	if state := guest.systemctlState("is-active", noStartUnit); state != "inactive" {
+		t.Errorf("%s is %s after the tests, want inactive", noStartUnit, state)
 	}
 	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
 	if hasSysrepo && guest.sysrepoModuleRow() != "" {
