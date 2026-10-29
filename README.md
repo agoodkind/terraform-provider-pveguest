@@ -337,6 +337,17 @@ Create requests a restart when `restart_on` has at least one entry. It also
 rebuilds installation links when the unit is already enabled and the
 declaration requires it to remain enabled.
 
+Import IDs use the format `<node>/<vmid>/<kind>/<name>`, such as
+`suburban/224/lxc/ssh.service`, with both `tofu import` and an `import` block.
+The provider rejects IDs with another shape and shows the required format in the
+error; it checks `kind` and `name` against the same rules as the arguments.
+Import fails when the unit file does not exist in the guest; otherwise, import
+sets `remove_on_delete` to `false`, and Read sets `enabled` and `active` from the
+guest. The first apply after import enables, disables, starts, or stops the unit
+as the configuration requires. During that apply, a `restart_on` change from
+null to a value does not restart the unit or run `systemctl reenable`; every
+later `restart_on` change restarts the unit as described above.
+
 ## pveguest_locales
 
 The resource declares a set of generated locales in a guest. Read runs `locale -a` and stores the declared entries that exist. An absent declared locale produces a planned update.
