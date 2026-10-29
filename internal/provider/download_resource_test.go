@@ -108,12 +108,13 @@ type headerDownloadCommand struct {
 }
 
 type headerDownloadGuestAPI struct {
-	mutex       sync.Mutex
-	files       map[string][]byte
-	objects     map[string][]byte
-	commands    []headerDownloadCommand
-	results     map[string]localeExecStatus
-	curlFailure string
+	mutex        sync.Mutex
+	files        map[string][]byte
+	objects      map[string][]byte
+	commands     []headerDownloadCommand
+	results      map[string]localeExecStatus
+	curlFailure  string
+	curlRedirect string
 }
 
 func (api *headerDownloadGuestAPI) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -162,6 +163,11 @@ func (api *headerDownloadGuestAPI) run(argv []string, stdin []byte) localeExecSt
 	switch arguments[0] {
 	case "sh":
 		return api.shell(arguments[headerDownloadScriptIndex], arguments[headerDownloadScriptIndex+2:], stdin)
+	case "install":
+		api.files[target] = nil
+		return headerDownloadOutput(0, "", "")
+	case headerDownloadCurl:
+		return api.curl(arguments, target)
 	case "chmod", "chown":
 		return headerDownloadOutput(0, "", "")
 	case "mv":
@@ -182,18 +188,21 @@ func (api *headerDownloadGuestAPI) run(argv []string, stdin []byte) localeExecSt
 	}
 }
 
+func (api *headerDownloadGuestAPI) curl(arguments []string, url string) localeExecStatus {
+	if api.curlFailure != "" {
+		return headerDownloadOutput(headerDownloadCurlExit, "", api.curlFailure)
+	}
+	outputIndex := slices.Index(arguments, "-o") + 1
+	content, found := api.objects[url]
+	if !found {
+		return headerDownloadOutput(headerDownloadCurlExit, "", "curl: (22) not found")
+	}
+	api.files[arguments[outputIndex]] = content
+	return headerDownloadOutput(0, api.curlRedirect, "")
+}
+
 func (api *headerDownloadGuestAPI) shell(script string, parameters []string, stdin []byte) localeExecStatus {
 	switch {
-	case strings.Contains(script, headerDownloadCurl):
-		if api.curlFailure != "" {
-			return headerDownloadOutput(headerDownloadCurlExit, "", api.curlFailure)
-		}
-		content, found := api.objects[parameters[2]]
-		if !found {
-			return headerDownloadOutput(headerDownloadCurlExit, "", "curl: (22) not found")
-		}
-		api.files[parameters[1]] = content
-		return headerDownloadOutput(0, "", "")
 	case strings.Contains(script, "gzip -dc"):
 		reader, err := gzip.NewReader(bytes.NewReader(api.files[parameters[0]]))
 		if err != nil {
@@ -742,6 +751,22 @@ func TestDownloadGuestFailureRedactsHeaderValue(t *testing.T) {
 	requireHeaderDownload(t, "diagnostic_redacts_value", strings.Contains(applied.Diagnostics[0].Detail, "[redacted]"))
 	requireHeaderDownload(t, "diagnostic_keeps_status", strings.Contains(applied.Diagnostics[0].Detail, "returned error: 401"))
 	requireHeaderDownloadClean(t, logs.contents())
+	_, installed := harness.guest.file(headerDownloadPath)
+	requireHeaderDownload(t, "no_file_installed", !installed)
+}
+
+func TestDownloadGuestRedirectFailsWithHeaders(t *testing.T) {
+	harness := newHeaderDownloadHarness(t, "")
+	harness.guest.objects[headerDownloadGuestURL] = []byte(headerDownloadPayload)
+	harness.guest.curlRedirect = "https://elsewhere.example.net/asset"
+	settings := headerDownloadGuestSettings(headerDownloadHeaders())
+	prior := powerResourceNull(t, harness.resourceType)
+	plan := harness.plan(t, prior, nil, settings)
+
+	applied := harness.apply(t, prior, plan, settings)
+
+	requireHeaderDownloadCount(t, "diagnostics", len(applied.Diagnostics), 1)
+	requireHeaderDownload(t, "diagnostic_names_fetch", strings.Contains(applied.Diagnostics[0].Detail, "Set fetch to controller"))
 	_, installed := harness.guest.file(headerDownloadPath)
 	requireHeaderDownload(t, "no_file_installed", !installed)
 }

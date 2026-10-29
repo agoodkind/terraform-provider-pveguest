@@ -50,14 +50,9 @@ const (
 
 	guestRedirectMessage = "The server returned a redirect. Set fetch to controller."
 
-	// guestHeaderDownloadScript runs curl with --config - and fails when the server
-	// returns a redirect.
-	guestHeaderDownloadScript = `umask 077 && cd -- "$1" && ` +
-		`redirect=$(curl -fsS --proto =https --config - -o "$2" -w '%{redirect_url}' -- "$3") || exit 1
-if [ -n "$redirect" ]; then
-  echo '` + guestRedirectMessage + `' >&2
-  exit 1
-fi`
+	headerDownloadFileMode = "0600"
+	nullDevicePath         = "/dev/null"
+	redirectWriteOut       = "%{redirect_url}"
 )
 
 var (
@@ -552,20 +547,20 @@ func (r *downloadResource) stageFromGuest(
 
 	// The umask makes the temporary file unreadable for other users until
 	// chmod sets the declared mode.
-	downloadScript := `umask 077 && cd -- "$1" && exec curl -fsSL --proto =https -o "$2" -- "$3"`
 	if len(headers) > 0 {
-		downloadScript = guestHeaderDownloadScript
-	}
-	downloadCommand := guestCommand(
-		"sh", "-c", downloadScript,
-		"sh", path.Dir(plan.Path.ValueString()), downloadPath, plan.URL.ValueString(),
-	)
-	downloadCommand.TimeoutSeconds = downloadTimeoutSeconds
-	if len(headers) > 0 {
-		downloadCommand.Stdin = headers.curlConfig()
-	}
-	if err := runChecked(ctx, r.data.client, guest, downloadCommand); err != nil {
-		return "", err
+		if err := r.downloadWithHeaders(ctx, guest, plan.URL.ValueString(), downloadPath, headers); err != nil {
+			return "", err
+		}
+	} else {
+		downloadCommand := guestCommand(
+			"sh", "-c",
+			`umask 077 && cd -- "$1" && exec curl -fsSL --proto =https -o "$2" -- "$3"`,
+			"sh", path.Dir(plan.Path.ValueString()), downloadPath, plan.URL.ValueString(),
+		)
+		downloadCommand.TimeoutSeconds = downloadTimeoutSeconds
+		if err := runChecked(ctx, r.data.client, guest, downloadCommand); err != nil {
+			return "", err
+		}
 	}
 
 	receivedHash, found, err := readGuestSHA256(ctx, r.data.client, guest, downloadPath)
@@ -604,6 +599,36 @@ func (r *downloadResource) stageFromGuest(
 			guest, finalTemporaryPath, plan.ArchiveMember.ValueString())
 	}
 	return fileHash, nil
+}
+
+func (r *downloadResource) downloadWithHeaders(
+	ctx context.Context,
+	guest transport.Guest,
+	url string,
+	downloadPath string,
+	headers requestHeaders,
+) error {
+	createCommand := guestCommand("install", "-m", headerDownloadFileMode, nullDevicePath, downloadPath)
+	if err := runChecked(ctx, r.data.client, guest, createCommand); err != nil {
+		return err
+	}
+	curlCommand := guestCommand(
+		"curl", "-fsS", "--proto", "=https", "--config", "-",
+		"-o", downloadPath, "-w", redirectWriteOut, "--", url,
+	)
+	curlCommand.Stdin = headers.curlConfig()
+	curlCommand.TimeoutSeconds = downloadTimeoutSeconds
+	result, err := runGuest(ctx, r.data.client, guest, curlCommand)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return commandFailure(guest, curlCommand, result)
+	}
+	if strings.TrimSpace(string(result.Stdout)) != "" {
+		return fmt.Errorf("%s: %s", guest, guestRedirectMessage)
+	}
+	return nil
 }
 
 // stageFromController downloads and extracts on the controller, compresses the
