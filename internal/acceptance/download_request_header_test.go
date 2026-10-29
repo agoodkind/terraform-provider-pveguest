@@ -44,6 +44,12 @@ const (
 
 	cacheDirectoryName = "pveguest"
 
+	requestHeaderEscapedLine = `X-Pveguest-Escaped = "a\"b\\c"`
+	requestHeaderLogLevel    = "DEBUG"
+	requestHeaderEchoToken   = "acc-request-header-echo-5e19"
+	requestHeaderRedacted    = `\[redacted\]`
+	requestHeaderLogLine     = "controller download failed"
+
 	guestWorkDirectory    = "/root/pveguest-acc"
 	guestServerUnit       = "pveguest-acc-https"
 	guestServerPort       = "18443"
@@ -63,6 +69,8 @@ const (
 var (
 	controllerRejection = regexp.MustCompile(`HTTP\s+status\s+401`)
 	guestRejection      = regexp.MustCompile(`returned\s+error:\s+401`)
+	redirectRejection   = regexp.MustCompile(`Set\s+fetch\s+to\s+controller`)
+	redactedPattern     = regexp.MustCompile(requestHeaderRedacted)
 )
 
 type requestHeaderServer struct {
@@ -71,6 +79,8 @@ type requestHeaderServer struct {
 	rejected   atomic.Int64
 	url        string
 	cacheHome  string
+
+	redirectTarget string
 }
 
 func (s *requestHeaderServer) accept(token string) {
@@ -96,6 +106,12 @@ func (s *requestHeaderServer) handler(content []byte) http.Handler {
 		s.authorized.Add(1)
 		_, _ = writer.Write(content)
 	})
+	mux.HandleFunc("/redirect", func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, s.redirectTarget, http.StatusFound)
+	})
+	mux.HandleFunc("/same", func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, requestHeaderObject, http.StatusFound)
+	})
 	return mux
 }
 
@@ -106,15 +122,20 @@ func (g *testGuest) serveWithRequestHeader(t *testing.T, content []byte, token s
 	server := httptest.NewTLSServer(recorder.handler(content))
 	t.Cleanup(server.Close)
 
+	g.controllerCAFile = writeServerCA(t, server)
+	t.Setenv("XDG_CACHE_HOME", recorder.cacheHome)
+	recorder.url = server.URL
+	return recorder
+}
+
+func writeServerCA(t *testing.T, server *httptest.Server) string {
+	t.Helper()
 	certificate := pem.EncodeToMemory(&pem.Block{Type: requestHeaderPEMBlock, Bytes: server.Certificate().Raw})
 	caFile := filepath.Join(t.TempDir(), requestHeaderCAName)
 	if err := os.WriteFile(caFile, certificate, requestHeaderCAMode); err != nil {
 		t.Fatal(err)
 	}
-	g.controllerCAFile = caFile
-	t.Setenv("XDG_CACHE_HOME", recorder.cacheHome)
-	recorder.url = server.URL
-	return recorder
+	return caFile
 }
 
 type guestHeaderServerState struct {
@@ -286,8 +307,8 @@ func (g *testGuest) startHeaderServer(t *testing.T, content []byte, token string
 }
 
 func requestHeaderArguments(token string, version int) string {
-	return fmt.Sprintf(`request_headers_wo         = { %s = %q }
-  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix+token, version)
+	return fmt.Sprintf(`request_headers_wo         = { %s = %q, %s }
+  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix+token, requestHeaderEscapedLine, version)
 }
 
 func (g *testGuest) guestDownloadBlock(name string, url string, hash string, path string, extra string) string {
@@ -308,8 +329,8 @@ resource "pveguest_download" %q {
 func (g *testGuest) workspaceConfig(fetch string, url string, hash string, path string, version int, headers bool) string {
 	extra := ""
 	if headers {
-		extra = fmt.Sprintf(`request_headers_wo         = { %s = "%s${var.secret}" }
-  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix, version)
+		extra = fmt.Sprintf(`request_headers_wo         = { %s = "%s${var.secret}", %s }
+  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix, requestHeaderEscapedLine, version)
 	}
 	return g.providerBlock() + fmt.Sprintf(`
 variable "secret" {
@@ -497,6 +518,117 @@ func TestAccDownloadRequestHeaderRotation(t *testing.T) {
 	workspace.mustRun("destroy", "-no-color", "-auto-approve")
 }
 
+func TestAccDownloadRequestHeaderRedirect(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useTestDirectory()
+	payload, hash := requestHeaderPayload(t)
+	var targetRequests, targetLeaks atomic.Int64
+	target := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		targetRequests.Add(1)
+		if request.Header.Get(requestHeaderName) != "" || request.Header.Get("X-Pveguest-Escaped") != "" {
+			targetLeaks.Add(1)
+		}
+		_, _ = writer.Write(payload)
+	}))
+	t.Cleanup(target.Close)
+	origin := guest.serveWithRequestHeader(t, payload, requestHeaderToken)
+	origin.redirectTarget = target.URL + requestHeaderObject
+	path := testDirectory + "/request-header/redirect.bin"
+	workspace := newHeaderWorkspace(t)
+	otherHost := guest.workspaceConfig("controller", origin.url+"/redirect", hash, path, 1, true)
+	sameOrigin := guest.workspaceConfig("controller", origin.url+"/same", hash, path, 1, true)
+	workspace.writeConfig(otherHost)
+	workspace.mustRun("init", "-no-color")
+
+	origin.clearCache(t)
+	workspace.requireApplied(otherHost, requestHeaderToken)
+	if targetRequests.Load() != 1 || targetLeaks.Load() != 0 {
+		t.Fatalf("redirect target: %d requests, %d with a header", targetRequests.Load(), targetLeaks.Load())
+	}
+	if err := guest.expectFileHash(path, hash)(); err != nil {
+		t.Fatal(err)
+	}
+
+	origin.clearCache(t)
+	workspace.requireApplied(sameOrigin, requestHeaderToken)
+	if origin.authorized.Load() != 1 {
+		t.Fatalf("the same-origin redirect made %d authorized requests, want 1", origin.authorized.Load())
+	}
+	if err := guest.expectFileHash(path, hash)(); err != nil {
+		t.Fatal(err)
+	}
+	workspace.mustRun("destroy", "-no-color", "-auto-approve")
+}
+
+func errorPathHandler() http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasPrefix(request.URL.Path, "/invalid"):
+			writer.Header().Set("Location", "https://[bad/"+requestHeaderEchoToken)
+			writer.WriteHeader(http.StatusFound)
+		case strings.HasPrefix(request.URL.Path, "/closed"):
+			connection, _, err := writer.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			_ = connection.Close()
+		default:
+			http.NotFound(writer, request)
+		}
+	})
+}
+
+func TestAccDownloadRequestHeaderErrorsRedacted(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useTestDirectory()
+	_, hash := requestHeaderPayload(t)
+	cases := []struct {
+		name    string
+		path    string
+		trusted bool
+	}{
+		{name: "invalid redirect location", path: "/invalid/", trusted: true},
+		{name: "closed connection", path: "/closed/", trusted: true},
+		{name: "untrusted certificate", path: "/closed/", trusted: false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(errorPathHandler())
+			t.Cleanup(server.Close)
+			guest.controllerCAFile = ""
+			if testCase.trusted {
+				guest.controllerCAFile = writeServerCA(t, server)
+			}
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+			path := testDirectory + "/request-header/error.bin"
+			config := guest.workspaceConfig(
+				"controller", server.URL+testCase.path+requestHeaderEchoToken, hash, path, 1, true,
+			)
+			workspace := newHeaderWorkspace(t)
+			workspace.writeConfig(config)
+			workspace.variableValue = requestHeaderEchoToken
+			workspace.mustRun("init", "-no-color")
+			workspace.mustRun("plan", "-no-color", "-out", planFileName)
+
+			t.Setenv("TF_LOG", requestHeaderLogLevel)
+			output, exitCode := workspace.run("apply", "-no-color", planFileName)
+
+			if exitCode == 0 {
+				t.Fatalf("the apply succeeded, want a failed download:\n%s", output)
+			}
+			if !strings.Contains(output, requestHeaderLogLine) {
+				t.Fatalf("the provider log line %q is missing from the tofu output", requestHeaderLogLine)
+			}
+			if !redactedPattern.MatchString(output) {
+				t.Fatal("the tofu output does not contain a redaction marker")
+			}
+			if strings.Contains(output, requestHeaderEchoToken) {
+				t.Fatal("the tofu output contains the header value")
+			}
+		})
+	}
+}
+
 func TestAccDownloadGuestRequestHeader(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
@@ -543,6 +675,12 @@ func TestAccDownloadGuestRequestHeaderRejected(t *testing.T) {
 	}
 	if guest.exists(path) {
 		t.Fatalf("%s exists after the rejected downloads", path)
+	}
+
+	redirected := guest.workspaceConfig("guest", guestServerBase+"/redirect", hash, path, 1, true)
+	workspace.requireRejected(redirected, requestHeaderToken, redirectRejection)
+	if guest.exists(path) {
+		t.Fatalf("%s exists after the redirected download", path)
 	}
 
 	workspace.requireApplied(withHeaders, requestHeaderToken)

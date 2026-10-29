@@ -17,6 +17,10 @@ const (
 	readyPath     = "/ready"
 	headerName    = "Authorization"
 	headerPrefix  = "Bearer "
+	redirectPath  = "/redirect"
+
+	escapedHeaderName  = "X-Pveguest-Escaped"
+	escapedHeaderValue = `a"b\c`
 	processGlob   = "/proc/[0-9]*/cmdline"
 	stateFileMode = 0o644
 )
@@ -77,7 +81,8 @@ func (s *server) scanProcesses() (int, int) {
 func (s *server) private(writer http.ResponseWriter, request *http.Request) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	if request.Header.Get(headerName) != headerPrefix+string(s.token) {
+	if request.Header.Get(headerName) != headerPrefix+string(s.token) ||
+		request.Header.Get(escapedHeaderName) != escapedHeaderValue {
 		s.state.Rejected++
 		s.save()
 		http.Error(writer, "missing or wrong Authorization header", http.StatusUnauthorized)
@@ -117,7 +122,10 @@ func main() {
 	s.save()
 	mux := http.NewServeMux()
 	mux.HandleFunc(privatePath, s.private)
-	mux.HandleFunc(readyPath, func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(redirectPath, func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, privatePath, http.StatusFound)
+	})
+	mux.HandleFunc(readyPath,func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 	})
 	httpServer := &http.Server{Addr: *address, Handler: mux}
