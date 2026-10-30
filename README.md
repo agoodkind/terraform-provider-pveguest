@@ -191,7 +191,7 @@ content.
 | Attribute | Meaning |
 | --- | --- |
 | `sha256` | SHA-256 hash of the content in the guest. With `content`, the plan shows the hash before apply. |
-| `write_id` | Random identifier that changes each time an apply writes the content, mode, owner, or group. |
+| `write_id` | Identifier that changes each time an apply writes the content, mode, owner, or group. Import derives the initial value from the guest content hash. |
 
 With `content_wo`, Read compares the hash of the file in the guest with the
 hash stored at the last apply. A difference produces a planned rewrite. The
@@ -202,6 +202,11 @@ Content larger than the standard input limit of one command takes several
 commands. One command truncates the temporary file, and one command per piece
 appends to it. Each piece has at most 96 KiB for either guest kind.
 The validate, mode, owner, and rename steps run after the last piece.
+
+Import IDs use the format `<node>/<vmid>/<kind>/<absolute path>`, such as
+`suburban/224/lxc//etc/example.conf`. Import reads the content hash, mode, owner,
+and group without writing the file. Matching `content`, mode, owner, and group
+preserve the imported `write_id`. A change plans a write and a new `write_id`.
 
 ## pveguest_download
 
@@ -345,8 +350,10 @@ Import fails when the unit file does not exist in the guest; otherwise, import
 sets `remove_on_delete` to `false`, and Read sets `enabled` and `active` from the
 guest. The first apply after import enables, disables, starts, or stops the unit
 as the configuration requires. During that apply, a `restart_on` change from
-null to a value does not restart the unit or run `systemctl reenable`; every
-later `restart_on` change restarts the unit as described above.
+null to known values does not restart the unit or run `systemctl reenable`.
+When a dependent file requires a write, its planned `write_id` is unknown,
+and the first apply restarts the unit. Every later `restart_on` change restarts
+the unit as described above.
 
 ## pveguest_locales
 

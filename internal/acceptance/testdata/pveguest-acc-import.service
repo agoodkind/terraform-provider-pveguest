@@ -1,0 +1,10 @@
+[Unit]
+Description=pveguest acceptance test import service
+
+[Service]
+Type=simple
+EnvironmentFile=/root/pveguest-acc/import.conf
+ExecStart=/bin/sleep 3600
+
+[Install]
+WantedBy=multi-user.target

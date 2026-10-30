@@ -44,6 +44,9 @@ const (
 	// overwrites the sha256 attribute with the guest hash, and the plan
 	// compares both to detect drift of write-only content.
 	appliedHashEntry = "applied_sha256"
+
+	fileImportFormat  = "<node>/<vmid>/<kind>/<absolute path>"
+	fileImportSummary = "Cannot import file"
 )
 
 var (
@@ -164,8 +167,8 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			},
 			"write_id": schema.StringAttribute{
 				Computed: true,
-				Description: "Random identifier that changes each time an apply writes the content, mode, owner, or group. " +
-					"A rewrite after drift produces the same sha256 and a new write_id.",
+				Description: "Identifier that changes each time an apply writes the content, mode, owner, or group. " +
+					"Import derives the initial value from the guest content hash. A rewrite after drift produces the same sha256 and a new write_id.",
 			},
 		}),
 	}
@@ -173,6 +176,29 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 
 func (r *fileResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	r.data = providerDataFrom(req, resp)
+}
+
+func (r *fileResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parsed, isValid := splitGuestImportID(req.ID)
+	if !isValid {
+		resp.Diagnostics.AddError(fileImportSummary, importIDError(req.ID, fileImportFormat))
+		return
+	}
+	filePath := parsed.Rest
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	attributes := schemaResp.Schema.Attributes
+	resp.Diagnostics.Append(validateImportedString(ctx, fileImportSummary, attributes, "kind", parsed.Kind)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, fileImportSummary, attributes, "path", filePath)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("node"), parsed.Node)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("vmid"), parsed.VMID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("kind"), parsed.Kind)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("path"), filePath)...)
 }
 
 func (r *fileResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
@@ -286,6 +312,10 @@ func (r *fileResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	state.Owner = types.StringValue(status.Owner)
 	state.Group = types.StringValue(status.Group)
 	state.SHA256 = types.StringValue(status.SHA256)
+	// Read derives write_id from the guest sha256 for an imported file.
+	if state.WriteID.IsNull() {
+		state.WriteID = types.StringValue(status.SHA256[:writeIDBytes*2])
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 

@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"regexp"
@@ -25,12 +26,16 @@ import (
 const (
 	systemctlTimeoutSeconds = 300
 
-	systemdUnitImportFormat = "<node>/<vmid>/<kind>/<name>"
-	systemdUnitImportFields = 4
+	systemdUnitImportFormat  = "<node>/<vmid>/<kind>/<name>"
+	systemdUnitImportSummary = "Import systemd unit"
+	guestImportFields        = 4
 
 	// ImportState sets this private state key, and Update deletes it after the
 	// first successful apply.
 	importedEntry = "imported"
+
+	// ModifyPlan records whether the first import plan can skip the restart.
+	skipRestartEntry = "skip_import_restart"
 )
 
 var (
@@ -38,7 +43,8 @@ var (
 
 	missingUnitMessages = []string{missingFileMessage, "does not exist", "not found"}
 
-	importedMarker = []byte(`true`)
+	importedMarker        = []byte(`true`)
+	restartRequiredMarker = []byte(`false`)
 )
 
 type unitFileState string
@@ -149,32 +155,26 @@ func (r *systemdUnitResource) Configure(_ context.Context, req resource.Configur
 }
 
 func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	fields := strings.Split(req.ID, "/")
-	if len(fields) != systemdUnitImportFields || slices.Contains(fields, "") {
-		resp.Diagnostics.AddError("Import systemd unit", systemdUnitImportError(req.ID))
-		return
-	}
-	node, vmidText, kind, name := fields[0], fields[1], fields[2], fields[3]
-	vmid, err := strconv.ParseInt(vmidText, 10, 64)
-	if err != nil {
-		resp.Diagnostics.AddError("Import systemd unit", systemdUnitImportError(req.ID))
+	parsed, isValid := splitGuestImportID(req.ID)
+	if !isValid || strings.Contains(parsed.Rest, "/") {
+		resp.Diagnostics.AddError(systemdUnitImportSummary, importIDError(req.ID, systemdUnitImportFormat))
 		return
 	}
 
 	var schemaResp resource.SchemaResponse
 	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
 	attributes := schemaResp.Schema.Attributes
-	resp.Diagnostics.Append(validateImportedString(ctx, attributes, "kind", kind)...)
-	resp.Diagnostics.Append(validateImportedString(ctx, attributes, "name", name)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, systemdUnitImportSummary, attributes, "kind", parsed.Kind)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, systemdUnitImportSummary, attributes, "name", parsed.Rest)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	imported := systemdUnitModel{
-		Node:           types.StringValue(node),
-		VMID:           types.Int64Value(vmid),
-		Kind:           types.StringValue(kind),
-		Name:           types.StringValue(name),
+		Node:           types.StringValue(parsed.Node),
+		VMID:           types.Int64Value(parsed.VMID),
+		Kind:           types.StringValue(parsed.Kind),
+		Name:           types.StringValue(parsed.Rest),
 		Enabled:        types.BoolNull(),
 		Active:         types.BoolNull(),
 		RestartOn:      types.MapNull(types.StringType),
@@ -184,14 +184,76 @@ func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.Impo
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, importedMarker)...)
 }
 
-func systemdUnitImportError(id string) string {
-	return fmt.Sprintf("import ID %q must use the format %s", id, systemdUnitImportFormat)
+// ModifyPlan records whether Update can skip the restart after import.
+func (r *systemdUnitResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
+		return
+	}
+	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
+	resp.Diagnostics.Append(diagnostics...)
+	if resp.Diagnostics.HasError() || imported == nil {
+		return
+	}
+	decision, diagnostics := req.Private.GetKey(ctx, skipRestartEntry)
+	resp.Diagnostics.Append(diagnostics...)
+	if resp.Diagnostics.HasError() || decision != nil {
+		return
+	}
+	var restartOn types.Map
+	resp.Diagnostics.Append(resp.Plan.GetAttribute(ctx, path.Root("restart_on"), &restartOn)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+	skipRestart := restartRequiredMarker
+	if isKnownMap(restartOn) {
+		skipRestart = importedMarker
+	}
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, skipRestartEntry, skipRestart)...)
+}
+
+func isKnownMap(value types.Map) bool {
+	if value.IsUnknown() {
+		return false
+	}
+	for _, element := range value.Elements() {
+		if element.IsUnknown() {
+			return false
+		}
+	}
+	return true
+}
+
+// guestImportID stores the parts of an import ID in the format
+// <node>/<vmid>/<kind>/<rest>.
+type guestImportID struct {
+	Node string
+	VMID int64
+	Kind string
+	// Rest contains all text after the third slash, including later slashes.
+	Rest string
+}
+
+func splitGuestImportID(id string) (guestImportID, bool) {
+	fields := strings.SplitN(id, "/", guestImportFields)
+	if len(fields) != guestImportFields || slices.Contains(fields, "") {
+		return guestImportID{}, false
+	}
+	vmid, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || vmid < 1 {
+		return guestImportID{}, false
+	}
+	return guestImportID{Node: fields[0], VMID: vmid, Kind: fields[2], Rest: fields[3]}, true
+}
+
+func importIDError(id string, format string) string {
+	return fmt.Sprintf("import ID %q must use the format %s", id, format)
 }
 
 // validateImportedString applies the schema validators for a string attribute
 // to an import ID value.
 func validateImportedString(
 	ctx context.Context,
+	summary string,
 	attributes map[string]schema.Attribute,
 	name string,
 	value string,
@@ -199,7 +261,7 @@ func validateImportedString(
 	var diagnostics diag.Diagnostics
 	attribute, isString := attributes[name].(schema.StringAttribute)
 	if !isString {
-		diagnostics.AddError("Import systemd unit",
+		diagnostics.AddError(summary,
 			fmt.Sprintf("The schema does not define the string attribute %s. The provider contains a defect.", name))
 		return diagnostics
 	}
@@ -274,16 +336,15 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
+	skipRestart, diagnostics := req.Private.GetKey(ctx, skipRestartEntry)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	restart := !plan.RestartOn.Equal(state.RestartOn)
-	// The imported unit already runs with its current files. The first
-	// restart_on value after import does not restart it.
-	if imported != nil && state.RestartOn.IsNull() {
+	// Only a known dependency baseline permits skipping the first restart.
+	if bytes.Equal(skipRestart, importedMarker) && state.RestartOn.IsNull() {
 		restart = false
 	}
 	if err := r.apply(ctx, plan, restart); err != nil {
@@ -291,6 +352,7 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, nil)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, skipRestartEntry, nil)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
