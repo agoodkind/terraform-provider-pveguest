@@ -69,7 +69,6 @@ const (
 	relayMissingFieldFormat = "%s does not contain a %s line in the account smtp2go section"
 )
 
-// relayCredentials stores the host, port, user name, and password read from the guest file.
 type relayCredentials struct {
 	host     string
 	port     string
@@ -376,8 +375,6 @@ func (g *testGuest) waitRelayLogin(credentials relayCredentials, started time.Ti
 	}
 }
 
-// checkStateOmitsRelayPassword fails if a state attribute contains the current
-// password from the guest file.
 func (g *testGuest) checkStateOmitsRelayPassword(path string) resource.TestCheckFunc {
 	return func(state *terraform.State) error {
 		credentials, err := g.relayCredentials(path)
