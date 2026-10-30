@@ -536,6 +536,7 @@ func readRelayFile(
 func parseRelayFile(content []byte, username string) (relayFileValues, error) {
 	accountValues := make(map[string]string)
 	insideAccount := false
+	accountFound := false
 	for line := range strings.Lines(string(content)) {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -544,6 +545,9 @@ func parseRelayFile(content []byte, username string) (relayFileValues, error) {
 		key := fields[0]
 		if key == relayAccountKeyword {
 			insideAccount = len(fields) == relayLineFields && fields[1] == relayAccountName
+			if insideAccount {
+				accountFound = true
+			}
 			continue
 		}
 		if !insideAccount {
@@ -567,6 +571,9 @@ func parseRelayFile(content []byte, username string) (relayFileValues, error) {
 		}
 	}
 
+	if !accountFound {
+		return relayFileValues{}, fmt.Errorf("the file does not contain the account %s section", relayAccountName)
+	}
 	for _, key := range []string{relayHostKey, relayPortKey, relayUserKey, relayFromKey} {
 		if _, found := accountValues[key]; !found {
 			return relayFileValues{}, fmt.Errorf("the account %s section does not contain a %s line", relayAccountName, key)
