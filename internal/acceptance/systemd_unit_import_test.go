@@ -2,7 +2,9 @@ package acceptance_test
 
 import (
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -20,12 +22,14 @@ const (
 	fileImportIDFormat  = "<node>/<vmid>/<kind>/<absolute path>"
 	malformedImportID   = "node/101/lxc"
 	firstRestartValue   = "one"
-	secondRestartValue  = "two"
 	adoptedConfContent  = "PVEGUEST_ACC_IMPORT=one\n"
 	changedConfContent  = "PVEGUEST_ACC_IMPORT=two\n"
 	laterConfContent    = "PVEGUEST_ACC_IMPORT=three\n"
 	importedSummaryText = "2 imported"
 )
+
+// importedWriteIDPattern matches the write_id that Read sets after import.
+var importedWriteIDPattern = regexp.MustCompile(`^import-[0-9a-f]{16}$`)
 
 //go:embed testdata/pveguest-acc-import.service
 var testImportServiceUnit string
@@ -157,7 +161,13 @@ import {
 // restart_on map uses the write_id of the file.
 func (g *testGuest) dependencyConfig(content string) string {
 	imports := map[string]string{importFileAddress: g.importFileID(), importUnitAddress: g.importUnitID()}
-	return g.installedImportConfig(imports) + fmt.Sprintf(`
+	return g.installedImportConfig(imports) + g.dependencyResources(content)
+}
+
+// dependencyResources returns a file resource with content and a unit resource
+// with the file write_id in restart_on.
+func (g *testGuest) dependencyResources(content string) string {
+	return fmt.Sprintf(`
 resource "pveguest_file" "conf" {
   node    = %q
   vmid    = %d
@@ -167,6 +177,48 @@ resource "pveguest_file" "conf" {
 }
 `, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportConfPath, content) +
 		g.importUnitResource(importFileAddress+".write_id")
+}
+
+// fileWriteID returns the write_id of pveguest_file.conf from tofu show -json.
+func (w *tofuWorkspace) fileWriteID() string {
+	w.t.Helper()
+	var shown shownState
+	if err := json.Unmarshal([]byte(w.mustRun("show", "-json")), &shown); err != nil {
+		w.t.Fatalf("json.Unmarshal returned an error for tofu show -json output: %v", err)
+	}
+	for _, resourceState := range shown.Values.RootModule.Resources {
+		if resourceState.Address == importFileAddress {
+			return resourceState.Values.WriteID
+		}
+	}
+	w.t.Fatalf("state does not contain resource %s", importFileAddress)
+	return ""
+}
+
+type shownState struct {
+	Values struct {
+		RootModule struct {
+			Resources []struct {
+				Address string `json:"address"`
+				Values  struct {
+					WriteID string `json:"write_id"`
+				} `json:"values"`
+			} `json:"resources"`
+		} `json:"root_module"`
+	} `json:"values"`
+}
+
+// expectImportedWriteID checks whether writeID has the import form requested by
+// wantImported.
+func expectImportedWriteID(writeID string, wantImported bool) error {
+	isImported := importedWriteIDPattern.MatchString(writeID)
+	if wantImported && !isImported {
+		return fmt.Errorf("resource %s has write_id %q; expected import form %s", importFileAddress, writeID, importedWriteIDPattern)
+	}
+	if !wantImported && isImported {
+		return fmt.Errorf("resource %s has write_id %q in import form after the rewrite", importFileAddress, writeID)
+	}
+	return nil
 }
 
 func expectImportedAttributes(states []*terraform.InstanceState) error {
@@ -191,6 +243,7 @@ func expectImportedAttributes(states []*terraform.InstanceState) error {
 func TestAccSystemdUnitImport(t *testing.T) {
 	t.Run("malformed import ID shows the format", testSystemdImportMalformedID)
 	t.Run("import command keeps the unit running", testSystemdImportCommand)
+	t.Run("literal restart_on value restarts the imported unit", testSystemdImportLiteralValue)
 	t.Run("unchanged dependency keeps the unit running", testSystemdImportUnchangedDependency)
 	t.Run("changed dependency restarts the unit", testSystemdImportChangedDependency)
 }
@@ -248,13 +301,20 @@ func testSystemdImportCommand(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useImportUnit()
 	mainPID := guest.importUnitMainPID()
-	first := guest.providerBlock() + guest.importUnitResource(fmt.Sprintf("%q", firstRestartValue))
-	second := guest.providerBlock() + guest.importUnitResource(fmt.Sprintf("%q", secondRestartValue))
+	first := guest.providerBlock() + guest.dependencyResources(adoptedConfContent)
+	second := guest.providerBlock() + guest.dependencyResources(changedConfContent)
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
 		CheckDestroy:             guest.expectImportUnit(),
 		Steps: []resource.TestStep{
+			{
+				Config:             first,
+				ResourceName:       importFileAddress,
+				ImportState:        true,
+				ImportStateId:      guest.importFileID(),
+				ImportStatePersist: true,
+			},
 			{
 				Config:             first,
 				ResourceName:       importUnitAddress,
@@ -264,12 +324,47 @@ func testSystemdImportCommand(t *testing.T) {
 				ImportStateCheck:   expectImportedAttributes,
 			},
 			{
-				Config:           first,
-				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
-				Check:            guest.expectImportUnitPID(&mainPID, true),
+				Config: first,
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PreApply: []plancheck.PlanCheck{
+						plancheck.ExpectResourceAction(importFileAddress, plancheck.ResourceActionNoop),
+						plancheck.ExpectResourceAction(importUnitAddress, plancheck.ResourceActionUpdate),
+					},
+				},
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestMatchResourceAttr(importFileAddress, "write_id", importedWriteIDPattern),
+					guest.expectImportUnitPID(&mainPID, true),
+				),
 			},
 			{
 				Config:           second,
+				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
+				Check:            guest.expectImportUnitPID(&mainPID, false),
+			},
+		},
+	})
+}
+
+func testSystemdImportLiteralValue(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useImportUnit()
+	mainPID := guest.importUnitMainPID()
+	config := guest.providerBlock() + guest.importUnitResource(fmt.Sprintf("%q", firstRestartValue))
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		CheckDestroy:             guest.expectImportUnit(),
+		Steps: []resource.TestStep{
+			{
+				Config:             config,
+				ResourceName:       importUnitAddress,
+				ImportState:        true,
+				ImportStateId:      guest.importUnitID(),
+				ImportStatePersist: true,
+				ImportStateCheck:   expectImportedAttributes,
+			},
+			{
+				Config:           config,
 				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
 				Check:            guest.expectImportUnitPID(&mainPID, false),
 			},
@@ -309,6 +404,9 @@ func runDependencyImport(t *testing.T, content string, wantRestart bool) {
 	}
 	if !wantRestart && guest.importFileInode() != inode {
 		t.Fatal("the unchanged import rewrote the configuration file")
+	}
+	if err := expectImportedWriteID(workspace.fileWriteID(), !wantRestart); err != nil {
+		t.Fatal(err)
 	}
 
 	output, exitCode := workspace.run("plan", "-no-color", "-detailed-exitcode")
