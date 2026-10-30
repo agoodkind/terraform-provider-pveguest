@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"path"
 	"regexp"
+	"strconv"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -20,6 +22,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (
@@ -37,6 +41,20 @@ const (
 	relayUserUnreadSummary  = "SMTP2GO user query failed"
 	relayUserMissingSummary = "SMTP2GO user is absent"
 	relayUserBlockedSummary = "SMTP2GO user status is not allowed"
+	importRelaySummary      = "Mail relay import failed"
+
+	relayImportIDFormat = "<node>/<vmid>/<kind>/<username>/<password_version>, " +
+		"optionally followed by an absolute file path such as /etc/msmtprc"
+	relayImportSegments     = 5
+	relayImportPathSegments = 6
+	relayImportSeparator    = "/"
+	relayAccountKeyword     = "account"
+	relayAccountName        = "smtp2go"
+	relayHostKey            = "host"
+	relayPortKey            = "port"
+	relayUserKey            = "user"
+	relayFromKey            = "from"
+	relayLineFields         = 2
 
 	msmtprcFormat = `defaults
 auth           on
@@ -80,6 +98,21 @@ type mailRelayModel struct {
 	PasswordVersion types.Int64  `tfsdk:"password_version"`
 	SHA256          types.String `tfsdk:"sha256"`
 	WriteID         types.String `tfsdk:"write_id"`
+}
+
+type relayImportID struct {
+	node            string
+	vmid            int64
+	kind            transport.Kind
+	username        string
+	passwordVersion int64
+	path            string
+}
+
+type relayFileValues struct {
+	host string
+	port int64
+	from string
 }
 
 func newMailRelayResource() resource.Resource {
@@ -168,6 +201,54 @@ func (r *mailRelayResource) Schema(_ context.Context, _ resource.SchemaRequest, 
 
 func (r *mailRelayResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	r.data = providerDataFrom(req, resp)
+}
+
+// ImportState adopts the guest file without changing its contents or credentials.
+func (r *mailRelayResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	importID, err := parseRelayImportID(req.ID)
+	if err != nil {
+		resp.Diagnostics.AddError(importRelaySummary, err.Error())
+		return
+	}
+	guest := transport.Guest{Node: importID.node, VMID: importID.vmid, Kind: importID.kind}
+	values, guestHash, found, err := readRelayFile(ctx, r.data.client, guest, importID.path, importID.username)
+	if err != nil {
+		resp.Diagnostics.AddError(importRelaySummary, err.Error())
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(
+			importRelaySummary,
+			fmt.Sprintf("%s: the file %s does not exist.", guest, importID.path),
+		)
+		return
+	}
+	writeID, err := newWriteID()
+	if err != nil {
+		resp.Diagnostics.AddError(importRelaySummary, err.Error())
+		return
+	}
+	appliedHash, err := encodeAppliedHash(guestHash)
+	if err != nil {
+		resp.Diagnostics.AddError(importRelaySummary, err.Error())
+		return
+	}
+	state := mailRelayModel{
+		Node:            types.StringValue(importID.node),
+		VMID:            types.Int64Value(importID.vmid),
+		Kind:            types.StringValue(string(importID.kind)),
+		Username:        types.StringValue(importID.username),
+		Description:     types.StringNull(),
+		Host:            types.StringValue(values.host),
+		Port:            types.Int64Value(values.port),
+		From:            types.StringValue(values.from),
+		Path:            types.StringValue(importID.path),
+		PasswordVersion: types.Int64Value(importID.passwordVersion),
+		SHA256:          types.StringValue(guestHash),
+		WriteID:         types.StringValue(writeID),
+	}
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, appliedHashEntry, appliedHash)...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 func (r *mailRelayResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
@@ -377,4 +458,155 @@ func newRelayPassword() (string, error) {
 		password[i] = relayPasswordAlphabet[index.Int64()]
 	}
 	return string(password), nil
+}
+
+// parseRelayImportID parses and validates the guest, username,
+// password_version, and optional absolute path in an import ID.
+func parseRelayImportID(id string) (relayImportID, error) {
+	invalid := fmt.Errorf("the import ID %q must have the form %s", id, relayImportIDFormat)
+	segments := strings.SplitN(id, relayImportSeparator, relayImportPathSegments)
+	if len(segments) < relayImportSegments {
+		return relayImportID{}, invalid
+	}
+	vmid, vmidErr := strconv.ParseInt(segments[1], 10, 64)
+	passwordVersion, versionErr := strconv.ParseInt(segments[4], 10, 64)
+	parsed := relayImportID{
+		node:            segments[0],
+		vmid:            vmid,
+		kind:            transport.Kind(segments[2]),
+		username:        segments[3],
+		passwordVersion: passwordVersion,
+		path:            defaultRelayFilePath,
+	}
+	if len(segments) == relayImportPathSegments {
+		parsed.path = relayImportSeparator + segments[5]
+	}
+	validGuest := parsed.node != "" && vmidErr == nil && vmid >= 1 &&
+		(parsed.kind == transport.KindLXC || parsed.kind == transport.KindQEMU)
+	validUser := relayUsernamePattern.MatchString(parsed.username) && versionErr == nil
+	validPath := absolutePathPattern.MatchString(parsed.path) && path.Clean(parsed.path) == parsed.path
+	if !validGuest || !validUser || !validPath {
+		return relayImportID{}, invalid
+	}
+	return parsed, nil
+}
+
+// readRelayFile runs cat in the guest and parses its output with parseRelayFile.
+// It uses hashHex to hash the same output and returns the host, port, from value,
+// hexadecimal hash, file existence flag, and error. A missing file returns false and a nil error.
+// Errors omit standard output because it contains the password.
+func readRelayFile(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	filePath string,
+	username string,
+) (relayFileValues, string, bool, error) {
+	readCommand := guestCommand("cat", "--", filePath)
+	result, err := runReadOnlyGuest(ctx, client, guest, readCommand)
+	if err != nil {
+		return relayFileValues{}, "", false, err
+	}
+	if result.ExitCode != 0 {
+		if strings.Contains(string(result.Stderr), missingFileMessage) {
+			return relayFileValues{}, "", false, nil
+		}
+		return relayFileValues{}, "", false, fmt.Errorf(
+			"%s: command %s exited with status %d: %s",
+			guest,
+			transport.QuoteCommand(readCommand.Argv),
+			result.ExitCode,
+			lastBytes(strings.TrimSpace(string(result.Stderr)), maximumErrorOutputBytes),
+		)
+	}
+	values, err := parseRelayFile(result.Stdout, username)
+	if err != nil {
+		slog.ErrorContext(
+			ctx, "mail relay file of a guest is malformed",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "path", filePath, "err", err,
+		)
+		return relayFileValues{}, "", false, fmt.Errorf("%s: file %s: %w", guest, filePath, err)
+	}
+	return values, hashHex(result.Stdout), true, nil
+}
+
+// parseRelayFile reads and validates the host, port, user, and from fields
+// in the account smtp2go section, stopping at the next account line.
+// It skips the password line and does not store its value.
+func parseRelayFile(content []byte, username string) (relayFileValues, error) {
+	accountValues := make(map[string]string)
+	insideAccount := false
+	accountFound := false
+	for line := range strings.Lines(string(content)) {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		key := fields[0]
+		if key == relayAccountKeyword {
+			insideAccount = len(fields) == relayLineFields && fields[1] == relayAccountName
+			if insideAccount {
+				accountFound = true
+			}
+			continue
+		}
+		if !insideAccount {
+			continue
+		}
+		switch key {
+		case relayHostKey, relayPortKey, relayUserKey, relayFromKey:
+			if len(fields) != relayLineFields {
+				return relayFileValues{}, fmt.Errorf(
+					"the %s line in the account %s section must contain exactly one value",
+					key, relayAccountName,
+				)
+			}
+			if _, found := accountValues[key]; found {
+				return relayFileValues{}, fmt.Errorf(
+					"the account %s section must contain exactly one %s line",
+					relayAccountName, key,
+				)
+			}
+			accountValues[key] = fields[1]
+		}
+	}
+
+	if !accountFound {
+		return relayFileValues{}, fmt.Errorf("the file does not contain the account %s section", relayAccountName)
+	}
+	for _, key := range []string{relayHostKey, relayPortKey, relayUserKey, relayFromKey} {
+		if _, found := accountValues[key]; !found {
+			return relayFileValues{}, fmt.Errorf("the account %s section does not contain a %s line", relayAccountName, key)
+		}
+	}
+	if accountValues[relayUserKey] != username {
+		return relayFileValues{}, fmt.Errorf(
+			"the user line in the account %s section does not match the import username %s",
+			relayAccountName, username,
+		)
+	}
+	if !relayHostPattern.MatchString(accountValues[relayHostKey]) {
+		return relayFileValues{}, fmt.Errorf(
+			"the host line in the account %s section must contain only letters, digits, periods, colons, or hyphens",
+			relayAccountName,
+		)
+	}
+	if !relayFromPattern.MatchString(accountValues[relayFromKey]) {
+		return relayFileValues{}, fmt.Errorf(
+			"the from line in the account %s section must contain exactly one @ with nonempty text on both sides and without whitespace",
+			relayAccountName,
+		)
+	}
+	port, err := strconv.ParseInt(accountValues[relayPortKey], 10, 64)
+	if err != nil || port < minimumRelayPort || port > maximumRelayPort {
+		return relayFileValues{}, fmt.Errorf(
+			"the port line in the account %s section must contain a number from %d through %d",
+			relayAccountName, minimumRelayPort, maximumRelayPort,
+		)
+	}
+	return relayFileValues{
+		host: accountValues[relayHostKey],
+		port: port,
+		from: accountValues[relayFromKey],
+	}, nil
 }

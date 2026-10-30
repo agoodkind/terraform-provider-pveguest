@@ -395,6 +395,25 @@ Destroy deletes the guest file without deleting the SMTP2GO user. A change to `d
 | `sha256` | The attribute records the SHA-256 hash of the guest file content in hexadecimal. |
 | `write_id` | The attribute records a new random identifier after each successful file write. |
 
+### Import an existing relay
+
+The SMTP2GO user and guest file must already exist. The file must contain an `account smtp2go` section with one value each for `host`, `port`, `user`, and `from`. The `user` value must match the import username.
+
+1. Set `host`, `port`, `from`, and `password_version` in the resource configuration to match the existing relay.
+2. Import the relay with an ID in the form `<node>/<vmid>/<kind>/<username>/<password_version>`:
+
+   ```shell
+   tofu import pveguest_mail_relay.relay suburban/224/lxc/host-clyde/1
+   ```
+
+   To use a different file path, append a clean absolute path to the ID. For example, `suburban/224/lxc/host-clyde/1/etc/msmtprc` uses `/etc/msmtprc`.
+
+3. Run `tofu plan` and review the result before applying it.
+
+Import fails if the ID is invalid, the file is missing, or the required file fields are missing or invalid. OpenTofu reports that the import object does not exist if SMTP2GO does not list the user.
+
+Import and the following apply do not send an SMTP2GO password request or write the file when the configuration matches the imported values and the file hash matches the applied hash. If the configuration sets `description`, the first plan shows an in-place update to `description` only. That apply does not send an SMTP2GO request or write the file.
+
 ## pveguest_sysrepo_module
 
 This resource manages a YANG module and its enabled features in a guest.
@@ -705,6 +724,7 @@ make testacc \
 | `PVEGUEST_ACC_VM_VMID` | ID of a stopped test VM on `PVEGUEST_ACC_NODE`. The token needs `VM.Audit`, `VM.Config.Vsock`, and `VM.PowerMgmt` on `/vms/<vmid>`. The test sets and deletes `vsock`, starts and stops the VM, and restores the earlier `vsock` value at the end. The test fails if `TF_ACC` is set and this variable is unset. |
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
+| `PVEGUEST_ACC_SMTP2GO_API_KEY_FILE` | File containing the SMTP2GO API key for `TestAccMailRelayImport`. The test fails if `TF_ACC` is set and this variable is missing. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the
@@ -721,6 +741,14 @@ items at the end:
 - The sysrepo module `pveguest-acc` and its data in the `running` datastore.
   `TestAccSysrepoModuleAndData` skips when the guest has no `sysrepoctl` or
   `sysrepocfg`.
+
+`TestAccMailRelayImport` also changes an SMTP2GO account:
+
+- The test creates a user with `pveguest-acc-` followed by eight random
+  hexadecimal characters as its username.
+- Test cleanup deletes the user through `POST /users/smtp/remove`.
+- The controller needs HTTPS access to `api.smtp2go.com`.
+- The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
