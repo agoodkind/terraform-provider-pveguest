@@ -2,9 +2,12 @@
 set -e
 
 sleep_file=/root/pveguest-acc/postinst-sleep
+times_file=/root/pveguest-acc/pveguest-acc-svc.times
 
 deb-systemd-helper enable pveguest-acc-svc.service
+date +%s%N >>"$times_file"
 if [ -f "$sleep_file" ]; then
 	sleep "$(cat "$sleep_file")"
 fi
+date +%s%N >>"$times_file"
 deb-systemd-invoke start pveguest-acc-svc.service

@@ -1,11 +1,13 @@
 package acceptance_test
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -33,7 +35,15 @@ const (
 	serviceDebPath    = testDirectory + "/pveguest-acc-svc.deb"
 	postinstSleepPath = testDirectory + "/postinst-sleep"
 
-	killedApplySleepSeconds = 30
+	secondServicePackage = "pveguest-acc-svc-two"
+	secondServiceUnit    = "pveguest-acc-svc-two.service"
+
+	killedApplySleepSeconds    = 30
+	twoProcessSleepSeconds     = 20
+	postinstTimestampLineCount = 2
+	nanosecondsPerMillisecond  = 1_000_000
+	postinstTimestampBase      = 10
+	postinstTimestampBitSize   = 64
 
 	guestWaitTimeout  = 3 * time.Minute
 	guestPollInterval = 2 * time.Second
@@ -47,7 +57,7 @@ type serviceDebFile struct {
 	mode   os.FileMode
 }
 
-func buildServiceDeb(t *testing.T, unsatisfiable bool) []byte {
+func buildServiceDeb(t *testing.T, name string, unsatisfiable bool) []byte {
 	t.Helper()
 	controlSource := "control"
 	if unsatisfiable {
@@ -66,15 +76,16 @@ func buildServiceDeb(t *testing.T, unsatisfiable bool) []byte {
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := filepath.Join(root, file.target)
+		renamed := strings.ReplaceAll(string(content), servicePackage, name)
+		target := filepath.Join(root, strings.ReplaceAll(file.target, servicePackage, name))
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(target, content, file.mode); err != nil {
+		if err := os.WriteFile(target, []byte(renamed), file.mode); err != nil {
 			t.Fatal(err)
 		}
 	}
-	output := filepath.Join(t.TempDir(), servicePackage+".deb")
+	output := filepath.Join(t.TempDir(), name+".deb")
 	command := exec.CommandContext(t.Context(), "dpkg-deb", "--root-owner-group", "--build", root, output)
 	if combined, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("dpkg-deb: %v: %s", err, combined)
@@ -91,21 +102,37 @@ func buildServiceDeb(t *testing.T, unsatisfiable bool) []byte {
 // The argument selects a variant with an unsatisfiable dependency.
 func (g *testGuest) useServicePackage(unsatisfiable bool) {
 	g.t.Helper()
+	g.useNamedServicePackage(servicePackage, unsatisfiable)
+}
+
+func (g *testGuest) useNamedServicePackage(name string, unsatisfiable bool) {
+	g.t.Helper()
 	if _, err := exec.LookPath("dpkg-deb"); err != nil {
 		g.t.Skip("dpkg-deb is missing on the controller, and the test builds its .deb file with dpkg-deb")
 	}
-	if g.packageInstalled(servicePackage) {
-		g.t.Fatalf("package %s is already installed in the test guest; purge it before the test", servicePackage)
+	if g.packageInstalled(name) {
+		g.t.Fatalf("package %s is already installed in the test guest; purge it before the test", name)
 	}
 	g.useTestDirectory()
+	g.useInstallLockCleanup()
 	g.t.Cleanup(func() {
-		g.run(nil, "systemctl", "stop", "--", serviceUnit)
-		g.mustRun("apt-get", "purge", "-y", "--", servicePackage)
+		g.run(nil, "systemctl", "stop", "--", name+".service")
+		g.mustRun("apt-get", "purge", "-y", "--", name)
 	})
-	g.writeFile(serviceDebPath, string(buildServiceDeb(g.t, unsatisfiable)))
+	g.writeFile(serviceDebPathFor(name), string(buildServiceDeb(g.t, name, unsatisfiable)))
 }
 
-func (g *testGuest) debPackagesBlock(extra string) string {
+// useInstallLockCleanup registers a cleanup that deletes the package install lock file.
+func (g *testGuest) useInstallLockCleanup() {
+	g.t.Helper()
+	g.t.Cleanup(func() { g.mustRun("rm", "-f", "--", installLockPath) })
+}
+
+func serviceDebPathFor(name string) string {
+	return testDirectory + "/" + name + ".deb"
+}
+
+func (g *testGuest) debPackagesBlockFor(name string, extra string) string {
 	return fmt.Sprintf(`
 resource "pveguest_deb_packages" "test" {
   node     = local.node
@@ -114,7 +141,11 @@ resource "pveguest_deb_packages" "test" {
   packages = { %s = %q }
   %s
 }
-`, servicePackage, serviceDebPath, extra)
+`, name, serviceDebPathFor(name), extra)
+}
+
+func (g *testGuest) debPackagesBlock(extra string) string {
+	return g.debPackagesBlockFor(servicePackage, extra)
 }
 
 func (g *testGuest) debPackagesConfig(extra string) string {
@@ -130,8 +161,6 @@ func (g *testGuest) expectPackageInstalled(name string) resource.TestCheckFunc {
 	})
 }
 
-// expectUnitState compares the is-active state of the unit. An empty enabled
-// argument logs the is-enabled state and does not compare it.
 func (g *testGuest) expectUnitState(unit string, enabled string, active string) resource.TestCheckFunc {
 	return checkGuest(func() error {
 		state := g.systemctlState("is-enabled", unit)
@@ -172,6 +201,7 @@ func TestAccAptPackagesNoServiceStart(t *testing.T) {
 	if guest.packageInstalled(noStartPackage) {
 		t.Fatalf("package %s is already installed in the test guest; purge it before the test", noStartPackage)
 	}
+	guest.useInstallLockCleanup()
 	t.Cleanup(func() { guest.mustRun("apt-get", "purge", "-y", "--", noStartPackage) })
 	config := guest.aptPackagesConfig([]string{noStartPackage}, "start_services = false")
 
@@ -412,5 +442,103 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	output, exitCode := workspace.run("plan", "-no-color", "-detailed-exitcode")
 	if exitCode != 0 {
 		t.Fatalf("plan after the recovery apply exited with status %d:\n%s", exitCode, output)
+	}
+}
+
+// startApply starts a tofu apply process and returns the process and its output buffer.
+func startApply(t *testing.T, workspace *tofuWorkspace) (*exec.Cmd, *bytes.Buffer) {
+	t.Helper()
+	var output bytes.Buffer
+	command := exec.CommandContext(t.Context(), workspace.binary, "apply", "-no-color", "-auto-approve")
+	command.Dir = workspace.directory
+	command.Env = append(os.Environ(), "TF_IN_AUTOMATION=1", "TF_INPUT=0", reattachVariableName+"=")
+	command.Stdout = &output
+	command.Stderr = &output
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	return command, &output
+}
+
+// postinstWindow returns the nanosecond timestamps that the postinst script
+// writes before and after its sleep.
+func (g *testGuest) postinstWindow(name string) (int64, int64) {
+	g.t.Helper()
+	lines := strings.Fields(g.readFile(testDirectory + "/" + name + ".times"))
+	if len(lines) != postinstTimestampLineCount {
+		g.t.Fatalf("%s.times has %d timestamps, want %d", name, len(lines), postinstTimestampLineCount)
+	}
+	start, err := strconv.ParseInt(lines[0], postinstTimestampBase, postinstTimestampBitSize)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	end, err := strconv.ParseInt(lines[1], postinstTimestampBase, postinstTimestampBitSize)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	return start, end
+}
+
+// TestAccDebPackagesTwoProcessesShareLock checks that concurrent applies on one
+// guest serialize package installation when start_services is false. It checks
+// that both applies succeed, both units are enabled and inactive, and the
+// policy file is absent.
+func TestAccDebPackagesTwoProcessesShareLock(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useNamedServicePackage(servicePackage, false)
+	guest.useNamedServicePackage(secondServicePackage, false)
+	if guest.exists(policyFilePath) {
+		t.Fatalf("%s exists in the test guest; remove it before the test", policyFilePath)
+	}
+	guest.writeFile(postinstSleepPath, fmt.Sprintf("%d\n", twoProcessSleepSeconds))
+
+	binary := requireVariable(t, tofuPathVariable)
+	first := &tofuWorkspace{t: t, directory: t.TempDir(), binary: binary}
+	second := &tofuWorkspace{t: t, directory: t.TempDir(), binary: binary}
+	first.writeConfig(guest.providerBlock() + guest.debPackagesBlockFor(servicePackage, "start_services = false"))
+	second.writeConfig(guest.providerBlock() + guest.debPackagesBlockFor(secondServicePackage, "start_services = false"))
+	first.mustRun("init", "-no-color")
+	second.mustRun("init", "-no-color")
+	t.Cleanup(func() { first.run("destroy", "-no-color", "-auto-approve") })
+	t.Cleanup(func() { second.run("destroy", "-no-color", "-auto-approve") })
+
+	firstCommand, firstOutput := startApply(t, first)
+	// The first postinst script enables its unit before sleeping.
+	// Start the second apply during that sleep.
+	guest.waitFor("the first installation to enable "+serviceUnit, func() bool {
+		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
+	})
+	secondCommand, secondOutput := startApply(t, second)
+	firstErr := firstCommand.Wait()
+	secondErr := secondCommand.Wait()
+	if firstErr != nil {
+		t.Fatalf("first apply failed: %v\n%s", firstErr, firstOutput.String())
+	}
+	if secondErr != nil {
+		t.Fatalf("second apply failed: %v\n%s", secondErr, secondOutput.String())
+	}
+
+	firstStart, firstEnd := guest.postinstWindow(servicePackage)
+	secondStart, secondEnd := guest.postinstWindow(secondServicePackage)
+	t.Logf("first postinst ran from %d to %d, second postinst ran from %d to %d (nanoseconds since the epoch)",
+		firstStart, firstEnd, secondStart, secondEnd)
+	t.Logf("the second postinst started %d ms after the first postinst ended",
+		(secondStart-firstEnd)/nanosecondsPerMillisecond)
+	if secondStart < firstEnd {
+		t.Fatalf("the second install started at %d, before the first install ended at %d", secondStart, firstEnd)
+	}
+
+	for _, name := range []string{servicePackage, secondServicePackage} {
+		if err := guest.expectPackageInstalled(name)(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, unit := range []string{serviceUnit, secondServiceUnit} {
+		if err := guest.expectUnitState(unit, "enabled", "inactive")(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := guest.expectNoPolicyFile()(nil); err != nil {
+		t.Fatal(err)
 	}
 }

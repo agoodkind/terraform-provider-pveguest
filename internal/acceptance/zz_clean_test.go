@@ -22,8 +22,10 @@ func TestAccGuestIsClean(t *testing.T) {
 		guestCALink,
 		guestCAHashLink,
 		policyFilePath,
+		installLockPath,
 		serviceDebPath,
 		"/etc/systemd/system/multi-user.target.wants/" + serviceUnit,
+		"/etc/systemd/system/multi-user.target.wants/" + secondServiceUnit,
 	}
 	for _, path := range leftoverPaths {
 		if guest.exists(path) {
@@ -44,6 +46,12 @@ func TestAccGuestIsClean(t *testing.T) {
 	}
 	if state := guest.systemctlState("is-active", serviceUnit); state != "inactive" {
 		t.Errorf("%s is %s after the tests, want inactive", serviceUnit, state)
+	}
+	if guest.packageInstalled(secondServicePackage) {
+		t.Errorf("package %s is installed after the tests", secondServicePackage)
+	}
+	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
+		t.Errorf("%s is %s after the tests, want inactive", secondServiceUnit, state)
 	}
 	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
 	if hasSysrepo && guest.sysrepoModuleRow() != "" {

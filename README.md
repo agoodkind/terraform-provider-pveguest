@@ -762,8 +762,8 @@ items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
-- The tests install and purge `at` and the generated package `pveguest-acc-svc`, which provides `pveguest-acc-svc.service`. The tests use `/root/pveguest-acc/postinst-sleep` to delay the postinst script.
-- The tests create and delete `/usr/sbin/policy-rc.d` and create `/run/pveguest-package-install.lock`. The tests do not delete the lock file.
+- The acceptance tests install packages `at`, `pveguest-acc-svc`, and `pveguest-acc-svc-two` and create units `pveguest-acc-svc.service` and `pveguest-acc-svc-two.service`. They create generated `.deb` files, `postinst-sleep`, and `.times` timestamp files under `/root/pveguest-acc/`. Cleanup purges the packages and deletes the directory.
+- The acceptance tests create `/usr/sbin/policy-rc.d` and `/run/pveguest-package-install.lock`. Cleanup deletes the lock file.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 - The unit `pveguest-acc-removal.service` under `/etc/systemd/system/`.
