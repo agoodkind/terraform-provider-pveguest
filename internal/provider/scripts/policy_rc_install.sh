@@ -9,6 +9,9 @@ readonly EXIT_SETUP_FAILED=70
 readonly EXIT_FOREIGN_POLICY=73
 readonly EXIT_LOCK_TIMEOUT=75
 readonly POLICY_MODE=0755
+readonly DPKG_LOCK_PATHS=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock)
+readonly PROC_LOCKS_PATH=/proc/locks
+readonly POLL_SECONDS=1
 
 policy_path=$1
 lock_path=$2
@@ -16,12 +19,38 @@ lock_wait_seconds=$3
 marker_line=$4
 shift 4
 
+staged_path="${policy_path}.pveguest-staged.$$"
+apt_config_path="/run/pveguest-apt-policy.$$.conf"
+
 remove_policy() {
 	rm -f -- "$policy_path"
 }
 
+# Delete the policy file if it is a hard link to the staged file.
+# Delete the staged file and the temporary apt configuration.
+cleanup() {
+	if [[ $policy_path -ef $staged_path ]]; then
+		remove_policy
+	fi
+	rm -f -- "$staged_path" "$apt_config_path"
+}
+
 is_marked_policy() {
 	[[ -f $policy_path && ! -L $policy_path ]] && grep -qxF -- "$marker_line" "$policy_path"
+}
+
+# Check /proc/locks for a lock on either dpkg lock inode.
+# This check does not take a lock.
+dpkg_lock_is_held() {
+	local lock_file inode
+	for lock_file in "${DPKG_LOCK_PATHS[@]}"; do
+		[[ -e $lock_file ]] || continue
+		inode=$(stat -c %i -- "$lock_file") || continue
+		if grep -q ":${inode} " "$PROC_LOCKS_PATH"; then
+			return 0
+		fi
+	done
+	return 1
 }
 
 if ! exec 9>"$lock_path"; then
@@ -38,28 +67,44 @@ if [[ -e $policy_path || -L $policy_path ]]; then
 		printf '%s exists without the pveguest marker. The script will not change it.\n' "$policy_path" >&2
 		exit "$EXIT_FOREIGN_POLICY"
 	fi
-	# The script owns the exclusive lock.
-	# A running install does not own the policy-rc.d file with the pveguest marker.
+	# Wait for both dpkg locks to become free before deleting the marked policy file.
+	# An earlier install may still need the file.
+	deadline=$((SECONDS + lock_wait_seconds))
+	while dpkg_lock_is_held; do
+		if ((SECONDS >= deadline)); then
+			printf 'Timed out after %s seconds while waiting for the dpkg locks.\n' "$lock_wait_seconds" >&2
+			exit "$EXIT_LOCK_TIMEOUT"
+		fi
+		sleep "$POLL_SECONDS"
+	done
 	remove_policy
 fi
 
-if ! (
-	set -C
-	printf '%s\n' '#!/bin/sh' "$marker_line" 'exit 101' >"$policy_path"
-); then
-	printf 'The script could not create the policy file %s.\n' "$policy_path" >&2
-	exit "$EXIT_SETUP_FAILED"
-fi
-
-# Delete the policy file when the script exits or receives a
-# hangup, interrupt, or termination signal.
-trap remove_policy EXIT
+trap cleanup EXIT
 trap 'exit 143' HUP INT TERM
 
-if ! chmod "$POLICY_MODE" -- "$policy_path"; then
-	printf 'The script could not create the policy file %s.\n' "$policy_path" >&2
+if ! (
+	set -C
+	printf '%s\n' '#!/bin/sh' "$marker_line" 'exit 101' >"$staged_path"
+); then
+	printf 'The script could not create the policy file %s.\n' "$staged_path" >&2
 	exit "$EXIT_SETUP_FAILED"
 fi
+if ! chmod "$POLICY_MODE" -- "$staged_path"; then
+	printf 'The script could not create the policy file %s.\n' "$staged_path" >&2
+	exit "$EXIT_SETUP_FAILED"
+fi
+
+# The pre-invoke hook links the staged file before dpkg runs.
+# The link fails if the policy file exists, and apt-get stops before dpkg runs.
+# The post-invoke hook deletes the policy file after dpkg finishes.
+# apt-get owns both dpkg locks while it runs these hooks.
+if ! printf 'DPkg::Pre-Invoke:: "ln -T -- %s %s";\nDPkg::Post-Invoke:: "rm -f -- %s";\n' \
+	"$staged_path" "$policy_path" "$policy_path" >"$apt_config_path"; then
+	printf 'The script could not create the apt configuration %s.\n' "$apt_config_path" >&2
+	exit "$EXIT_SETUP_FAILED"
+fi
+export APT_CONFIG="$apt_config_path"
 
 # Close file descriptor 9 so a daemon started by a package script
 # does not inherit the lock.

@@ -307,7 +307,7 @@ Apply installs the exact package versions in `versions`, including downgrades. R
 
 When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. When remove_on_delete is true, the plan for pveguest_apt_packages shows a warning that lists the declared packages that the provider removes during apply or destroy.
 
-`start_services` defaults to `true`, which lets packages start services normally. Set it to `false` to prevent service starts and restarts during installs in that apply; already installed packages do not change. Both package resources use `/run/pveguest-package-install.lock` to serialize these installs, and the provider fails the apply without changing `/usr/sbin/policy-rc.d` if the path lacks the pveguest marker. After acquiring the lock, the provider deletes a stale `policy-rc.d` file with its marker before installing packages. A later `pveguest_systemd_unit` resource can start the service.
+`start_services` defaults to `true`. When `start_services` is `false`, the provider creates `/usr/sbin/policy-rc.d` only while its `apt-get` runs `dpkg` and prevents package scripts from starting services. Other package tools wait for the `dpkg` locks, and pveguest installs use a shared lock. The provider refuses to proceed if an existing policy file lacks its marker, and it deletes a marked stale file after the `dpkg` locks are free. A later `pveguest_systemd_unit` resource can start the service.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -762,8 +762,8 @@ items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
-- The acceptance tests install packages `at`, `pveguest-acc-svc`, and `pveguest-acc-svc-two` and create units `pveguest-acc-svc.service` and `pveguest-acc-svc-two.service`. They create generated `.deb` files, `postinst-sleep`, and `.times` timestamp files under `/root/pveguest-acc/`. Cleanup purges the packages and deletes the directory.
-- The acceptance tests create `/usr/sbin/policy-rc.d` and `/run/pveguest-package-install.lock`. Cleanup deletes the lock file.
+- The tests install packages `at`, `pveguest-acc-svc`, and `pveguest-acc-svc-two`, create units `pveguest-acc-svc.service` and `pveguest-acc-svc-two.service`, and create generated `.deb` files, `postinst-sleep`, and `.times` files under `/root/pveguest-acc/`. Test cleanup purges the packages and deletes the directory.
+- The tests use `/usr/sbin/policy-rc.d`, the staged copy `/usr/sbin/policy-rc.d.pveguest-staged.<pid>`, the apt configuration `/run/pveguest-apt-policy.<pid>.conf`, and `/run/pveguest-package-install.lock`. The provider deletes the staged copy and apt configuration when the script ends. Test cleanup deletes the lock file.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 - The unit `pveguest-acc-removal.service` under `/etc/systemd/system/`.

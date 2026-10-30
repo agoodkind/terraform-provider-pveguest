@@ -2,6 +2,7 @@ package acceptance_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
+
+	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (
@@ -40,6 +43,8 @@ const (
 
 	killedApplySleepSeconds    = 30
 	twoProcessSleepSeconds     = 20
+	lockHoldSeconds            = 20
+	nanosecondsPerSecond       = 1_000_000_000
 	postinstTimestampLineCount = 2
 	nanosecondsPerMillisecond  = 1_000_000
 	postinstTimestampBase      = 10
@@ -88,7 +93,7 @@ func buildServiceDeb(t *testing.T, name string, unsatisfiable bool) []byte {
 	output := filepath.Join(t.TempDir(), name+".deb")
 	command := exec.CommandContext(t.Context(), "dpkg-deb", "--root-owner-group", "--build", root, output)
 	if combined, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("dpkg-deb: %v: %s", err, combined)
+		t.Fatalf("dpkg-deb failed: %v; output: %s", err, combined)
 	}
 	content, err := os.ReadFile(output)
 	if err != nil {
@@ -108,10 +113,10 @@ func (g *testGuest) useServicePackage(unsatisfiable bool) {
 func (g *testGuest) useNamedServicePackage(name string, unsatisfiable bool) {
 	g.t.Helper()
 	if _, err := exec.LookPath("dpkg-deb"); err != nil {
-		g.t.Skip("dpkg-deb is missing on the controller, and the test builds its .deb file with dpkg-deb")
+		g.t.Skip("The controller lacks dpkg-deb, which the test requires to build its .deb file.")
 	}
 	if g.packageInstalled(name) {
-		g.t.Fatalf("package %s is already installed in the test guest; purge it before the test", name)
+		g.t.Fatalf("%s is already installed in the test guest; purge it before the test", name)
 	}
 	g.useTestDirectory()
 	g.useInstallLockCleanup()
@@ -155,7 +160,7 @@ func (g *testGuest) debPackagesConfig(extra string) string {
 func (g *testGuest) expectPackageInstalled(name string) resource.TestCheckFunc {
 	return checkGuest(func() error {
 		if !g.packageInstalled(name) {
-			return fmt.Errorf("package %s is not installed", name)
+			return fmt.Errorf("%s is not installed", name)
 		}
 		return nil
 	})
@@ -167,10 +172,10 @@ func (g *testGuest) expectUnitState(unit string, enabled string, active string) 
 		if enabled == "" {
 			g.t.Logf("%s is-enabled state: %s", unit, state)
 		} else if state != enabled {
-			return fmt.Errorf("%s is %s, want %s", unit, state, enabled)
+			return fmt.Errorf("%s is-enabled state is %s; expected %s", unit, state, enabled)
 		}
 		if state := g.systemctlState("is-active", unit); state != active {
-			return fmt.Errorf("%s is %s, want %s", unit, state, active)
+			return fmt.Errorf("%s is-active state is %s; expected %s", unit, state, active)
 		}
 		return nil
 	})
@@ -179,7 +184,7 @@ func (g *testGuest) expectUnitState(unit string, enabled string, active string) 
 func (g *testGuest) expectNoPolicyFile() resource.TestCheckFunc {
 	return checkGuest(func() error {
 		if g.exists(policyFilePath) {
-			return fmt.Errorf("%s exists", policyFilePath)
+			return fmt.Errorf("the policy file %s exists", policyFilePath)
 		}
 		return nil
 	})
@@ -199,7 +204,7 @@ func (g *testGuest) waitFor(description string, condition func() bool) {
 func TestAccAptPackagesNoServiceStart(t *testing.T) {
 	guest := newTestGuest(t)
 	if guest.packageInstalled(noStartPackage) {
-		t.Fatalf("package %s is already installed in the test guest; purge it before the test", noStartPackage)
+		t.Fatalf("%s is already installed in the test guest; purge it before the test", noStartPackage)
 	}
 	guest.useInstallLockCleanup()
 	t.Cleanup(func() { guest.mustRun("apt-get", "purge", "-y", "--", noStartPackage) })
@@ -276,7 +281,7 @@ func TestAccDebPackagesFailedInstallRemovesPolicyFile(t *testing.T) {
 			{
 				PreConfig: func() {
 					if guest.exists(policyFilePath) {
-						t.Fatalf("%s exists after the failed install", policyFilePath)
+						t.Fatalf("the policy file %s exists after the failed install", policyFilePath)
 					}
 				},
 				Config:             config,
@@ -291,7 +296,7 @@ func TestAccDebPackagesRefuseForeignPolicyFile(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useServicePackage(false)
 	if guest.exists(policyFilePath) {
-		t.Fatalf("%s exists in the test guest; remove it before the test", policyFilePath)
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
 	}
 	t.Cleanup(func() { guest.mustRun("rm", "-f", "--", policyFilePath) })
 	config := guest.debPackagesConfig("start_services = false")
@@ -310,10 +315,10 @@ func TestAccDebPackagesRefuseForeignPolicyFile(t *testing.T) {
 			{
 				PreConfig: func() {
 					if got := guest.readFile(policyFilePath); got != foreignPolicyContent {
-						t.Fatalf("%s contains %q after the refused apply, want %q", policyFilePath, got, foreignPolicyContent)
+						t.Fatalf("%s contains %q after the refused apply; expected %q", policyFilePath, got, foreignPolicyContent)
 					}
 					if guest.packageInstalled(servicePackage) {
-						t.Fatalf("package %s is installed although the apply refused to run", servicePackage)
+						t.Fatalf("%s is installed after the apply refused to run", servicePackage)
 					}
 				},
 				Config:             config,
@@ -328,7 +333,7 @@ func TestAccDebPackagesRecoverMarkedPolicyFile(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useServicePackage(false)
 	if guest.exists(policyFilePath) {
-		t.Fatalf("%s exists in the test guest; remove it before the test", policyFilePath)
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
 	}
 	t.Cleanup(func() { guest.mustRun("rm", "-f", "--", policyFilePath) })
 
@@ -355,7 +360,7 @@ func TestAccPackagesApplyTogetherWithoutServiceStart(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useServicePackage(false)
 	if guest.packageInstalled(noStartPackage) {
-		t.Fatalf("package %s is already installed in the test guest; purge it before the test", noStartPackage)
+		t.Fatalf("%s is already installed in the test guest; purge it before the test", noStartPackage)
 	}
 	t.Cleanup(func() { guest.mustRun("apt-get", "purge", "-y", "--", noStartPackage) })
 	aptBlock := strings.TrimPrefix(
@@ -394,7 +399,7 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useServicePackage(false)
 	if guest.exists(policyFilePath) {
-		t.Fatalf("%s exists in the test guest; remove it before the test", policyFilePath)
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
 	}
 	guest.writeFile(postinstSleepPath, fmt.Sprintf("%d\n", killedApplySleepSeconds))
 	workspace := &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
@@ -410,7 +415,7 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	}
 	// The postinst script enables the unit before it sleeps. An enabled unit
 	// shows that the install is running in that slow step.
-	guest.waitFor("the slow installation to enable "+serviceUnit, func() bool {
+	guest.waitFor(fmt.Sprintf("the slow installation to enable %s", serviceUnit), func() bool {
 		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
 	})
 	if err := command.Process.Kill(); err != nil {
@@ -419,11 +424,11 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	_ = command.Wait()
 
 	if got := guest.readFile(policyFilePath); !strings.Contains(got, policyMarker) {
-		t.Fatalf("%s contains %q after the kill, want the marker line %q", policyFilePath, got, policyMarker)
+		t.Fatalf("after the kill, the policy file %s contains %q; expected marker line %q", policyFilePath, got, policyMarker)
 	}
 	lockResult := guest.run(nil, "flock", "-n", installLockPath, "true")
 	if lockResult.ExitCode != lockHeldExitCode {
-		t.Fatalf("flock -n on %s exited with status %d after the kill, want %d (lock held)",
+		t.Fatalf("after the kill, flock -n on %s returned exit status %d; expected %d for a held lock",
 			installLockPath, lockResult.ExitCode, lockHeldExitCode)
 	}
 
@@ -441,8 +446,122 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	}
 	output, exitCode := workspace.run("plan", "-no-color", "-detailed-exitcode")
 	if exitCode != 0 {
-		t.Fatalf("plan after the recovery apply exited with status %d:\n%s", exitCode, output)
+		t.Fatalf("the plan after the recovery apply is not empty; exit status %d; output: %s", exitCode, output)
 	}
+}
+
+type backgroundResult struct {
+	result transport.Result
+	err    error
+}
+
+// startBackground runs a guest command in a goroutine and sends the result on a channel.
+func (g *testGuest) startBackground(argv ...string) <-chan backgroundResult {
+	done := make(chan backgroundResult, 1)
+	go func() {
+		result, err := g.client.Run(context.Background(), g.guest, guestCommand(nil, argv))
+		done <- backgroundResult{result: result, err: err}
+	}()
+	return done
+}
+
+func (g *testGuest) requireBackgroundSuccess(done <-chan backgroundResult, description string) {
+	g.t.Helper()
+	outcome := <-done
+	if outcome.err != nil {
+		g.t.Fatalf("background guest command %s failed: %v", description, outcome.err)
+	}
+	if outcome.result.ExitCode != 0 {
+		g.t.Fatalf("background guest command %s exited with status %d; stderr: %s",
+			description, outcome.result.ExitCode, outcome.result.Stderr)
+	}
+}
+
+func (g *testGuest) guestNanoseconds() int64 {
+	g.t.Helper()
+	text := strings.TrimSpace(g.mustRun("date", "+%s%N"))
+	value, err := strconv.ParseInt(text, postinstTimestampBase, postinstTimestampBitSize)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	return value
+}
+
+// TestAccDebPackagesOtherInstallKeepsServiceStart runs a plain apt-get install
+// with a slow postinst script while a pveguest apply installs a second package
+// with start_services = false. It checks that the plain install starts its service,
+// the second service stays inactive, and the policy file does not exist.
+func TestAccDebPackagesOtherInstallKeepsServiceStart(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useNamedServicePackage(servicePackage, false)
+	guest.useNamedServicePackage(secondServicePackage, false)
+	if guest.exists(policyFilePath) {
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
+	}
+	guest.writeFile(postinstSleepPath, fmt.Sprintf("%d\n", twoProcessSleepSeconds))
+	workspace := &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
+	workspace.writeConfig(guest.providerBlock() + guest.debPackagesBlockFor(secondServicePackage, "start_services = false"))
+	workspace.mustRun("init", "-no-color")
+	t.Cleanup(func() { workspace.run("destroy", "-no-color", "-auto-approve") })
+
+	done := guest.startBackground(
+		"apt-get", "install", "-y", "--no-install-recommends", "--", serviceDebPathFor(servicePackage),
+	)
+	// The postinst script enables the unit before sleeping.
+	// Start the apply during that sleep.
+	guest.waitFor(fmt.Sprintf("the plain installation to enable %s", serviceUnit), func() bool {
+		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
+	})
+	workspace.mustRun("apply", "-no-color", "-auto-approve")
+	guest.requireBackgroundSuccess(done, "the plain apt-get install")
+
+	if err := guest.expectUnitState(serviceUnit, "enabled", "active")(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := guest.expectUnitState(secondServiceUnit, "enabled", "inactive")(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := guest.expectNoPolicyFile()(nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAccDebPackagesWaitsForInstallLock runs a guest command that takes the
+// pveguest install lock for 20 seconds. It checks that an apply with
+// start_services = false starts postinst after the lock holder ends.
+func TestAccDebPackagesWaitsForInstallLock(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useServicePackage(false)
+	if guest.exists(policyFilePath) {
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
+	}
+
+	holdStart := guest.guestNanoseconds()
+	done := guest.startBackground("flock", "-x", installLockPath, "sleep", strconv.Itoa(lockHoldSeconds))
+	guest.waitFor("the lock holder command to take the install lock", func() bool {
+		return guest.run(nil, "flock", "-n", installLockPath, "true").ExitCode == lockHeldExitCode
+	})
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		Steps: []resource.TestStep{
+			{
+				Config: guest.debPackagesConfig("start_services = false"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					guest.expectPackageInstalled(servicePackage),
+					checkGuest(func() error {
+						installStart, _ := guest.postinstWindow(servicePackage)
+						earliest := holdStart + int64(lockHoldSeconds)*nanosecondsPerSecond
+						if installStart < earliest {
+							return fmt.Errorf("the install started at %d before the lock holder ended at %d", installStart, earliest)
+						}
+						return nil
+					}),
+				),
+			},
+		},
+	})
+	guest.requireBackgroundSuccess(done, "the lock holder command")
 }
 
 // startApply starts a tofu apply process and returns the process and its output buffer.
@@ -466,7 +585,7 @@ func (g *testGuest) postinstWindow(name string) (int64, int64) {
 	g.t.Helper()
 	lines := strings.Fields(g.readFile(testDirectory + "/" + name + ".times"))
 	if len(lines) != postinstTimestampLineCount {
-		g.t.Fatalf("%s.times has %d timestamps, want %d", name, len(lines), postinstTimestampLineCount)
+		g.t.Fatalf("%s has %d timestamps; expected %d", name, len(lines), postinstTimestampLineCount)
 	}
 	start, err := strconv.ParseInt(lines[0], postinstTimestampBase, postinstTimestampBitSize)
 	if err != nil {
@@ -479,16 +598,16 @@ func (g *testGuest) postinstWindow(name string) (int64, int64) {
 	return start, end
 }
 
-// TestAccDebPackagesTwoProcessesShareLock checks that concurrent applies on one
-// guest serialize package installation when start_services is false. It checks
-// that both applies succeed, both units are enabled and inactive, and the
-// policy file is absent.
+// TestAccDebPackagesTwoProcessesShareLock runs two OpenTofu applies at the
+// same time against one guest. It checks that both succeed, the second postinst
+// starts after the first ends, both units are enabled and inactive, and the
+// policy file does not exist.
 func TestAccDebPackagesTwoProcessesShareLock(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useNamedServicePackage(servicePackage, false)
 	guest.useNamedServicePackage(secondServicePackage, false)
 	if guest.exists(policyFilePath) {
-		t.Fatalf("%s exists in the test guest; remove it before the test", policyFilePath)
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
 	}
 	guest.writeFile(postinstSleepPath, fmt.Sprintf("%d\n", twoProcessSleepSeconds))
 
@@ -505,27 +624,27 @@ func TestAccDebPackagesTwoProcessesShareLock(t *testing.T) {
 	firstCommand, firstOutput := startApply(t, first)
 	// The first postinst script enables its unit before sleeping.
 	// Start the second apply during that sleep.
-	guest.waitFor("the first installation to enable "+serviceUnit, func() bool {
+	guest.waitFor(fmt.Sprintf("the first installation to enable %s", serviceUnit), func() bool {
 		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
 	})
 	secondCommand, secondOutput := startApply(t, second)
 	firstErr := firstCommand.Wait()
 	secondErr := secondCommand.Wait()
 	if firstErr != nil {
-		t.Fatalf("first apply failed: %v\n%s", firstErr, firstOutput.String())
+		t.Fatalf("the %s apply failed: %v; output: %s", "first", firstErr, firstOutput.String())
 	}
 	if secondErr != nil {
-		t.Fatalf("second apply failed: %v\n%s", secondErr, secondOutput.String())
+		t.Fatalf("the %s apply failed: %v; output: %s", "second", secondErr, secondOutput.String())
 	}
 
 	firstStart, firstEnd := guest.postinstWindow(servicePackage)
 	secondStart, secondEnd := guest.postinstWindow(secondServicePackage)
-	t.Logf("first postinst ran from %d to %d, second postinst ran from %d to %d (nanoseconds since the epoch)",
+	t.Logf("postinst times in nanoseconds since the epoch: first start %d, first end %d, second start %d, second end %d",
 		firstStart, firstEnd, secondStart, secondEnd)
-	t.Logf("the second postinst started %d ms after the first postinst ended",
+	t.Logf("the second postinst started %d milliseconds after the first postinst ended",
 		(secondStart-firstEnd)/nanosecondsPerMillisecond)
 	if secondStart < firstEnd {
-		t.Fatalf("the second install started at %d, before the first install ended at %d", secondStart, firstEnd)
+		t.Fatalf("the second install started at %d before the first install ended at %d", secondStart, firstEnd)
 	}
 
 	for _, name := range []string{servicePackage, secondServicePackage} {

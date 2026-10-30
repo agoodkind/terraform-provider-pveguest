@@ -92,8 +92,8 @@ type aptPackagesModel struct {
 	StartServices  types.Bool   `tfsdk:"start_services"`
 }
 
-// aptDesired stores package names, exact versions, lock selections, and the
-// removal and service start settings as Go values.
+// aptDesired stores package names, exact versions, lock selections, the removal
+// setting, and the service start setting.
 type aptDesired struct {
 	Packages       []string
 	Versions       map[string]string

@@ -36,22 +36,22 @@ func TestAccGuestIsClean(t *testing.T) {
 		t.Errorf("package %s is installed after the tests", testPackage)
 	}
 	if guest.packageInstalled(noStartPackage) {
-		t.Errorf("package %s is installed after the tests", noStartPackage)
+		t.Errorf("%s is installed after the tests", noStartPackage)
 	}
 	if state := guest.systemctlState("is-active", noStartUnit); state != "inactive" {
-		t.Errorf("%s is %s after the tests, want inactive", noStartUnit, state)
+		t.Errorf("%s has state %s after the tests; expected inactive", noStartUnit, state)
 	}
 	if guest.packageInstalled(servicePackage) {
-		t.Errorf("package %s is installed after the tests", servicePackage)
+		t.Errorf("%s is installed after the tests", servicePackage)
 	}
 	if state := guest.systemctlState("is-active", serviceUnit); state != "inactive" {
-		t.Errorf("%s is %s after the tests, want inactive", serviceUnit, state)
+		t.Errorf("%s has state %s after the tests; expected inactive", serviceUnit, state)
 	}
 	if guest.packageInstalled(secondServicePackage) {
-		t.Errorf("package %s is installed after the tests", secondServicePackage)
+		t.Errorf("%s is installed after the tests", secondServicePackage)
 	}
 	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
-		t.Errorf("%s is %s after the tests, want inactive", secondServiceUnit, state)
+		t.Errorf("%s has state %s after the tests; expected inactive", secondServiceUnit, state)
 	}
 	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
 	if hasSysrepo && guest.sysrepoModuleRow() != "" {
