@@ -654,6 +654,35 @@ func TestAccDownloadRequestHeaderErrorsRedacted(t *testing.T) {
 	}
 }
 
+func TestAccDownloadGuestRequestHeaderErrorRedacted(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useTestDirectory()
+	_, hash := requestHeaderPayload(t)
+	path := testDirectory + "/request-header/guest-error.bin"
+	url := "https://" + requestHeaderEchoToken + ".invalid" + requestHeaderObject
+	config := guest.workspaceConfig("guest", url, hash, path, 1, true)
+	workspace := newHeaderWorkspace(t)
+	workspace.writeConfig(config)
+	workspace.variableValue = requestHeaderEchoToken
+	workspace.mustRun("init", "-no-color")
+	workspace.mustRun("plan", "-no-color", "-out", planFileName)
+
+	output, exitCode := workspace.run("apply", "-no-color", planFileName)
+
+	if exitCode == 0 {
+		t.Fatalf("the apply succeeded, want a failed download:\n%s", output)
+	}
+	if !redactedPattern.MatchString(output) {
+		t.Fatal("the tofu output does not contain a redaction marker")
+	}
+	if strings.Contains(output, requestHeaderEchoToken) {
+		t.Fatal("the tofu output contains the header value")
+	}
+	if guest.exists(path) {
+		t.Fatalf("%s exists after the failed download", path)
+	}
+}
+
 func TestAccDownloadGuestRequestHeader(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
