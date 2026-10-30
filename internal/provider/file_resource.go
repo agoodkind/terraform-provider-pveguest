@@ -317,8 +317,8 @@ func (r *fileResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	state.Owner = types.StringValue(status.Owner)
 	state.Group = types.StringValue(status.Group)
 	state.SHA256 = types.StringValue(status.SHA256)
-	// Read sets a null write_id to import- followed by the first 16 characters
-	// of the guest sha256.
+	// Read sets a null write_id to import- followed by the first 16 hexadecimal
+	// characters of the guest sha256.
 	if state.WriteID.IsNull() {
 		state.WriteID = types.StringValue(importedWriteID(status.SHA256))
 	}
