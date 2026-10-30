@@ -5,16 +5,19 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/smtp"
 	"net/textproto"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,6 +44,10 @@ const (
 	relayRejectedLoginCode  = 535
 	relayAuthOperation      = "AUTH LOGIN"
 	relayAddress            = "pveguest_mail_relay.test"
+	relayResourceType       = "pveguest_mail_relay"
+	relayTempDirVariable    = "TF_ACC_TEMP_DIR"
+	relayStateFilePrefix    = "terraform.tfstate"
+	relayMarkerPrefix       = "pveguest-acc-marker-"
 	relayFileName           = "msmtprc"
 	relayUserPrefix         = "pveguest-acc-"
 	relayUserSuffixBytes    = 4
@@ -121,6 +128,19 @@ type relayViewResponse struct {
 	Data relayViewData `json:"data"`
 }
 
+type relayStateInstance struct {
+	Private string `json:"private"`
+}
+
+type relayStateResource struct {
+	Type      string               `json:"type"`
+	Instances []relayStateInstance `json:"instances"`
+}
+
+type relayStateDocument struct {
+	Resources []relayStateResource `json:"resources"`
+}
+
 func (g *testGuest) relayConfig(username string, path string, passwordVersion int) string {
 	return g.providerBlock() + fmt.Sprintf(`
 resource "pveguest_mail_relay" "test" {
@@ -148,9 +168,18 @@ removed {
 `
 }
 
+func (g *testGuest) mustRunReadOnly(argv ...string) string {
+	g.t.Helper()
+	result := g.runReadOnly(argv...)
+	if result.ExitCode != 0 {
+		g.t.Fatalf("%q exited with status %d: %s", argv, result.ExitCode, result.Stderr)
+	}
+	return string(result.Stdout)
+}
+
 func (g *testGuest) fileHash(path string) string {
 	g.t.Helper()
-	fields := strings.Fields(g.mustRun("sha256sum", "--", path))
+	fields := strings.Fields(g.mustRunReadOnly("sha256sum", "--", path))
 	if len(fields) == 0 {
 		g.t.Fatalf("sha256sum printed nothing for %s", path)
 	}
@@ -159,7 +188,7 @@ func (g *testGuest) fileHash(path string) string {
 
 func (g *testGuest) fileInode(path string) string {
 	g.t.Helper()
-	return strings.TrimSpace(g.mustRun("stat", "-c", "%i", "--", path))
+	return strings.TrimSpace(g.mustRunReadOnly("stat", "-c", "%i", "--", path))
 }
 
 // relayCredentials reads host, port, user, and password from the account smtp2go
@@ -376,6 +405,168 @@ func (g *testGuest) checkImportOmitsRelayPassword(path string) resource.ImportSt
 	}
 }
 
+// expectStateFilesOmitRelayPassword returns a check that reads the guest password
+// and checks the OpenTofu state files for that password.
+func (g *testGuest) expectStateFilesOmitRelayPassword(stateDirectory string, path string) func() error {
+	return func() error {
+		credentials, err := g.relayCredentials(path)
+		if err != nil {
+			return err
+		}
+		return relayStateFilesOmit(stateDirectory, credentials.password)
+	}
+}
+
+func relayStateFilesOmit(stateDirectory string, password string) error {
+	var statePaths []string
+	err := filepath.WalkDir(stateDirectory, func(filePath string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), relayStateFilePrefix) {
+			statePaths = append(statePaths, filePath)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to walk state directory %s: %w", stateDirectory, err)
+	}
+	privateCount := 0
+	for _, statePath := range statePaths {
+		filePrivateCount, err := relayStateFileOmits(statePath, password)
+		if err != nil {
+			return err
+		}
+		privateCount += filePrivateCount
+	}
+	if privateCount == 0 {
+		return fmt.Errorf("state files in %s do not contain private state for %s", stateDirectory, relayAddress)
+	}
+	return nil
+}
+
+// relayStateFileOmits checks a state file for the password and returns the
+// number of pveguest_mail_relay instances with nonempty private state.
+func relayStateFileOmits(statePath string, password string) (int, error) {
+	content, err := os.ReadFile(statePath)
+	if err != nil {
+		return 0, err
+	}
+	if bytes.Contains(content, []byte(password)) {
+		return 0, fmt.Errorf("state file %s contains the mail password", statePath)
+	}
+	var state relayStateDocument
+	if err := json.Unmarshal(content, &state); err != nil {
+		return 0, fmt.Errorf("state file %s is not valid JSON state", statePath)
+	}
+	privateCount := 0
+	for _, stateResource := range state.Resources {
+		if stateResource.Type != relayResourceType {
+			continue
+		}
+		for _, instance := range stateResource.Instances {
+			if instance.Private == "" {
+				continue
+			}
+			privateCount++
+			if err := relayPrivateStateOmits(instance.Private, password); err != nil {
+				return 0, fmt.Errorf("%s: %w", statePath, err)
+			}
+		}
+	}
+	return privateCount, nil
+}
+
+// relayPrivateStateOmits decodes the private state and its entries and checks
+// each decoded value for the mail password.
+func relayPrivateStateOmits(encoded string, password string) error {
+	document, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return errors.New("the private field is not valid base64")
+	}
+	if bytes.Contains(document, []byte(password)) {
+		return errors.New("the private state contains the mail password")
+	}
+	var entries map[string][]byte
+	if err := json.Unmarshal(document, &entries); err != nil {
+		return errors.New("the private state is not a JSON map of base64 values")
+	}
+	for key, value := range entries {
+		if bytes.Contains(value, []byte(password)) {
+			return fmt.Errorf("private state entry %s contains the mail password", key)
+		}
+	}
+	return nil
+}
+
+// relayImportFailures stores the expected import error pattern, guest, guest
+// file path, and marker used in malformed file copies.
+type relayImportFailures struct {
+	guest   *testGuest
+	path    string
+	marker  string
+	pending *regexp.Regexp
+}
+
+// importStep returns an import step that records the expected error pattern
+// before running the preparation function.
+func (failures *relayImportFailures) importStep(config string, importID string, message string, prepare func()) resource.TestStep {
+	return resource.TestStep{
+		Config:        config,
+		ResourceName:  relayAddress,
+		ImportState:   true,
+		ImportStateId: importID,
+		PreConfig: func() {
+			failures.expect(relayImportErrorPattern(message))
+			prepare()
+		},
+	}
+}
+
+func (failures *relayImportFailures) expect(pattern *regexp.Regexp) {
+	failures.requireChecked()
+	failures.pending = pattern
+}
+
+// requireChecked stops the test if the previous import step succeeded when
+// the test expected an error.
+func (failures *relayImportFailures) requireChecked() {
+	failures.guest.t.Helper()
+	if failures.pending != nil {
+		failures.guest.t.Fatalf("the previous import step succeeded; expected an error matching %s", failures.pending)
+	}
+}
+
+// check returns unexpected errors unchanged and checks expected import errors
+// against the current guest password and expected pattern.
+func (failures *relayImportFailures) check(err error) error {
+	if failures.pending == nil {
+		return err
+	}
+	pattern := failures.pending
+	failures.pending = nil
+	credentials, credentialErr := failures.guest.relayCredentials(failures.path)
+	if credentialErr != nil {
+		return credentialErr
+	}
+	return relayImportErrorCheck(err, pattern, credentials.password, failures.marker)
+}
+
+// relayImportErrorCheck rejects output that contains a secret or does not
+// match the expected pattern. It does not print output that contains a secret.
+func relayImportErrorCheck(err error, pattern *regexp.Regexp, secrets ...string) error {
+	output := err.Error()
+	for _, secret := range secrets {
+		if strings.Contains(output, secret) {
+			return errors.New("the import error output contains the mail password or marker")
+		}
+	}
+	if !pattern.MatchString(output) {
+		return fmt.Errorf("the import error does not match %s: %w", pattern, err)
+	}
+	return nil
+}
+
 type relayPasswordPlanCheck struct {
 	guest *testGuest
 	path  string
@@ -406,7 +597,12 @@ func relayImportErrorPattern(message string) *regexp.Regexp {
 }
 
 // invalidRelayImportSteps checks import errors through OpenTofu and real guest files.
-func (g *testGuest) invalidRelayImportSteps(config string, importID string, path string) []resource.TestStep {
+func (g *testGuest) invalidRelayImportSteps(
+	failures *relayImportFailures,
+	config string,
+	importID string,
+	path string,
+) []resource.TestStep {
 	invalidPath := path + ".invalid"
 	invalidID := importID + ".invalid"
 	segments := strings.SplitN(importID, "/", 5)
@@ -416,6 +612,7 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 		newLine string
 		message string
 	}{
+		{oldLine: relayAccountLine + "\n", newLine: "account relay\n", message: "the file does not contain the account smtp2go section"},
 		{oldLine: "host " + relayHost + "\n", message: "the account smtp2go section does not contain a host line"},
 		{oldLine: "port 587\n", message: "the account smtp2go section does not contain a port line"},
 		{oldLine: "user " + username + "\n", message: "the account smtp2go section does not contain a user line"},
@@ -425,46 +622,27 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 		{oldLine: "port 587", newLine: "port invalid", message: "the port line in the account smtp2go section must contain a number from 1 through 65535"},
 		{oldLine: "host " + relayHost, newLine: "host " + relayHost + "\nhost " + relayHost, message: "the account smtp2go section must contain exactly one host line"},
 	}
+	noPreparation := func() {}
 	steps := []resource.TestStep{
-		{
-			Config:        config,
-			ResourceName:  relayAddress,
-			ImportState:   true,
-			ImportStateId: invalidID,
-			ExpectError:   relayImportErrorPattern("the file " + invalidPath + " does not exist."),
-		},
+		failures.importStep(config, invalidID, "the file "+invalidPath+" does not exist.", noPreparation),
 	}
+	markerLine := "# " + failures.marker + "\n"
 	for _, testCase := range cases {
-		steps = append(steps, resource.TestStep{
-			Config:        config,
-			ResourceName:  relayAddress,
-			ImportState:   true,
-			ImportStateId: invalidID,
-			ExpectError:   relayImportErrorPattern(testCase.message),
-			PreConfig: func() {
-				content := g.readFile(path)
-				g.mustRun("cp", "--", path, invalidPath)
-				g.writeFile(invalidPath, strings.Replace(content, testCase.oldLine, testCase.newLine, 1))
-			},
-		})
+		steps = append(steps, failures.importStep(config, invalidID, testCase.message, func() {
+			content := g.readFile(path)
+			g.mustRun("cp", "--", path, invalidPath)
+			invalidContent := strings.Replace(content, testCase.oldLine, testCase.newLine, 1)
+			g.writeFile(invalidPath, invalidContent+markerLine)
+		}))
 	}
+	formatMessage := "must have the form <node>/<vmid>/<kind>/<username>/<password_version>, " +
+		"optionally followed by an absolute file path such as /etc/msmtprc"
 	for _, id := range []string{"invalid", "node/invalid/lxc/user/1", "node/1/invalid/user/1", "node/1/lxc/user/invalid", "node/1/lxc/user/1/"} {
-		steps = append(steps, resource.TestStep{
-			Config:        config,
-			ResourceName:  relayAddress,
-			ImportState:   true,
-			ImportStateId: id,
-			ExpectError:   relayImportErrorPattern("must have the form <node>/<vmid>/<kind>/<username>/<password_version>, optionally followed by an absolute file path such as /etc/msmtprc"),
-		})
+		steps = append(steps, failures.importStep(config, id, formatMessage, noPreparation))
 	}
 	segments[3] = username + "-mismatch"
-	steps = append(steps, resource.TestStep{
-		Config:        config,
-		ResourceName:  relayAddress,
-		ImportState:   true,
-		ImportStateId: strings.Join(segments, "/"),
-		ExpectError:   relayImportErrorPattern("the user line in the account smtp2go section does not match the import username " + segments[3]),
-	})
+	mismatchMessage := "the user line in the account smtp2go section does not match the import username " + segments[3]
+	steps = append(steps, failures.importStep(config, strings.Join(segments, "/"), mismatchMessage, noPreparation))
 	return steps
 }
 
@@ -482,13 +660,13 @@ func relayAPIKey(t *testing.T) string {
 	return key
 }
 
-func relayTestUsername(t *testing.T) string {
+func relayRandomValue(t *testing.T, prefix string) string {
 	t.Helper()
 	suffix := make([]byte, relayUserSuffixBytes)
 	if _, err := rand.Read(suffix); err != nil {
 		t.Fatal(err)
 	}
-	return relayUserPrefix + hex.EncodeToString(suffix)
+	return prefix + hex.EncodeToString(suffix)
 }
 
 func relayUserRequest(apiKey string, username string, endpoint string) ([]byte, error) {
@@ -560,10 +738,14 @@ func TestAccMailRelayImport(t *testing.T) {
 	apiKey := relayAPIKey(t)
 	t.Setenv(relayKeyEnvironment, apiKey)
 	guest.useTestDirectory()
-	username := relayTestUsername(t)
+	username := relayRandomValue(t, relayUserPrefix)
 	t.Logf("SMTP2GO test username: %s", username)
 	t.Cleanup(func() { removeRelayUser(t, apiKey, username) })
 	path := testDirectory + "/" + relayFileName
+	stateDirectory := t.TempDir()
+	t.Setenv(relayTempDirVariable, stateDirectory)
+	failures := &relayImportFailures{guest: guest, path: path, marker: relayRandomValue(t, relayMarkerPrefix)}
+	expectStateFilesOmitPassword := guest.expectStateFilesOmitRelayPassword(stateDirectory, path)
 
 	firstConfig := guest.relayConfig(username, path, relayFirstVersion)
 	secondConfig := guest.relayConfig(username, path, relaySecondVersion)
@@ -606,6 +788,9 @@ func TestAccMailRelayImport(t *testing.T) {
 		if got := states[0].Attributes["sha256"]; got != createdHash {
 			return fmt.Errorf("imported sha256 is %s, want %s", got, createdHash)
 		}
+		if err := expectStateFilesOmitPassword(); err != nil {
+			return err
+		}
 		return guest.checkImportOmitsRelayPassword(path)(states)
 	}
 
@@ -623,11 +808,12 @@ func TestAccMailRelayImport(t *testing.T) {
 			),
 		},
 	}
-	steps = append(steps, guest.invalidRelayImportSteps(firstConfig, importID, path)...)
+	steps = append(steps, guest.invalidRelayImportSteps(failures, firstConfig, importID, path)...)
 	steps = append(steps,
 		resource.TestStep{
-			Config: guest.relayRemovedConfig(),
-			Check:  checkGuest(expectCreatedFile),
+			PreConfig: failures.requireChecked,
+			Config:    guest.relayRemovedConfig(),
+			Check:     checkGuest(expectCreatedFile),
 		},
 		resource.TestStep{
 			Config:             firstConfig,
@@ -658,11 +844,13 @@ func TestAccMailRelayImport(t *testing.T) {
 				checkGuest(expectRotatedFile),
 				checkGuest(guest.expectRelayReady(path, apiKey, username)),
 				guest.checkStateOmitsRelayPassword(path),
+				checkGuest(expectStateFilesOmitPassword),
 			),
 		},
 	)
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		ErrorCheck:               failures.check,
 		CheckDestroy: checkGuest(func() error {
 			if guest.exists(path) {
 				return fmt.Errorf("%s still exists after destroy", path)
