@@ -47,7 +47,7 @@ const (
 	relayResourceType       = "pveguest_mail_relay"
 	relayTempDirVariable    = "TF_ACC_TEMP_DIR"
 	relayStateFilePrefix    = "terraform.tfstate"
-	relayMarkerPrefix       = "pveguest-acc-marker-"
+	relaySyntheticPrefix    = "pveguestaccsynthetic"
 	relayFileName           = "msmtprc"
 	relayUserPrefix         = "pveguest-acc-"
 	relayUserSuffixBytes    = 4
@@ -499,13 +499,13 @@ func relayPrivateStateOmits(encoded string, password string) error {
 	return nil
 }
 
-// relayImportFailures stores the expected import error pattern, guest, guest
-// file path, and marker used in malformed file copies.
+// relayImportFailures stores the guest, guest file path, synthetic password,
+// and expected error pattern for the current import step.
 type relayImportFailures struct {
-	guest   *testGuest
-	path    string
-	marker  string
-	pending *regexp.Regexp
+	guest     *testGuest
+	path      string
+	synthetic string
+	pending   *regexp.Regexp
 }
 
 // importStep returns an import step that records the expected error pattern
@@ -549,7 +549,24 @@ func (failures *relayImportFailures) check(err error) error {
 	if credentialErr != nil {
 		return credentialErr
 	}
-	return relayImportErrorCheck(err, pattern, credentials.password, failures.marker)
+	return relayImportErrorCheck(err, pattern, credentials.password, failures.synthetic)
+}
+
+// replaceRelayPassword replaces the password in every line that starts with
+// password and has exactly two fields. It returns the updated content and
+// reports whether it rewrote at least one line.
+func replaceRelayPassword(content string, password string) (string, bool) {
+	var replaced strings.Builder
+	found := false
+	for line := range strings.Lines(content) {
+		fields := strings.Fields(line)
+		if len(fields) == relayLineFields && fields[0] == relayPasswordKey {
+			line = relayPasswordKey + " " + password + "\n"
+			found = true
+		}
+		replaced.WriteString(line)
+	}
+	return replaced.String(), found
 }
 
 // relayImportErrorCheck rejects output that contains a secret or does not
@@ -558,7 +575,7 @@ func relayImportErrorCheck(err error, pattern *regexp.Regexp, secrets ...string)
 	output := err.Error()
 	for _, secret := range secrets {
 		if strings.Contains(output, secret) {
-			return errors.New("the import error output contains the mail password or marker")
+			return errors.New("import error output contains the mail password or synthetic password")
 		}
 	}
 	if !pattern.MatchString(output) {
@@ -626,13 +643,14 @@ func (g *testGuest) invalidRelayImportSteps(
 	steps := []resource.TestStep{
 		failures.importStep(config, invalidID, "the file "+invalidPath+" does not exist.", noPreparation),
 	}
-	markerLine := "# " + failures.marker + "\n"
 	for _, testCase := range cases {
 		steps = append(steps, failures.importStep(config, invalidID, testCase.message, func() {
-			content := g.readFile(path)
+			content, replaced := replaceRelayPassword(g.readFile(path), failures.synthetic)
+			if !replaced {
+				g.t.Fatalf("guest file %s does not have a password line to replace", path)
+			}
 			g.mustRun("cp", "--", path, invalidPath)
-			invalidContent := strings.Replace(content, testCase.oldLine, testCase.newLine, 1)
-			g.writeFile(invalidPath, invalidContent+markerLine)
+			g.writeFile(invalidPath, strings.Replace(content, testCase.oldLine, testCase.newLine, 1))
 		}))
 	}
 	formatMessage := "must have the form <node>/<vmid>/<kind>/<username>/<password_version>, " +
@@ -744,7 +762,7 @@ func TestAccMailRelayImport(t *testing.T) {
 	path := testDirectory + "/" + relayFileName
 	stateDirectory := t.TempDir()
 	t.Setenv(relayTempDirVariable, stateDirectory)
-	failures := &relayImportFailures{guest: guest, path: path, marker: relayRandomValue(t, relayMarkerPrefix)}
+	failures := &relayImportFailures{guest: guest, path: path, synthetic: relayRandomValue(t, relaySyntheticPrefix)}
 	expectStateFilesOmitPassword := guest.expectStateFilesOmitRelayPassword(stateDirectory, path)
 
 	firstConfig := guest.relayConfig(username, path, relayFirstVersion)
