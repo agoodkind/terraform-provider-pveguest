@@ -682,7 +682,7 @@ make testacc \
 | `PVEGUEST_ACC_INSECURE` | `true` skips TLS certificate verification. The default is `false`. |
 | `PVEGUEST_ACC_KERNEL_MODULE` | Module from the node allowlist to use in the acceptance test. The test skips when unset. |
 | `PVEGUEST_ACC_HOSTNIC_LINK` | Host interface to use in the acceptance test. The test skips when unset. |
-| `PVEGUEST_ACC_VM_VMID` | ID of a stopped test VM on `PVEGUEST_ACC_NODE`. The token needs `VM.Audit` and `VM.Config.Vsock` on `/vms/<vmid>`. The test sets and deletes `vsock` and restores its earlier value at the end. The test fails if `TF_ACC` is set and this variable is unset. |
+| `PVEGUEST_ACC_VM_VMID` | ID of a stopped test VM on `PVEGUEST_ACC_NODE`. The token needs `VM.Audit`, `VM.Config.Vsock`, and `VM.PowerMgmt` on `/vms/<vmid>`. The test sets and deletes `vsock`, starts and stops the VM, and restores the earlier `vsock` value at the end. The test fails if `TF_ACC` is set and this variable is unset. |
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 
