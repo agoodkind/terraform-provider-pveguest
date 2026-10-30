@@ -211,7 +211,7 @@ func (r *mailRelayResource) ImportState(ctx context.Context, req resource.Import
 		return
 	}
 	guest := transport.Guest{Node: importID.node, VMID: importID.vmid, Kind: importID.kind}
-	guestHash, found, err := readGuestSHA256(ctx, r.data.client, guest, importID.path)
+	values, guestHash, found, err := readRelayFile(ctx, r.data.client, guest, importID.path, importID.username)
 	if err != nil {
 		resp.Diagnostics.AddError(importRelaySummary, err.Error())
 		return
@@ -221,11 +221,6 @@ func (r *mailRelayResource) ImportState(ctx context.Context, req resource.Import
 			importRelaySummary,
 			fmt.Sprintf("%s: the file %s does not exist.", guest, importID.path),
 		)
-		return
-	}
-	values, err := readRelayFile(ctx, r.data.client, guest, importID.path, importID.username)
-	if err != nil {
-		resp.Diagnostics.AddError(importRelaySummary, err.Error())
 		return
 	}
 	writeID, err := newWriteID()
@@ -496,22 +491,27 @@ func parseRelayImportID(id string) (relayImportID, error) {
 	return parsed, nil
 }
 
-// readRelayFile reads the guest file with cat.
-// Its error omits standard output because that output contains the password.
+// readRelayFile runs cat in the guest and parses its output with parseRelayFile.
+// It uses hashHex to hash the same output and returns the host, port, from value,
+// hexadecimal hash, file existence flag, and error. A missing file returns false and a nil error.
+// Errors omit standard output because it contains the password.
 func readRelayFile(
 	ctx context.Context,
 	client *transport.Client,
 	guest transport.Guest,
 	filePath string,
 	username string,
-) (relayFileValues, error) {
+) (relayFileValues, string, bool, error) {
 	readCommand := guestCommand("cat", "--", filePath)
 	result, err := runReadOnlyGuest(ctx, client, guest, readCommand)
 	if err != nil {
-		return relayFileValues{}, err
+		return relayFileValues{}, "", false, err
 	}
 	if result.ExitCode != 0 {
-		return relayFileValues{}, fmt.Errorf(
+		if strings.Contains(string(result.Stderr), missingFileMessage) {
+			return relayFileValues{}, "", false, nil
+		}
+		return relayFileValues{}, "", false, fmt.Errorf(
 			"%s: command %s exited with status %d: %s",
 			guest,
 			transport.QuoteCommand(readCommand.Argv),
@@ -525,9 +525,9 @@ func readRelayFile(
 			ctx, "mail relay file of a guest is malformed",
 			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "path", filePath, "err", err,
 		)
-		return relayFileValues{}, fmt.Errorf("%s: file %s: %w", guest, filePath, err)
+		return relayFileValues{}, "", false, fmt.Errorf("%s: file %s: %w", guest, filePath, err)
 	}
-	return values, nil
+	return values, hashHex(result.Stdout), true, nil
 }
 
 // parseRelayFile reads and validates the host, port, user, and from fields
