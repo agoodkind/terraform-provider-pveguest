@@ -1,7 +1,6 @@
 package provider
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"regexp"
@@ -33,9 +32,6 @@ const (
 	// ImportState sets this private state key, and Update deletes it after the
 	// first successful apply.
 	importedEntry = "imported"
-
-	// ModifyPlan records whether the first import plan can skip the restart.
-	skipRestartEntry = "skip_import_restart"
 )
 
 var (
@@ -43,8 +39,7 @@ var (
 
 	missingUnitMessages = []string{missingFileMessage, "does not exist", "not found"}
 
-	importedMarker        = []byte(`true`)
-	restartRequiredMarker = []byte(`false`)
+	importedMarker = []byte(`true`)
 )
 
 type unitFileState string
@@ -184,39 +179,10 @@ func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.Impo
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, importedMarker)...)
 }
 
-// ModifyPlan records whether Update can skip the restart after import.
-func (r *systemdUnitResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
-	if req.Plan.Raw.IsNull() || req.State.Raw.IsNull() {
-		return
-	}
-	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
-	resp.Diagnostics.Append(diagnostics...)
-	if resp.Diagnostics.HasError() || imported == nil {
-		return
-	}
-	decision, diagnostics := req.Private.GetKey(ctx, skipRestartEntry)
-	resp.Diagnostics.Append(diagnostics...)
-	if resp.Diagnostics.HasError() || decision != nil {
-		return
-	}
-	var restartOn types.Map
-	resp.Diagnostics.Append(resp.Plan.GetAttribute(ctx, path.Root("restart_on"), &restartOn)...)
-	if resp.Diagnostics.HasError() {
-		return
-	}
-	skipRestart := restartRequiredMarker
-	if isKnownMap(restartOn) {
-		skipRestart = importedMarker
-	}
-	resp.Diagnostics.Append(resp.Private.SetKey(ctx, skipRestartEntry, skipRestart)...)
-}
-
-func isKnownMap(value types.Map) bool {
-	if value.IsUnknown() {
-		return false
-	}
+func hasOnlyImportedWriteIDs(value types.Map) bool {
 	for _, element := range value.Elements() {
-		if element.IsUnknown() {
+		text, isString := element.(types.String)
+		if !isString || text.IsNull() || text.IsUnknown() || !isImportedWriteID(text.ValueString()) {
 			return false
 		}
 	}
@@ -336,15 +302,16 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	skipRestart, diagnostics := req.Private.GetKey(ctx, skipRestartEntry)
+	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	restart := !plan.RestartOn.Equal(state.RestartOn)
-	// Only a known dependency baseline permits skipping the first restart.
-	if bytes.Equal(skipRestart, importedMarker) && state.RestartOn.IsNull() {
+	// The first Update after import skips the restart and systemctl reenable
+	// when prior restart_on is null and every planned value starts with import-.
+	if imported != nil && state.RestartOn.IsNull() && hasOnlyImportedWriteIDs(plan.RestartOn) {
 		restart = false
 	}
 	if err := r.apply(ctx, plan, restart); err != nil {
@@ -352,7 +319,6 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 		return
 	}
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, nil)...)
-	resp.Diagnostics.Append(resp.Private.SetKey(ctx, skipRestartEntry, nil)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

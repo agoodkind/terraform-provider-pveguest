@@ -47,13 +47,18 @@ const (
 
 	fileImportFormat  = "<node>/<vmid>/<kind>/<absolute path>"
 	fileImportSummary = "Cannot import file"
+
+	// importedWriteIDPrefix distinguishes imported write_id values from random
+	// write_id values.
+	importedWriteIDPrefix = "import-"
 )
 
 var (
-	absolutePathPattern = regexp.MustCompile(`^/[^\x00]*[^/\x00]$`)
-	fileModePattern     = regexp.MustCompile(`^[0-7]{4}$`)
-	accountNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$`)
-	sha256Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	absolutePathPattern    = regexp.MustCompile(`^/[^\x00]*[^/\x00]$`)
+	fileModePattern        = regexp.MustCompile(`^[0-7]{4}$`)
+	accountNamePattern     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$`)
+	sha256Pattern          = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	importedWriteIDPattern = regexp.MustCompile(fmt.Sprintf(`^%s[0-9a-f]{%d}$`, importedWriteIDPrefix, writeIDBytes*2))
 )
 
 type fileResource struct {
@@ -167,8 +172,8 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			},
 			"write_id": schema.StringAttribute{
 				Computed: true,
-				Description: "Identifier that changes each time an apply writes the content, mode, owner, or group. " +
-					"Import derives the initial value from the guest content hash. A rewrite after drift produces the same sha256 and a new write_id.",
+				Description: "The provider assigns a new random write_id whenever an apply writes the content, mode, owner, or group. " +
+					"After import, Read sets write_id to import- followed by the first 16 hexadecimal characters of the guest sha256.",
 			},
 		}),
 	}
@@ -312,9 +317,10 @@ func (r *fileResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	state.Owner = types.StringValue(status.Owner)
 	state.Group = types.StringValue(status.Group)
 	state.SHA256 = types.StringValue(status.SHA256)
-	// Read derives write_id from the guest sha256 for an imported file.
+	// Read sets a null write_id to import- followed by the first 16 characters
+	// of the guest sha256.
 	if state.WriteID.IsNull() {
-		state.WriteID = types.StringValue(status.SHA256[:writeIDBytes*2])
+		state.WriteID = types.StringValue(importedWriteID(status.SHA256))
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -636,6 +642,14 @@ func newWriteID() (string, error) {
 		return "", fmt.Errorf("generate write_id: %w", err)
 	}
 	return hex.EncodeToString(identifier), nil
+}
+
+func importedWriteID(hash string) string {
+	return importedWriteIDPrefix + hash[:writeIDBytes*2]
+}
+
+func isImportedWriteID(value string) bool {
+	return importedWriteIDPattern.MatchString(value)
 }
 
 func validateCommandLine(template string, temporaryPath string) string {
