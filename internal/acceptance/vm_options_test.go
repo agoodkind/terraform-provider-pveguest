@@ -2,12 +2,19 @@ package acceptance_test
 
 import (
 	"context"
+	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 	"github.com/hashicorp/terraform-plugin-testing/plancheck"
@@ -27,14 +34,28 @@ const (
 
 	// The comparison omits digest because Proxmox recomputes it on every write.
 	configDigestKey = "digest"
+	vmNameKey       = "name"
 
 	vmOptionsPendingCount = "pending.%"
+
+	permissionsPath    = "/api2/json/access/permissions"
+	permissionsTimeout = 30 * time.Second
+	vmACLPathPrefix    = "/vms/"
+	tokenAuthScheme    = "PVEAPIToken="
+	authHeader         = "Authorization"
 )
+
+// TestAccVMOptions requires these token privileges on the test VM.
+var requiredVMPrivileges = []string{"VM.Audit", "VM.Config.Vsock"}
 
 var (
 	everyConfigKey    = regexp.MustCompile(`.*`)
 	vmOptionsKeyError = regexp.MustCompile(`must be vsock`)
 )
+
+type permissionsResponse struct {
+	Data map[string]map[string]int `json:"data"`
+}
 
 func vmOptionsConfig(node string, nodeConfig transport.NodeConfig, vmid int64, key string, value string) string {
 	return fmt.Sprintf(`
@@ -76,6 +97,72 @@ func vmConfigWithoutDigest(client *transport.Client, guest transport.Guest) (map
 	return config, nil
 }
 
+// tokenPrivileges returns sorted token privilege names for an ACL path.
+func tokenPrivileges(t *testing.T, nodeConfig transport.NodeConfig, vmid int64) []string {
+	t.Helper()
+	aclPath := vmACLPathPrefix + strconv.FormatInt(vmid, 10)
+	query := url.Values{"path": {aclPath}}
+	address := strings.TrimRight(nodeConfig.Endpoint, "/") + permissionsPath + "?" + query.Encode()
+
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	tlsConfig.InsecureSkipVerify = nodeConfig.Insecure
+	httpClient := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+		Timeout:   permissionsTimeout,
+	}
+	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, address, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set(authHeader, tokenAuthScheme+nodeConfig.APIToken)
+	response, err := httpClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET %s: %v", permissionsPath, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s returned HTTP %d", permissionsPath, response.StatusCode)
+	}
+	var permissions permissionsResponse
+	if err := json.NewDecoder(response.Body).Decode(&permissions); err != nil {
+		t.Fatalf("Cannot decode the GET %s response: %v", permissionsPath, err)
+	}
+	privileges := slices.Collect(maps.Keys(permissions.Data[aclPath]))
+	slices.Sort(privileges)
+	return privileges
+}
+
+// restoreVMOptions restores the earlier vsock state and checks the VM config
+// against the config from before the test.
+func restoreVMOptions(t *testing.T, client *transport.Client, guest transport.Guest, before map[string]string) {
+	t.Helper()
+	current, err := vmConfigWithoutDigest(client, guest)
+	if err != nil {
+		t.Errorf("Cannot read VM %d config for restore: %v", guest.VMID, err)
+		return
+	}
+	prior, hadVsock := before[vsockKey]
+	_, hasVsock := current[vsockKey]
+	switch {
+	case hadVsock && current[vsockKey] != prior:
+		err = client.SetGuestOptions(context.Background(), guest, map[string]string{vsockKey: prior}, nil)
+	case !hadVsock && hasVsock:
+		err = client.SetGuestOptions(context.Background(), guest, nil, []string{vsockKey})
+	}
+	if err != nil {
+		t.Errorf("Cannot restore %s on VM %d: %v", vsockKey, guest.VMID, err)
+		return
+	}
+	restored, err := vmConfigWithoutDigest(client, guest)
+	if err != nil {
+		t.Errorf("Cannot read VM %d config after restore: %v", guest.VMID, err)
+		return
+	}
+	if !maps.Equal(restored, before) {
+		t.Errorf("VM %d config after restore differs from the config before the test: after restore: %v; before test: %v", guest.VMID, restored, before)
+	}
+}
+
 func TestAccVMOptions(t *testing.T) {
 	if os.Getenv(acceptanceVariable) == "" {
 		t.Skipf("%s is not set", acceptanceVariable)
@@ -96,9 +183,21 @@ func TestAccVMOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, found := before[vsockKey]; found {
-		t.Fatalf("vm %d already has %s; the test requires a VM without it", vmid, vsockKey)
+	prior, hadVsock := before[vsockKey]
+	privileges := tokenPrivileges(t, nodeConfig, vmid)
+	t.Logf("Test VM identity: node %s, VM ID %d, name %q", node, vmid, before[vmNameKey])
+	t.Logf("Before the test, VM config key %s was present: %t, value: %q", vsockKey, hadVsock, prior)
+	t.Logf("Token privileges on %s%d: %s", vmACLPathPrefix, vmid, strings.Join(privileges, ","))
+	for _, required := range requiredVMPrivileges {
+		if !slices.Contains(privileges, required) {
+			t.Fatalf("The token does not have %s on %s%d", required, vmACLPathPrefix, vmid)
+		}
 	}
+	t.Cleanup(func() { restoreVMOptions(t, client, guest, before) })
+
+	// Destroy deletes vsock and leaves the other VM config values unchanged.
+	afterDestroy := maps.Clone(before)
+	delete(afterDestroy, vsockKey)
 
 	config := vmOptionsConfig(node, nodeConfig, vmid, vsockKey, vsockEnabled)
 	expectNodeValue := func(_ *terraform.State) error {
@@ -118,8 +217,8 @@ func TestAccVMOptions(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			if !maps.Equal(after, before) {
-				return fmt.Errorf("VM %d config after destroy differs from before the test: after: %v; before: %v", vmid, after, before)
+			if !maps.Equal(after, afterDestroy) {
+				return fmt.Errorf("VM %d config after destroy: %v; expected config: %v", vmid, after, afterDestroy)
 			}
 			return nil
 		},
