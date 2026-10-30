@@ -252,6 +252,7 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newHostKernelModulesResource,
 		newContainerOptionsResource,
 		newContainerPowerResource,
+		newVMOptionsResource,
 	}
 }
 

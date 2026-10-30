@@ -90,6 +90,13 @@ func TestAccContainerOptions(t *testing.T) {
 			if _, found := after[hostNicKey]; found {
 				return fmt.Errorf("container %d still has %s after destroy", vmid, hostNicKey)
 			}
+			pending, err := client.GetContainerPending(context.Background(), node, vmid)
+			if err != nil {
+				return err
+			}
+			if _, found := pending[hostNicKey]; found {
+				return fmt.Errorf("container %d still lists %s as pending after destroy", vmid, hostNicKey)
+			}
 			return nil
 		},
 		Steps: []resource.TestStep{
