@@ -169,7 +169,12 @@ func (g *testGuest) writeFile(path string, content string) {
 
 func (g *testGuest) readFile(path string) string {
 	g.t.Helper()
-	return g.mustRun("cat", "--", path)
+	argv := []string{"cat", "--", path}
+	result := g.runReadOnly(argv...)
+	if result.ExitCode != 0 {
+		g.t.Fatalf("%q exited with status %d: %s", argv, result.ExitCode, result.Stderr)
+	}
+	return string(result.Stdout)
 }
 
 func (g *testGuest) exists(path string) bool {

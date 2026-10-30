@@ -309,8 +309,9 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	}
 
 	restart := !plan.RestartOn.Equal(state.RestartOn)
-	// The first Update after import skips the restart and systemctl reenable
-	// when prior restart_on is null and every planned value starts with import-.
+	// If the import key exists, prior restart_on is null, and every planned value
+	// matches import- followed by exactly 16 lowercase hexadecimal characters,
+	// Update skips the restart and systemctl reenable.
 	if imported != nil && state.RestartOn.IsNull() && hasOnlyImportedWriteIDs(plan.RestartOn) {
 		restart = false
 	}
