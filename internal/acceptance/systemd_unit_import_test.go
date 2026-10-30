@@ -221,11 +221,18 @@ func expectImportedWriteID(writeID string, wantImported bool) error {
 	return nil
 }
 
+// expectImportedAttributes checks the imported test unit's attributes.
 func expectImportedAttributes(states []*terraform.InstanceState) error {
-	if len(states) != 1 {
-		return fmt.Errorf("import produced %d resources, want 1", len(states))
+	var unitStates []*terraform.InstanceState
+	for _, state := range states {
+		if state.Attributes["name"] == testImportService {
+			unitStates = append(unitStates, state)
+		}
 	}
-	attributes := states[0].Attributes
+	if len(unitStates) != 1 {
+		return fmt.Errorf("import returned %d states with a name matching unit %s", len(unitStates), testImportService)
+	}
+	attributes := unitStates[0].Attributes
 	want := map[string]string{
 		"name":             testImportService,
 		"enabled":          "true",
