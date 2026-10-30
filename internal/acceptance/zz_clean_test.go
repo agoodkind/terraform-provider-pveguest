@@ -20,6 +20,7 @@ func TestAccGuestIsClean(t *testing.T) {
 		guestWorkDirectory,
 		guestCAPath,
 		guestCALink,
+		guestCAHashLink,
 	}
 	for _, path := range leftoverPaths {
 		if guest.exists(path) {

@@ -58,6 +58,8 @@ const (
 	guestServerBase       = "https://127.0.0.1:" + guestServerPort
 	guestCAPath           = "/usr/local/share/ca-certificates/pveguest-acc-header.crt"
 	guestCALink           = "/etc/ssl/certs/pveguest-acc-header.pem"
+	guestCAHash           = "e32fa2da"
+	guestCAHashLink       = "/etc/ssl/certs/" + guestCAHash + ".0"
 	guestServerSource     = "./testdata/headerserver"
 	guestServerCommonName = "pveguest-acc-header"
 	guestCertificateSpan  = time.Hour
@@ -262,7 +264,7 @@ func (g *testGuest) stopHeaderServer() {
 	unit := guestServerUnit + ".service"
 	g.run(nil, "systemctl", "stop", "--", unit)
 	g.run(nil, "systemctl", "reset-failed", "--", unit)
-	g.mustRun("rm", "-f", "--", guestCAPath)
+	g.mustRun("rm", "-f", "--", guestCAPath, guestCALink, guestCAHashLink)
 	g.mustRun("update-ca-certificates")
 	g.mustRun("rm", "-rf", "--", guestWorkDirectory)
 }
@@ -291,6 +293,9 @@ func (g *testGuest) startHeaderServer(t *testing.T, content []byte, token string
 
 	g.putFile(guestCAPath, certificatePEM, guestPublicMode)
 	g.mustRun("update-ca-certificates")
+	if hash := strings.TrimSpace(g.mustRun("openssl", "x509", "-hash", "-noout", "-in", guestCAPath)); hash != guestCAHash {
+		t.Fatalf("the generated CA has subject hash %s, the cleanup removes the link for %s", hash, guestCAHash)
+	}
 
 	g.mustRun(
 		"systemd-run", "--unit="+guestServerUnit, "--collect", binary,
