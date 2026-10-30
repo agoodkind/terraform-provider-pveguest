@@ -491,6 +491,22 @@ The resource does not start, stop, or restart the container. Proxmox applies cha
 
 Import IDs use the format `<node>/<vmid>`.
 
+## pveguest_vm_options
+
+The resource uses the same arguments, computed attribute, apply, Read, Destroy, and import behavior as [pveguest_container_options](#pveguest_container_options), for a VM instead of a container.
+
+The only supported key is `vsock`. A value of `1` adds a virtio vsock device (`vhost-vsock-pci`) with the VM ID as its guest CID. A value of `0` disables it. The node must run the proxmox-overlays qemu-server patch because stock Proxmox VE does not have `vsock`.
+
+The resource uses these API paths and privileges:
+
+| Operation | API path | Privilege |
+|---|---|---|
+| Read config | `GET /nodes/{node}/qemu/{vmid}/config` | `VM.Audit` on `/vms/<vmid>` |
+| Read pending | `GET /nodes/{node}/qemu/{vmid}/pending` | `VM.Audit` on `/vms/<vmid>` |
+| Write config | `PUT /nodes/{node}/qemu/{vmid}/config` | `VM.Config.Vsock` on `/vms/<vmid>` |
+
+The resource does not start, stop, or restart the VM. For a running VM, Proxmox lists a `vsock` change as pending and applies it at the next VM start. For a stopped VM, Proxmox writes the value to the config at once.
+
 ## pveguest_container_power
 
 `pveguest_container_power` sets the run state of one existing Proxmox LXC container through the Proxmox API. The resource does not create, delete, or configure the container.
@@ -666,6 +682,7 @@ make testacc \
 | `PVEGUEST_ACC_INSECURE` | `true` skips TLS certificate verification. The default is `false`. |
 | `PVEGUEST_ACC_KERNEL_MODULE` | Module from the node allowlist to use in the acceptance test. The test skips when unset. |
 | `PVEGUEST_ACC_HOSTNIC_LINK` | Host interface to use in the acceptance test. The test skips when unset. |
+| `PVEGUEST_ACC_VM_VMID` | ID of a stopped test VM on `PVEGUEST_ACC_NODE` that does not have `vsock` set. The test sets and removes `vsock` on the VM. The test fails if `TF_ACC` is set and this variable is unset. |
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 

@@ -21,6 +21,7 @@ const (
 	endpointVariable   = "PVEGUEST_ACC_ENDPOINT"
 	tokenFileVariable  = "PVEGUEST_ACC_TOKEN_FILE"
 	vmidVariable       = "PVEGUEST_ACC_VMID"
+	vmVMIDVariable     = "PVEGUEST_ACC_VM_VMID"
 	kindVariable       = "PVEGUEST_ACC_KIND"
 	insecureVariable   = "PVEGUEST_ACC_INSECURE"
 
