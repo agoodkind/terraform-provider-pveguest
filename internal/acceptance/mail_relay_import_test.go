@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/smtp"
@@ -29,8 +30,10 @@ const (
 	relayKeyEnvironment     = "PVEGUEST_SMTP2GO_API_KEY"
 	relayAPIKeyHeader       = "X-Smtp2go-Api-Key"
 	relayRemoveURL          = "https://api.smtp2go.com/v3/users/smtp/remove"
+	relayViewURL            = "https://api.smtp2go.com/v3/users/smtp/view"
 	relayJSONMediaType      = "application/json"
 	relayRequestTimeout     = 30 * time.Second
+	relayResponseLimit      = 1 << 20
 	relaySMTPTimeout        = 30 * time.Second
 	relayAddress            = "pveguest_mail_relay.test"
 	relayFileName           = "msmtprc"
@@ -92,6 +95,18 @@ func (auth relayLoginAuth) Next(challenge []byte, more bool) ([]byte, error) {
 
 type relayRemoveRequest struct {
 	Username string `json:"username"`
+}
+
+type relayViewUser struct {
+	Username string `json:"username"`
+}
+
+type relayViewData struct {
+	Results *[]relayViewUser `json:"results"`
+}
+
+type relayViewResponse struct {
+	Data relayViewData `json:"data"`
 }
 
 func (g *testGuest) relayConfig(username string, path string, passwordVersion int) string {
@@ -259,6 +274,14 @@ func (check relayPasswordPlanCheck) CheckPlan(_ context.Context, request planche
 	}
 }
 
+func relayImportErrorPattern(message string) *regexp.Regexp {
+	words := strings.Fields(message)
+	for index, word := range words {
+		words[index] = regexp.QuoteMeta(word)
+	}
+	return regexp.MustCompile(strings.Join(words, `\s+`))
+}
+
 // invalidRelayImportSteps checks import errors through OpenTofu and real guest files.
 func (g *testGuest) invalidRelayImportSteps(config string, importID string, path string) []resource.TestStep {
 	invalidPath := path + ".invalid"
@@ -270,14 +293,14 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 		newLine string
 		message string
 	}{
-		{oldLine: "host " + relayHost + "\n", message: "does not contain a host line"},
-		{oldLine: "port 587\n", message: "does not contain a port line"},
-		{oldLine: "user " + username + "\n", message: "does not contain a user line"},
-		{oldLine: "from " + relayFrom + "\n", message: "does not contain a from line"},
-		{oldLine: "host " + relayHost, newLine: "host invalid/host", message: "host line.*must contain only"},
-		{oldLine: "from " + relayFrom, newLine: "from invalid", message: "from line.*must contain exactly one @"},
-		{oldLine: "port 587", newLine: "port invalid", message: "port line.*must contain a number"},
-		{oldLine: "host " + relayHost, newLine: "host " + relayHost + "\nhost " + relayHost, message: "must contain exactly one host line"},
+		{oldLine: "host " + relayHost + "\n", message: "the account smtp2go section does not contain a host line"},
+		{oldLine: "port 587\n", message: "the account smtp2go section does not contain a port line"},
+		{oldLine: "user " + username + "\n", message: "the account smtp2go section does not contain a user line"},
+		{oldLine: "from " + relayFrom + "\n", message: "the account smtp2go section does not contain a from line"},
+		{oldLine: "host " + relayHost, newLine: "host invalid/host", message: "the host line in the account smtp2go section must contain only letters, digits, periods, colons, or hyphens"},
+		{oldLine: "from " + relayFrom, newLine: "from invalid", message: "the from line in the account smtp2go section must contain exactly one @ with nonempty text on both sides and without whitespace"},
+		{oldLine: "port 587", newLine: "port invalid", message: "the port line in the account smtp2go section must contain a number from 1 through 65535"},
+		{oldLine: "host " + relayHost, newLine: "host " + relayHost + "\nhost " + relayHost, message: "the account smtp2go section must contain exactly one host line"},
 	}
 	steps := []resource.TestStep{
 		{
@@ -285,7 +308,7 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 			ResourceName:  relayAddress,
 			ImportState:   true,
 			ImportStateId: invalidID,
-			ExpectError:   regexp.MustCompile(`does not exist`),
+			ExpectError:   relayImportErrorPattern("the file " + invalidPath + " does not exist."),
 		},
 	}
 	for _, testCase := range cases {
@@ -294,7 +317,7 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 			ResourceName:  relayAddress,
 			ImportState:   true,
 			ImportStateId: invalidID,
-			ExpectError:   regexp.MustCompile("(?s)" + testCase.message),
+			ExpectError:   relayImportErrorPattern(testCase.message),
 			PreConfig: func() {
 				content := g.readFile(path)
 				g.mustRun("cp", "--", path, invalidPath)
@@ -308,7 +331,7 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 			ResourceName:  relayAddress,
 			ImportState:   true,
 			ImportStateId: id,
-			ExpectError:   regexp.MustCompile(`must have the form`),
+			ExpectError:   relayImportErrorPattern("must have the form <node>/<vmid>/<kind>/<username>/<password_version>, optionally followed by an absolute file path such as /etc/msmtprc"),
 		})
 	}
 	segments[3] = username + "-mismatch"
@@ -317,7 +340,7 @@ func (g *testGuest) invalidRelayImportSteps(config string, importID string, path
 		ResourceName:  relayAddress,
 		ImportState:   true,
 		ImportStateId: strings.Join(segments, "/"),
-		ExpectError:   regexp.MustCompile(`(?s)user line.*does not match the import username`),
+		ExpectError:   relayImportErrorPattern("the user line in the account smtp2go section does not match the import username " + segments[3]),
 	})
 	return steps
 }
@@ -345,33 +368,59 @@ func relayTestUsername(t *testing.T) string {
 	return relayUserPrefix + hex.EncodeToString(suffix)
 }
 
-// removeRelayUser deletes the SMTP2GO test user and reports failures with
-// t.Errorf without printing the API key.
-func removeRelayUser(t *testing.T, apiKey string, username string) {
-	t.Helper()
+func relayUserRequest(apiKey string, username string, endpoint string) ([]byte, error) {
 	document, err := json.Marshal(relayRemoveRequest{Username: username})
 	if err != nil {
-		t.Errorf("encode SMTP2GO remove request: %v", err)
-		return
+		return nil, errors.New("cannot encode the SMTP2GO user request")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), relayRequestTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, relayRemoveURL, bytes.NewReader(document))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(document))
 	if err != nil {
-		t.Errorf("build SMTP2GO remove request: %v", err)
-		return
+		return nil, fmt.Errorf("build SMTP2GO user request: %w", err)
 	}
 	request.Header.Set("Content-Type", relayJSONMediaType)
 	request.Header.Set("Accept", relayJSONMediaType)
 	request.Header.Set(relayAPIKeyHeader, apiKey)
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		t.Errorf("SMTP2GO remove request for %s failed: %v", username, err)
-		return
+		return nil, fmt.Errorf("SMTP2GO user request failed: %w", err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		t.Errorf("SMTP2GO remove request for %s returned HTTP status %d", username, response.StatusCode)
+		return nil, fmt.Errorf("SMTP2GO user request returned HTTP status %d", response.StatusCode)
+	}
+	content, err := io.ReadAll(io.LimitReader(response.Body, relayResponseLimit))
+	if err != nil {
+		return nil, fmt.Errorf("read SMTP2GO user response: %w", err)
+	}
+	return content, nil
+}
+
+// removeRelayUser deletes the test user and requires an empty view result.
+// Its errors omit response bodies because SMTP2GO can return credentials.
+func removeRelayUser(t *testing.T, apiKey string, username string) {
+	t.Helper()
+	if _, err := relayUserRequest(apiKey, username, relayRemoveURL); err != nil {
+		t.Errorf("remove SMTP2GO user %s: %v", username, err)
+		return
+	}
+	content, err := relayUserRequest(apiKey, username, relayViewURL)
+	if err != nil {
+		t.Errorf("verify removal of SMTP2GO user %s: %v", username, err)
+		return
+	}
+	var response relayViewResponse
+	if err := json.Unmarshal(content, &response); err != nil {
+		t.Errorf("cannot decode the removal verification response for SMTP2GO user %s", username)
+		return
+	}
+	if response.Data.Results == nil {
+		t.Errorf("the removal verification response for SMTP2GO user %s does not contain data.results", username)
+		return
+	}
+	if len(*response.Data.Results) != 0 {
+		t.Errorf("SMTP2GO still lists user %s after removal", username)
 	}
 }
 
@@ -381,6 +430,7 @@ func TestAccMailRelayImport(t *testing.T) {
 	t.Setenv(relayKeyEnvironment, apiKey)
 	guest.useTestDirectory()
 	username := relayTestUsername(t)
+	t.Logf("SMTP2GO test username: %s", username)
 	t.Cleanup(func() { removeRelayUser(t, apiKey, username) })
 	path := testDirectory + "/" + relayFileName
 
