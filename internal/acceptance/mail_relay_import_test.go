@@ -721,8 +721,7 @@ func relayUserRequestUntil(apiKey string, username string, endpoint string, dead
 	return content, nil
 }
 
-// removeRelayUser deletes the test user and requires an empty view result.
-// Its errors omit response bodies because SMTP2GO can return credentials.
+// Omit SMTP2GO response bodies from errors because they can contain credentials.
 func removeRelayUser(t *testing.T, apiKey string, username string) {
 	t.Helper()
 	if _, err := relayUserRequest(apiKey, username, relayRemoveURL); err != nil {
