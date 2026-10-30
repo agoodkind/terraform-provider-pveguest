@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
+	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
@@ -18,12 +22,24 @@ import (
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
-const systemctlTimeoutSeconds = 300
+const (
+	systemctlTimeoutSeconds = 300
+
+	systemdUnitImportFormat  = "<node>/<vmid>/<kind>/<name>"
+	systemdUnitImportSummary = "Import systemd unit"
+	guestImportFields        = 4
+
+	// ImportState sets this private state key, and Update deletes it after the
+	// first successful apply.
+	importedEntry = "imported"
+)
 
 var (
 	unitNamePattern = regexp.MustCompile(`^[A-Za-z0-9:_.@\\-]+\.[a-z]+$`)
 
 	missingUnitMessages = []string{missingFileMessage, "does not exist", "not found"}
+
+	importedMarker = []byte(`true`)
 )
 
 type unitFileState string
@@ -133,6 +149,101 @@ func (r *systemdUnitResource) Configure(_ context.Context, req resource.Configur
 	r.data = providerDataFrom(req, resp)
 }
 
+func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parsed, isValid := splitGuestImportID(req.ID)
+	if !isValid || strings.Contains(parsed.Rest, "/") {
+		resp.Diagnostics.AddError(systemdUnitImportSummary, importIDError(req.ID, systemdUnitImportFormat))
+		return
+	}
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	attributes := schemaResp.Schema.Attributes
+	resp.Diagnostics.Append(validateImportedString(ctx, systemdUnitImportSummary, attributes, "kind", parsed.Kind)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, systemdUnitImportSummary, attributes, "name", parsed.Rest)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	imported := systemdUnitModel{
+		Node:           types.StringValue(parsed.Node),
+		VMID:           types.Int64Value(parsed.VMID),
+		Kind:           types.StringValue(parsed.Kind),
+		Name:           types.StringValue(parsed.Rest),
+		Enabled:        types.BoolNull(),
+		Active:         types.BoolNull(),
+		RestartOn:      types.MapNull(types.StringType),
+		RemoveOnDelete: types.BoolValue(false),
+	}
+	resp.Diagnostics.Append(resp.State.Set(ctx, &imported)...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, importedMarker)...)
+}
+
+func hasOnlyImportedWriteIDs(value types.Map) bool {
+	for _, element := range value.Elements() {
+		text, isString := element.(types.String)
+		if !isString || text.IsNull() || text.IsUnknown() || !isImportedWriteID(text.ValueString()) {
+			return false
+		}
+	}
+	return true
+}
+
+// guestImportID stores the parts of an import ID in the format
+// <node>/<vmid>/<kind>/<rest>.
+type guestImportID struct {
+	Node string
+	VMID int64
+	Kind string
+	// Rest contains all text after the third slash, including later slashes.
+	Rest string
+}
+
+func splitGuestImportID(id string) (guestImportID, bool) {
+	fields := strings.SplitN(id, "/", guestImportFields)
+	if len(fields) != guestImportFields || slices.Contains(fields, "") {
+		return guestImportID{}, false
+	}
+	vmid, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || vmid < 1 {
+		return guestImportID{}, false
+	}
+	return guestImportID{Node: fields[0], VMID: vmid, Kind: fields[2], Rest: fields[3]}, true
+}
+
+func importIDError(id string, format string) string {
+	return fmt.Sprintf("import ID %q must use the format %s", id, format)
+}
+
+// validateImportedString applies the schema validators for a string attribute
+// to an import ID value.
+func validateImportedString(
+	ctx context.Context,
+	summary string,
+	attributes map[string]schema.Attribute,
+	name string,
+	value string,
+) diag.Diagnostics {
+	var diagnostics diag.Diagnostics
+	attribute, isString := attributes[name].(schema.StringAttribute)
+	if !isString {
+		diagnostics.AddError(summary,
+			fmt.Sprintf("The schema does not define the string attribute %s. The provider contains a defect.", name))
+		return diagnostics
+	}
+	request := validator.StringRequest{
+		Path:           path.Root(name),
+		PathExpression: path.MatchRoot(name),
+		ConfigValue:    types.StringValue(value),
+	}
+	for _, check := range attribute.Validators {
+		var response validator.StringResponse
+		check.ValidateString(ctx, request, &response)
+		diagnostics.Append(response.Diagnostics...)
+	}
+	return diagnostics
+}
+
 func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var plan systemdUnitModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -191,11 +302,24 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
+	resp.Diagnostics.Append(diagnostics...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	restart := !plan.RestartOn.Equal(state.RestartOn)
+	// If the import key exists, prior restart_on is null, and every planned value
+	// matches import- followed by exactly 16 lowercase hexadecimal characters,
+	// Update skips the restart and systemctl reenable.
+	if imported != nil && state.RestartOn.IsNull() && hasOnlyImportedWriteIDs(plan.RestartOn) {
+		restart = false
+	}
 	if err := r.apply(ctx, plan, restart); err != nil {
 		resp.Diagnostics.AddError("Update systemd unit state", err.Error())
 		return
 	}
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, nil)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 

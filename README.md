@@ -191,7 +191,7 @@ content.
 | Attribute | Meaning |
 | --- | --- |
 | `sha256` | SHA-256 hash of the content in the guest. With `content`, the plan shows the hash before apply. |
-| `write_id` | Random identifier that changes each time an apply writes the content, mode, owner, or group. |
+| `write_id` | The provider assigns a new random `write_id` whenever an apply writes the content, mode, owner, or group. After import, Read sets `write_id` to `import-` followed by the first 16 hexadecimal characters of the guest `sha256`. |
 
 With `content_wo`, Read compares the hash of the file in the guest with the
 hash stored at the last apply. A difference produces a planned rewrite. The
@@ -202,6 +202,13 @@ Content larger than the standard input limit of one command takes several
 commands. One command truncates the temporary file, and one command per piece
 appends to it. Each piece has at most 96 KiB for either guest kind.
 The validate, mode, owner, and rename steps run after the last piece.
+
+Import IDs use the format `<node>/<vmid>/<kind>/<absolute path>`, such as
+`suburban/224/lxc//etc/example.conf`. Import reads the content hash, mode,
+owner, and group without writing the file. Read sets `write_id` to `import-`
+followed by the first 16 hexadecimal characters of the guest `sha256`. Matching
+`content`, `mode`, `owner`, and `group` keep that `write_id`. A difference plans
+a write that assigns a new random `write_id`.
 
 ## pveguest_download
 
@@ -336,6 +343,19 @@ value triggers the restart.
 Create requests a restart when `restart_on` has at least one entry. It also
 rebuilds installation links when the unit is already enabled and the
 declaration requires it to remain enabled.
+
+Import IDs use the format `<node>/<vmid>/<kind>/<name>`, such as
+`suburban/224/lxc/ssh.service`, with both `tofu import` and an `import` block.
+The provider rejects other ID shapes and shows the required format; it checks
+`kind` and `name` against the argument rules. Import fails if the unit file does
+not exist in the guest. Import sets `remove_on_delete` to `false`, and Read sets
+`enabled` and `active` from the guest. The first apply after import enables,
+disables, starts, or stops the unit as the configuration requires. During that
+apply, the provider skips the restart and `systemctl reenable` only if the prior
+`restart_on` is null and every planned `restart_on` value is `import-` followed
+by exactly 16 lowercase hexadecimal characters; any other value, including a
+literal string, restarts the unit. Every later `restart_on` change restarts the
+unit.
 
 ## pveguest_locales
 

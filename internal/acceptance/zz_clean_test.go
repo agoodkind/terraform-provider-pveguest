@@ -15,6 +15,8 @@ func TestAccGuestIsClean(t *testing.T) {
 		unitDirectory + "/timers.target.wants/" + testTimer,
 		unitDirectory + "/" + testRemovalService,
 		unitDirectory + "/multi-user.target.wants/" + testRemovalService,
+		unitDirectory + "/" + testImportService,
+		unitDirectory + "/multi-user.target.wants/" + testImportService,
 	}
 	for _, path := range leftoverPaths {
 		if guest.exists(path) {
@@ -34,6 +36,10 @@ func TestAccGuestIsClean(t *testing.T) {
 	removalState := guest.systemctlState("is-active", testRemovalService)
 	if removalState != "inactive" && removalState != "failed" {
 		t.Errorf("%s is %s after the tests, want inactive or failed", testRemovalService, removalState)
+	}
+	importState := guest.systemctlState("is-active", testImportService)
+	if importState != "inactive" && importState != "failed" {
+		t.Errorf("%s is %s after the tests, want inactive or failed", testImportService, importState)
 	}
 	t.Logf("%s: test directory, test units, and package %s are absent", guest.guest, testPackage)
 }

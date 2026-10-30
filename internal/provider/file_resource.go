@@ -44,13 +44,21 @@ const (
 	// overwrites the sha256 attribute with the guest hash, and the plan
 	// compares both to detect drift of write-only content.
 	appliedHashEntry = "applied_sha256"
+
+	fileImportFormat  = "<node>/<vmid>/<kind>/<absolute path>"
+	fileImportSummary = "Cannot import file"
+
+	// importedWriteIDPrefix distinguishes imported write_id values from random
+	// write_id values.
+	importedWriteIDPrefix = "import-"
 )
 
 var (
-	absolutePathPattern = regexp.MustCompile(`^/[^\x00]*[^/\x00]$`)
-	fileModePattern     = regexp.MustCompile(`^[0-7]{4}$`)
-	accountNamePattern  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$`)
-	sha256Pattern       = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	absolutePathPattern    = regexp.MustCompile(`^/[^\x00]*[^/\x00]$`)
+	fileModePattern        = regexp.MustCompile(`^[0-7]{4}$`)
+	accountNamePattern     = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]*\$?$`)
+	sha256Pattern          = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	importedWriteIDPattern = regexp.MustCompile(fmt.Sprintf(`^%s[0-9a-f]{%d}$`, importedWriteIDPrefix, writeIDBytes*2))
 )
 
 type fileResource struct {
@@ -164,8 +172,8 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			},
 			"write_id": schema.StringAttribute{
 				Computed: true,
-				Description: "Random identifier that changes each time an apply writes the content, mode, owner, or group. " +
-					"A rewrite after drift produces the same sha256 and a new write_id.",
+				Description: "The provider assigns a new random write_id whenever an apply writes the content, mode, owner, or group. " +
+					"After import, Read sets write_id to import- followed by the first 16 hexadecimal characters of the guest sha256.",
 			},
 		}),
 	}
@@ -173,6 +181,29 @@ func (r *fileResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 
 func (r *fileResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	r.data = providerDataFrom(req, resp)
+}
+
+func (r *fileResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parsed, isValid := splitGuestImportID(req.ID)
+	if !isValid {
+		resp.Diagnostics.AddError(fileImportSummary, importIDError(req.ID, fileImportFormat))
+		return
+	}
+	filePath := parsed.Rest
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	attributes := schemaResp.Schema.Attributes
+	resp.Diagnostics.Append(validateImportedString(ctx, fileImportSummary, attributes, "kind", parsed.Kind)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, fileImportSummary, attributes, "path", filePath)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("node"), parsed.Node)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("vmid"), parsed.VMID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("kind"), parsed.Kind)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("path"), filePath)...)
 }
 
 func (r *fileResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
@@ -286,6 +317,11 @@ func (r *fileResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	state.Owner = types.StringValue(status.Owner)
 	state.Group = types.StringValue(status.Group)
 	state.SHA256 = types.StringValue(status.SHA256)
+	// Read sets a null write_id to import- followed by the first 16 hexadecimal
+	// characters of the guest sha256.
+	if state.WriteID.IsNull() {
+		state.WriteID = types.StringValue(importedWriteID(status.SHA256))
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
@@ -606,6 +642,14 @@ func newWriteID() (string, error) {
 		return "", fmt.Errorf("generate write_id: %w", err)
 	}
 	return hex.EncodeToString(identifier), nil
+}
+
+func importedWriteID(hash string) string {
+	return importedWriteIDPrefix + hash[:writeIDBytes*2]
+}
+
+func isImportedWriteID(value string) bool {
+	return importedWriteIDPattern.MatchString(value)
 }
 
 func validateCommandLine(template string, temporaryPath string) string {
