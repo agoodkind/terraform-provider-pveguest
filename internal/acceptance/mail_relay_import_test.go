@@ -36,6 +36,10 @@ const (
 	relayRequestTimeout     = 30 * time.Second
 	relayResponseLimit      = 1 << 20
 	relaySMTPTimeout        = 30 * time.Second
+	relayReadyTimeout       = 60 * time.Second
+	relayReadyInterval      = 2 * time.Second
+	relayRejectedLoginCode  = 535
+	relayAuthOperation      = "AUTH LOGIN"
 	relayAddress            = "pveguest_mail_relay.test"
 	relayFileName           = "msmtprc"
 	relayUserPrefix         = "pveguest-acc-"
@@ -104,7 +108,9 @@ type relayRemoveRequest struct {
 }
 
 type relayViewUser struct {
-	Username string `json:"username"`
+	Username      string  `json:"username"`
+	Status        *string `json:"status"`
+	EmailPassword *string `json:"email_password"`
 }
 
 type relayViewData struct {
@@ -191,12 +197,17 @@ func (g *testGuest) relayCredentials(path string) (relayCredentials, error) {
 // relayLogin connects, starts TLS, authenticates with LOGIN, and sends QUIT
 // without sending a message.
 func relayLogin(credentials relayCredentials) error {
+	return relayLoginUntil(credentials, time.Now().Add(relaySMTPTimeout))
+}
+
+func relayLoginUntil(credentials relayCredentials, deadline time.Time) error {
 	address := net.JoinHostPort(credentials.host, credentials.port)
-	connection, err := net.DialTimeout("tcp", address, relaySMTPTimeout)
+	dialer := net.Dialer{Deadline: deadline}
+	connection, err := dialer.Dial("tcp", address)
 	if err != nil {
 		return relaySMTPFailure("connect", err)
 	}
-	if err := connection.SetDeadline(time.Now().Add(relaySMTPTimeout)); err != nil {
+	if err := connection.SetDeadline(deadline); err != nil {
 		_ = connection.Close()
 		return relaySMTPFailure("set deadline", err)
 	}
@@ -212,7 +223,7 @@ func relayLogin(credentials relayCredentials) error {
 	}
 	auth := relayLoginAuth{username: credentials.username, password: credentials.password}
 	if err := client.Auth(auth); err != nil {
-		return relaySMTPFailure("AUTH LOGIN", err)
+		return relaySMTPFailure(relayAuthOperation, err)
 	}
 	if err := client.Quit(); err != nil {
 		return relaySMTPFailure("QUIT", err)
@@ -220,23 +231,36 @@ func relayLogin(credentials relayCredentials) error {
 	return nil
 }
 
+type relaySMTPError struct {
+	operation  string
+	replyCode  int
+	errorClass string
+}
+
+func (failure *relaySMTPError) Error() string {
+	if failure.replyCode != 0 {
+		return fmt.Sprintf("SMTP %s failed with reply code %d", failure.operation, failure.replyCode)
+	}
+	return fmt.Sprintf("SMTP %s failed with error class %s", failure.operation, failure.errorClass)
+}
+
 // relaySMTPFailure excludes server reply text and credential values.
 func relaySMTPFailure(operation string, failure error) error {
 	var reply *textproto.Error
 	if errors.As(failure, &reply) {
-		return fmt.Errorf("SMTP %s failed with reply code %d", operation, reply.Code)
+		return &relaySMTPError{operation: operation, replyCode: reply.Code}
 	}
 	if errors.Is(failure, errRelayLoginChallenge) {
-		return fmt.Errorf("SMTP %s failed with error class unexpected-login-challenge", operation)
+		return &relaySMTPError{operation: operation, errorClass: "unexpected-login-challenge"}
 	}
 	if errors.Is(failure, errRelayLoginTLS) {
-		return fmt.Errorf("SMTP %s failed with error class tls-required", operation)
+		return &relaySMTPError{operation: operation, errorClass: "tls-required"}
 	}
 	var networkError net.Error
 	if errors.As(failure, &networkError) && networkError.Timeout() {
-		return fmt.Errorf("SMTP %s failed with error class timeout", operation)
+		return &relaySMTPError{operation: operation, errorClass: "timeout"}
 	}
-	return fmt.Errorf("SMTP %s failed with error class %T", operation, failure)
+	return &relaySMTPError{operation: operation, errorClass: fmt.Sprintf("%T", failure)}
 }
 
 func (g *testGuest) expectRelayLogin(path string) func() error {
@@ -246,6 +270,80 @@ func (g *testGuest) expectRelayLogin(path string) func() error {
 			return err
 		}
 		return relayLogin(credentials)
+	}
+}
+
+// expectRelayReady observes only the generated user after a credential write.
+// It retries AUTH reply 535 until one deadline without changing the credentials.
+func (g *testGuest) expectRelayReady(path string, apiKey string, username string) func() error {
+	return func() error {
+		credentials, err := g.relayCredentials(path)
+		if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(username, relayUserPrefix) || credentials.username != username {
+			return errors.New("SMTP readiness requires the generated test username")
+		}
+		started := time.Now()
+		deadline := started.Add(relayReadyTimeout)
+		if err := g.inspectRelayUser(apiKey, credentials, deadline); err != nil {
+			return err
+		}
+		return g.waitRelayLogin(credentials, started, deadline)
+	}
+}
+
+func (g *testGuest) inspectRelayUser(apiKey string, credentials relayCredentials, deadline time.Time) error {
+	content, err := relayUserRequestUntil(apiKey, credentials.username, relayViewURL, deadline)
+	if err != nil {
+		return fmt.Errorf("inspect the generated SMTP2GO user: %w", err)
+	}
+	var response relayViewResponse
+	if err := json.Unmarshal(content, &response); err != nil {
+		return errors.New("cannot decode the generated SMTP2GO user response")
+	}
+	if response.Data.Results == nil || len(*response.Data.Results) != 1 {
+		return errors.New("SMTP2GO must return exactly one generated test user")
+	}
+	user := (*response.Data.Results)[0]
+	if user.Username != credentials.username || user.Status == nil {
+		return errors.New("SMTP2GO must return the generated username and its status")
+	}
+	g.t.Logf("SMTP API status allowed: %t", *user.Status == "allowed")
+	g.t.Logf("SMTP API password present: %t", user.EmailPassword != nil)
+	if user.EmailPassword != nil {
+		g.t.Logf("SMTP API password matches guest: %t", *user.EmailPassword == credentials.password)
+	}
+	return nil
+}
+
+func (g *testGuest) waitRelayLogin(credentials relayCredentials, started time.Time, deadline time.Time) error {
+	for attempt := 1; ; attempt++ {
+		attemptDeadline := time.Now().Add(relaySMTPTimeout)
+		if deadline.Before(attemptDeadline) {
+			attemptDeadline = deadline
+		}
+		err := relayLoginUntil(credentials, attemptDeadline)
+		elapsed := time.Since(started).Round(time.Millisecond)
+		if err == nil {
+			g.t.Logf("SMTP readiness attempt %d succeeded after %s", attempt, elapsed)
+			return nil
+		}
+		g.t.Logf("SMTP readiness attempt %d failed after %s: %v", attempt, elapsed, err)
+		var failure *relaySMTPError
+		if !errors.As(err, &failure) || failure.operation != relayAuthOperation || failure.replyCode != relayRejectedLoginCode {
+			return err
+		}
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			time.Sleep(min(relayReadyInterval, remaining))
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf(
+				"SMTP readiness deadline %s expired after %s: %w",
+				deadline.UTC().Format(time.RFC3339), time.Since(started).Round(time.Millisecond), err,
+			)
+		}
 	}
 }
 
@@ -394,11 +492,19 @@ func relayTestUsername(t *testing.T) string {
 }
 
 func relayUserRequest(apiKey string, username string, endpoint string) ([]byte, error) {
+	return relayUserRequestUntil(apiKey, username, endpoint, time.Now().Add(relayRequestTimeout))
+}
+
+func relayUserRequestUntil(apiKey string, username string, endpoint string, deadline time.Time) ([]byte, error) {
 	document, err := json.Marshal(relayRemoveRequest{Username: username})
 	if err != nil {
 		return nil, errors.New("cannot encode the SMTP2GO user request")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), relayRequestTimeout)
+	requestDeadline := time.Now().Add(relayRequestTimeout)
+	if deadline.Before(requestDeadline) {
+		requestDeadline = deadline
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), requestDeadline)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(document))
 	if err != nil {
@@ -512,7 +618,7 @@ func TestAccMailRelayImport(t *testing.T) {
 			},
 			Check: resource.ComposeAggregateTestCheckFunc(
 				checkGuest(captureFile),
-				checkGuest(guest.expectRelayLogin(path)),
+				checkGuest(guest.expectRelayReady(path, apiKey, username)),
 				guest.checkStateOmitsRelayPassword(path),
 			),
 		},
@@ -550,7 +656,7 @@ func TestAccMailRelayImport(t *testing.T) {
 			},
 			Check: resource.ComposeAggregateTestCheckFunc(
 				checkGuest(expectRotatedFile),
-				checkGuest(guest.expectRelayLogin(path)),
+				checkGuest(guest.expectRelayReady(path, apiKey, username)),
 				guest.checkStateOmitsRelayPassword(path),
 			),
 		},
