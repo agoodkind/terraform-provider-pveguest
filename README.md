@@ -741,7 +741,14 @@ items at the end:
 - The sysrepo module `pveguest-acc` and its data in the `running` datastore.
   `TestAccSysrepoModuleAndData` skips when the guest has no `sysrepoctl` or
   `sysrepocfg`.
-- `TestAccMailRelayImport` creates an SMTP2GO user with a name consisting of `pveguest-acc-` followed by eight random hexadecimal characters. Test cleanup deletes the user through `POST /users/smtp/remove`. The controller needs HTTPS access to `api.smtp2go.com` and TCP access to `mail.smtp2go.com` on port 587.
+
+`TestAccMailRelayImport` also changes an SMTP2GO account:
+
+- The test creates a user with `pveguest-acc-` followed by eight random
+  hexadecimal characters as its username.
+- Test cleanup deletes the user through `POST /users/smtp/remove`.
+- The controller needs HTTPS access to `api.smtp2go.com`.
+- The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
