@@ -352,9 +352,10 @@ not exist in the guest. Import sets `remove_on_delete` to `false`, and Read sets
 `enabled` and `active` from the guest. The first apply after import enables,
 disables, starts, or stops the unit as the configuration requires. During that
 apply, the provider skips the restart and `systemctl reenable` only if the prior
-`restart_on` is null and every planned `restart_on` value starts with `import-`;
-any other value, including a literal string, restarts the unit. Every later
-`restart_on` change restarts the unit.
+`restart_on` is null and every planned `restart_on` value is `import-` followed
+by exactly 16 lowercase hexadecimal characters; any other value, including a
+literal string, restarts the unit. Every later `restart_on` change restarts the
+unit.
 
 ## pveguest_locales
 

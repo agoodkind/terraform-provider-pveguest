@@ -26,6 +26,9 @@ const (
 	changedConfContent  = "PVEGUEST_ACC_IMPORT=two\n"
 	laterConfContent    = "PVEGUEST_ACC_IMPORT=three\n"
 	importedSummaryText = "2 imported"
+
+	// importFormRestartValue is a literal restart_on value in the import form.
+	importFormRestartValue = "import-0123456789abcdef"
 )
 
 // importedWriteIDPattern matches the write_id that Read sets after import.
@@ -110,6 +113,12 @@ func (g *testGuest) expectImportUnit() resource.TestCheckFunc {
 // importUnitResource returns the unit resource. restartOn is the HCL
 // expression of one restart_on value.
 func (g *testGuest) importUnitResource(restartOn string) string {
+	return g.unitResource(fmt.Sprintf("restart_on = {\n    conf = %s\n  }", restartOn))
+}
+
+// unitResource returns HCL for an enabled, active unit and inserts arguments
+// into the resource block.
+func (g *testGuest) unitResource(arguments string) string {
 	return fmt.Sprintf(`
 resource "pveguest_systemd_unit" "imported" {
   node    = %q
@@ -118,11 +127,9 @@ resource "pveguest_systemd_unit" "imported" {
   name    = %q
   enabled = true
   active  = true
-  restart_on = {
-    conf = %s
-  }
+  %s
 }
-`, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportService, restartOn)
+`, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportService, arguments)
 }
 
 // installedImportConfig returns a configuration for the installed provider
@@ -167,6 +174,10 @@ func (g *testGuest) dependencyConfig(content string) string {
 // dependencyResources returns a file resource with content and a unit resource
 // with the file write_id in restart_on.
 func (g *testGuest) dependencyResources(content string) string {
+	return g.importFileResource(content) + g.importUnitResource(importFileAddress+".write_id")
+}
+
+func (g *testGuest) importFileResource(content string) string {
 	return fmt.Sprintf(`
 resource "pveguest_file" "conf" {
   node    = %q
@@ -175,8 +186,7 @@ resource "pveguest_file" "conf" {
   path    = %q
   content = %q
 }
-`, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportConfPath, content) +
-		g.importUnitResource(importFileAddress+".write_id")
+`, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportConfPath, content)
 }
 
 // fileWriteID returns the write_id of pveguest_file.conf from tofu show -json.
@@ -253,6 +263,8 @@ func TestAccSystemdUnitImport(t *testing.T) {
 	t.Run("literal restart_on value restarts the imported unit", testSystemdImportLiteralValue)
 	t.Run("unchanged dependency keeps the unit running", testSystemdImportUnchangedDependency)
 	t.Run("changed dependency restarts the unit", testSystemdImportChangedDependency)
+	t.Run("first apply clears the import marker", testSystemdImportMarkerClears)
+	t.Run("unit without import restarts for import-form values", testSystemdNotImportedUnit)
 }
 
 func testSystemdImportMalformedID(t *testing.T) {
@@ -308,43 +320,135 @@ func testSystemdImportCommand(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useImportUnit()
 	mainPID := guest.importUnitMainPID()
+	inode := guest.importFileInode()
 	first := guest.providerBlock() + guest.dependencyResources(adoptedConfContent)
 	second := guest.providerBlock() + guest.dependencyResources(changedConfContent)
+
+	steps := guest.importBothSteps(first)
+	steps = append(steps,
+		resource.TestStep{
+			// Import leaves content null. When the file attributes match the
+			// guest, Update preserves the inode and write_id.
+			Config:           first,
+			ConfigPlanChecks: expectActions(importFileAddress, importUnitAddress),
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestMatchResourceAttr(importFileAddress, "write_id", importedWriteIDPattern),
+				guest.expectImportFileInode(inode),
+				guest.expectImportUnitPID(&mainPID, true),
+			),
+		},
+		resource.TestStep{
+			Config:           second,
+			ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
+			Check:            guest.expectImportUnitPID(&mainPID, false),
+		},
+	)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		CheckDestroy:             guest.expectImportUnit(),
+		Steps:                    steps,
+	})
+}
+
+// importBothSteps returns two ImportState steps that use config and persist the
+// imported file and unit state.
+func (g *testGuest) importBothSteps(config string) []resource.TestStep {
+	return []resource.TestStep{
+		{
+			Config:             config,
+			ResourceName:       importFileAddress,
+			ImportState:        true,
+			ImportStateId:      g.importFileID(),
+			ImportStatePersist: true,
+		},
+		{
+			Config:             config,
+			ResourceName:       importUnitAddress,
+			ImportState:        true,
+			ImportStateId:      g.importUnitID(),
+			ImportStatePersist: true,
+			ImportStateCheck:   expectImportedAttributes,
+		},
+	}
+}
+
+// expectActions returns plan checks that require an Update for each address in
+// updatedAddresses.
+func expectActions(updatedAddresses ...string) resource.ConfigPlanChecks {
+	var checks []plancheck.PlanCheck
+	for _, address := range updatedAddresses {
+		checks = append(checks, plancheck.ExpectResourceAction(address, plancheck.ResourceActionUpdate))
+	}
+	return resource.ConfigPlanChecks{PreApply: checks}
+}
+
+// expectImportFileInode returns a check that the inode of
+// /root/pveguest-acc/import.conf equals want.
+func (g *testGuest) expectImportFileInode(want string) resource.TestCheckFunc {
+	return checkGuest(func() error {
+		got := g.importFileInode()
+		if got != want {
+			return fmt.Errorf("file %s has inode %s, want inode %s", testImportConfPath, got, want)
+		}
+		return nil
+	})
+}
+
+// testSystemdImportMarkerClears checks that the first successful Update after
+// import deletes the "imported" key.
+func testSystemdImportMarkerClears(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useImportUnit()
+	mainPID := guest.importUnitMainPID()
+	imported := guest.providerBlock() + guest.dependencyResources(adoptedConfContent)
+	withoutRestartOn := guest.providerBlock() + guest.importFileResource(adoptedConfContent) +
+		guest.unitResource("remove_on_delete = true")
+
+	steps := guest.importBothSteps(imported)
+	steps = append(steps,
+		resource.TestStep{
+			// Update deletes the "imported" key without restarting the unit when
+			// restart_on remains null.
+			Config:           withoutRestartOn,
+			ConfigPlanChecks: expectActions(importFileAddress, importUnitAddress),
+			Check:            guest.expectImportUnitPID(&mainPID, true),
+		},
+		resource.TestStep{
+			// Update restarts the unit for an import-form restart_on value after
+			// the first Update deletes the "imported" key.
+			Config:           imported,
+			ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestMatchResourceAttr(importFileAddress, "write_id", importedWriteIDPattern),
+				guest.expectImportUnitPID(&mainPID, false),
+			),
+		},
+	)
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
+		CheckDestroy:             guest.expectImportUnit(),
+		Steps:                    steps,
+	})
+}
+
+func testSystemdNotImportedUnit(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useImportUnit()
+	mainPID := guest.importUnitMainPID()
+	withoutRestartOn := guest.providerBlock() + guest.unitResource("")
+	withRestartOn := guest.providerBlock() + guest.importUnitResource(fmt.Sprintf("%q", importFormRestartValue))
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
 		CheckDestroy:             guest.expectImportUnit(),
 		Steps: []resource.TestStep{
 			{
-				Config:             first,
-				ResourceName:       importFileAddress,
-				ImportState:        true,
-				ImportStateId:      guest.importFileID(),
-				ImportStatePersist: true,
+				Config:           withoutRestartOn,
+				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionCreate),
+				Check:            guest.expectImportUnitPID(&mainPID, true),
 			},
 			{
-				Config:             first,
-				ResourceName:       importUnitAddress,
-				ImportState:        true,
-				ImportStateId:      guest.importUnitID(),
-				ImportStatePersist: true,
-				ImportStateCheck:   expectImportedAttributes,
-			},
-			{
-				Config: first,
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{
-						plancheck.ExpectResourceAction(importFileAddress, plancheck.ResourceActionNoop),
-						plancheck.ExpectResourceAction(importUnitAddress, plancheck.ResourceActionUpdate),
-					},
-				},
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestMatchResourceAttr(importFileAddress, "write_id", importedWriteIDPattern),
-					guest.expectImportUnitPID(&mainPID, true),
-				),
-			},
-			{
-				Config:           second,
+				Config:           withRestartOn,
 				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
 				Check:            guest.expectImportUnitPID(&mainPID, false),
 			},
