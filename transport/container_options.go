@@ -23,6 +23,7 @@ const (
 	configOperation  = "config"
 	pendingOperation = "pending"
 	deleteMember     = "delete"
+	revertMember     = "revert"
 	deleteListSep    = ","
 )
 
@@ -32,8 +33,17 @@ type containerConfigBody map[string]string
 
 type pendingEntry struct {
 	Key     string          `json:"key"`
+	Value   json.RawMessage `json:"value"`
 	Pending json.RawMessage `json:"pending"`
 	Delete  json.RawMessage `json:"delete"`
+}
+
+// removalPlan lists keys to revert and delete.
+// deleteLater lists keys to delete after the first request reverts them.
+type removalPlan struct {
+	revert      []string
+	delete      []string
+	deleteLater []string
 }
 
 // GetContainerOptions returns the overlay options in the container config.
@@ -102,15 +112,9 @@ func (client *Client) GetGuestPending(
 	guest Guest,
 	keys *regexp.Regexp,
 ) (map[string]string, error) {
-	data, err := client.guestCall(ctx, guest, http.MethodGet, pendingOperation, nil)
+	entries, err := client.pendingEntries(ctx, guest)
 	if err != nil {
 		return nil, err
-	}
-	var entries []pendingEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		slog.ErrorContext(ctx, "pending response contains invalid json",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err)
-		return nil, fmt.Errorf("%s: parse pending response: %w", guest, err)
 	}
 	pending := make(map[string]string)
 	for _, entry := range entries {
@@ -126,20 +130,72 @@ func (client *Client) GetGuestPending(
 	return pending, nil
 }
 
-// SetGuestOptions sends one synchronous request to write options and delete
-// keys from the guest config. It sends a request only when options or keys
-// to remove are present.
+// SetGuestOptions writes options and removes the keys in remove.
+// It reads the pending list to choose revert or delete for each removed key.
+// It sends a second request only for keys that need both.
 func (client *Client) SetGuestOptions(
 	ctx context.Context,
 	guest Guest,
 	options map[string]string,
 	remove []string,
 ) error {
-	body := make(containerConfigBody, len(options)+1)
-	maps.Copy(body, options)
+	var plan removalPlan
 	if len(remove) > 0 {
-		body[deleteMember] = strings.Join(remove, deleteListSep)
+		entries, err := client.pendingEntries(ctx, guest)
+		if err != nil {
+			return err
+		}
+		plan = planRemoval(entries, remove)
 	}
+
+	body := make(containerConfigBody, len(options)+2)
+	maps.Copy(body, options)
+	setListMember(body, revertMember, plan.revert)
+	setListMember(body, deleteMember, plan.delete)
+	if err := client.putConfig(ctx, guest, body); err != nil {
+		return err
+	}
+
+	// Proxmox rejects revert and delete for the same key in one request.
+	later := make(containerConfigBody, 1)
+	setListMember(later, deleteMember, plan.deleteLater)
+	return client.putConfig(ctx, guest, later)
+}
+
+// planRemoval reverts keys with only a pending value and deletes keys with only an applied value.
+// It reverts keys with both values, then deletes them in a second request.
+// It deletes keys missing from the pending list.
+func planRemoval(entries []pendingEntry, remove []string) removalPlan {
+	byKey := make(map[string]pendingEntry, len(entries))
+	for _, entry := range entries {
+		byKey[entry.Key] = entry
+	}
+	var plan removalPlan
+	for _, key := range remove {
+		entry, found := byKey[key]
+		hasPending := found && len(entry.Pending) > 0
+		hasValue := found && len(entry.Value) > 0
+		switch {
+		case hasPending && hasValue:
+			plan.revert = append(plan.revert, key)
+			plan.deleteLater = append(plan.deleteLater, key)
+		case hasPending:
+			plan.revert = append(plan.revert, key)
+		default:
+			plan.delete = append(plan.delete, key)
+		}
+	}
+	return plan
+}
+
+func setListMember(body containerConfigBody, member string, keys []string) {
+	if len(keys) > 0 {
+		body[member] = strings.Join(keys, deleteListSep)
+	}
+}
+
+// putConfig sends a synchronous PUT config request when the body is not empty.
+func (client *Client) putConfig(ctx context.Context, guest Guest, body containerConfigBody) error {
 	if len(body) == 0 {
 		return nil
 	}
@@ -151,6 +207,20 @@ func (client *Client) SetGuestOptions(
 	}
 	_, err = client.guestCall(ctx, guest, http.MethodPut, configOperation, document)
 	return err
+}
+
+func (client *Client) pendingEntries(ctx context.Context, guest Guest) ([]pendingEntry, error) {
+	data, err := client.guestCall(ctx, guest, http.MethodGet, pendingOperation, nil)
+	if err != nil {
+		return nil, err
+	}
+	var entries []pendingEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		slog.ErrorContext(ctx, "pending response contains invalid json",
+			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err)
+		return nil, fmt.Errorf("%s: parse pending response: %w", guest, err)
+	}
+	return entries, nil
 }
 
 func (client *Client) containerCall(
