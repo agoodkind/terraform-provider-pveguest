@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/smtp"
+	"net/textproto"
 	"os"
 	"regexp"
 	"strconv"
@@ -72,9 +73,14 @@ type relayLoginAuth struct {
 	password string
 }
 
+var (
+	errRelayLoginTLS       = errors.New("SMTP AUTH LOGIN requires a TLS connection")
+	errRelayLoginChallenge = errors.New("SMTP AUTH LOGIN sent an unexpected challenge")
+)
+
 func (auth relayLoginAuth) Start(server *smtp.ServerInfo) (string, []byte, error) {
 	if !server.TLS {
-		return "", nil, errors.New("SMTP AUTH LOGIN requires a TLS connection")
+		return "", nil, errRelayLoginTLS
 	}
 	return relayLoginMechanism, nil, nil
 }
@@ -89,7 +95,7 @@ func (auth relayLoginAuth) Next(challenge []byte, more bool) ([]byte, error) {
 	case relayPasswordChallenge:
 		return []byte(auth.password), nil
 	default:
-		return nil, errors.New("SMTP AUTH LOGIN sent an unexpected challenge")
+		return nil, errRelayLoginChallenge
 	}
 }
 
@@ -188,30 +194,49 @@ func relayLogin(credentials relayCredentials) error {
 	address := net.JoinHostPort(credentials.host, credentials.port)
 	connection, err := net.DialTimeout("tcp", address, relaySMTPTimeout)
 	if err != nil {
-		return fmt.Errorf("connect to %s: %w", address, err)
+		return relaySMTPFailure("connect", err)
 	}
 	if err := connection.SetDeadline(time.Now().Add(relaySMTPTimeout)); err != nil {
 		_ = connection.Close()
-		return fmt.Errorf("set deadline for %s: %w", address, err)
+		return relaySMTPFailure("set deadline", err)
 	}
 	client, err := smtp.NewClient(connection, credentials.host)
 	if err != nil {
 		_ = connection.Close()
-		return fmt.Errorf("start SMTP session with %s: %w", address, err)
+		return relaySMTPFailure("greeting", err)
 	}
 	defer func() { _ = client.Close() }()
 	tlsConfig := &tls.Config{ServerName: credentials.host, MinVersion: tls.VersionTLS12}
 	if err := client.StartTLS(tlsConfig); err != nil {
-		return fmt.Errorf("STARTTLS with %s: %w", address, err)
+		return relaySMTPFailure("STARTTLS", err)
 	}
 	auth := relayLoginAuth{username: credentials.username, password: credentials.password}
 	if err := client.Auth(auth); err != nil {
-		return fmt.Errorf("SMTP AUTH LOGIN as %s at %s failed", credentials.username, address)
+		return relaySMTPFailure("AUTH LOGIN", err)
 	}
 	if err := client.Quit(); err != nil {
-		return fmt.Errorf("QUIT at %s: %w", address, err)
+		return relaySMTPFailure("QUIT", err)
 	}
 	return nil
+}
+
+// relaySMTPFailure excludes server reply text and credential values.
+func relaySMTPFailure(operation string, failure error) error {
+	var reply *textproto.Error
+	if errors.As(failure, &reply) {
+		return fmt.Errorf("SMTP %s failed with reply code %d", operation, reply.Code)
+	}
+	if errors.Is(failure, errRelayLoginChallenge) {
+		return fmt.Errorf("SMTP %s failed with error class unexpected-login-challenge", operation)
+	}
+	if errors.Is(failure, errRelayLoginTLS) {
+		return fmt.Errorf("SMTP %s failed with error class tls-required", operation)
+	}
+	var networkError net.Error
+	if errors.As(failure, &networkError) && networkError.Timeout() {
+		return fmt.Errorf("SMTP %s failed with error class timeout", operation)
+	}
+	return fmt.Errorf("SMTP %s failed with error class %T", operation, failure)
 }
 
 func (g *testGuest) expectRelayLogin(path string) func() error {
