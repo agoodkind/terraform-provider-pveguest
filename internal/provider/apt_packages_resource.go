@@ -4,12 +4,12 @@ package provider
 
 import (
 	"context"
-	"errors"
+	_ "embed"
 	"fmt"
-	"log/slog"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
@@ -46,26 +46,26 @@ const (
 
 	architectureSeparator = ":"
 
-	// invoke-rc.d runs policy-rc.d before a service start or restart.
-	// Exit status 101 tells invoke-rc.d that policy forbids the action.
-	policyRCPath    = "/usr/sbin/policy-rc.d"
-	policyRCContent = "#!/bin/sh\nexit 101\n"
-	policyRCMode    = "0755"
+	// The script exit status constants must match the embedded script.
+	policyRCPath              = "/usr/sbin/policy-rc.d"
+	policyRCLockPath          = "/run/pveguest-package-install.lock"
+	policyRCMarker            = "# The pveguest provider created this file for a package install."
+	policyRCLockWaitSeconds   = 600
+	policyRCForeignStatus     = 73
+	policyRCLockTimeoutStatus = 75
 
-	// Both scripts take the path as $1. test -L also detects a dangling link.
-	// set -C makes the shell refuse to overwrite an existing file.
-	policyRCExistsScript = `test -e "$1" || test -L "$1"`
-	policyRCCreateScript = `set -C && cat > "$1"`
-
-	policyRCExistsStatus  = 0
-	policyRCMissingStatus = 1
-
-	startServicesDescription = "When start_services is true or unset, apt-get install starts services as " +
-		"packages normally do. Set start_services to false to prevent package maintainer scripts from " +
-		"starting or restarting services during installations in this apply; a later " +
-		"pveguest_systemd_unit resource can start the service. " +
-		"This setting does not change packages that are already installed."
+	startServicesDescription = "start_services defaults to true, which lets packages start services normally. " +
+		"When false, the provider prevents service starts and restarts during installs in this apply. " +
+		"The provider fails the apply without changing a policy-rc.d file that lacks its marker. " +
+		"Both package resources share a lock during these installs. " +
+		"A later pveguest_systemd_unit resource can start the service."
 )
+
+// policyRCInstallScript runs with its arguments through bash -c.
+// The command can still read standard input.
+//
+//go:embed scripts/policy_rc_install.sh
+var policyRCInstallScript string
 
 // The pattern is the Debian policy pattern for package names. The pattern
 // also rejects a name that starts with a dash. apt-get reads such a name as
@@ -534,9 +534,9 @@ func startServicesEnabled(value types.Bool) bool {
 	return value.ValueBool()
 }
 
-// runInstallCommand runs apt-get install. When startServices is false,
-// policy-rc.d blocks service starts during the command.
-// The function deletes the file after the command succeeds or fails.
+// runInstallCommand runs the command as is when startServices is true.
+// When startServices is false, it runs the command inside the embedded script.
+// It converts script exit statuses 73 and 75 into the corresponding errors.
 func runInstallCommand(
 	ctx context.Context,
 	client *transport.Client,
@@ -547,74 +547,38 @@ func runInstallCommand(
 	if startServices {
 		return runChecked(ctx, client, guest, command)
 	}
-	if err := createPolicyFile(ctx, client, guest); err != nil {
-		return err
-	}
-	installErr := runChecked(ctx, client, guest, command)
-	// Ignore cancellation because a canceled apply must still delete the file.
-	removeErr := removePolicyFile(context.WithoutCancel(ctx), client, guest)
-	combined := errors.Join(installErr, removeErr)
-	if combined != nil {
-		slog.ErrorContext(
-			ctx, "apt-get install or policy-rc.d deletion returned an error",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", combined,
-		)
-	}
-	return combined
-}
 
-// createPolicyFile fails if the path already exists because the provider must not
-// replace or delete a file it did not create. The exclusive create script fails if
-// a file appears between the check and the write. The function deletes the file
-// it wrote if setting the mode fails.
-func createPolicyFile(ctx context.Context, client *transport.Client, guest transport.Guest) error {
-	existsCommand := guestCommand("sh", "-c", policyRCExistsScript, "sh", policyRCPath)
-	existsResult, err := runReadOnlyGuest(ctx, client, guest, existsCommand)
+	argv := []string{
+		"bash", "-c", policyRCInstallScript, "bash",
+		policyRCPath, policyRCLockPath, strconv.Itoa(policyRCLockWaitSeconds), policyRCMarker,
+	}
+	argv = append(argv, command.Argv...)
+	wrapped := transport.Command{
+		Argv:           argv,
+		Stdin:          command.Stdin,
+		TimeoutSeconds: command.TimeoutSeconds + policyRCLockWaitSeconds,
+	}
+	result, err := runGuest(ctx, client, guest, wrapped)
 	if err != nil {
 		return err
 	}
-	if existsResult.ExitCode == policyRCExistsStatus {
+	switch result.ExitCode {
+	case 0:
+		return nil
+	case policyRCForeignStatus:
 		return fmt.Errorf(
-			"%s: %s already exists and the provider does not replace it; "+
+			"%s: %s exists without the pveguest marker; the provider will not change it; "+
 				"delete the file or set start_services to true",
 			guest, policyRCPath,
 		)
-	}
-	// Exit status 1 means the path does not exist, so continue.
-	if existsResult.ExitCode != policyRCMissingStatus {
-		return commandFailure(guest, existsCommand, existsResult)
-	}
-
-	createCommand := guestCommand("sh", "-c", policyRCCreateScript, "sh", policyRCPath)
-	createCommand.Stdin = []byte(policyRCContent)
-	if err := runChecked(ctx, client, guest, createCommand); err != nil {
-		return err
-	}
-	modeCommand := guestCommand("chmod", policyRCMode, "--", policyRCPath)
-	if err := runChecked(ctx, client, guest, modeCommand); err != nil {
-		slog.ErrorContext(
-			ctx, "provider failed to set the mode of policy-rc.d and will delete the file",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
-		)
-		return errors.Join(err, removePolicyFile(context.WithoutCancel(ctx), client, guest))
-	}
-	return nil
-}
-
-func removePolicyFile(ctx context.Context, client *transport.Client, guest transport.Guest) error {
-	err := runChecked(ctx, client, guest, guestCommand("rm", "-f", "--", policyRCPath))
-	if err != nil {
-		slog.ErrorContext(
-			ctx, "provider failed to delete policy-rc.d after installation",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
-		)
+	case policyRCLockTimeoutStatus:
 		return fmt.Errorf(
-			"%s: %s is still in the guest and blocks every service start in the guest. "+
-				"Delete the file. Removal failed: %w",
-			guest, policyRCPath, err,
+			"%s: the wait for lock %s timed out after %d seconds; another package install may still be running",
+			guest, policyRCLockPath, policyRCLockWaitSeconds,
 		)
+	default:
+		return commandFailure(guest, command, result)
 	}
-	return nil
 }
 
 func aptRemoveCommand(names []string) transport.Command {

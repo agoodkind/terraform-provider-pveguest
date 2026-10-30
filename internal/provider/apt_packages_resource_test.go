@@ -33,59 +33,19 @@ const (
 	aptNewVersion = "8.0-1"
 
 	dpkgNoMatchExitCode = 1
-
-	policyPath          = "/usr/sbin/policy-rc.d"
-	policyContent       = "#!/bin/sh\nexit 101\n"
-	policyMode          = "0755"
-	policyExistsCommand = `env LC_ALL=C sh -c test -e "$1" || test -L "$1" sh ` + policyPath
-	policyCreateCommand = `env LC_ALL=C sh -c set -C && cat > "$1" sh ` + policyPath
-	policyModeCommand   = "env LC_ALL=C chmod " + policyMode + " -- " + policyPath
-	policyRemoveCommand = "env LC_ALL=C rm -f -- " + policyPath
-
-	aptInstallFailureExitCode = 100
-	existingPolicyContent     = "#!/bin/sh\nexit 0\n"
-	aptNoPolicy               = "absent"
-	policyAtInstallExpected   = policyContent + "mode=" + policyMode
-	aptInstallPrefix          = aptEnvironment + " install -y --no-install-recommends -o DPkg::Lock::Timeout=300 -- "
 )
 
-type aptExecRequest struct {
-	Command   []string `json:"command"`
-	InputData string   `json:"input-data"`
-}
-
-// aptDebFile stores the package name and version of one .deb file in the fake guest.
-type aptDebFile struct {
-	name    string
-	version string
-}
-
 type aptGuestAPI struct {
-	mutex       sync.Mutex
-	installed   map[string]string
-	held        map[string]bool
-	available   map[string]string
-	debs        map[string]aptDebFile
-	files       map[string]string
-	modes       map[string]string
-	failInstall bool
-	commands    []string
-	results     map[string]localeExecStatus
-
-	// policyAtInstall records the policy-rc.d content and mode at each apt-get install.
-	// It records aptNoPolicy when the file does not exist.
-	policyAtInstall []string
+	mutex     sync.Mutex
+	installed map[string]string
+	held      map[string]bool
+	available map[string]string
+	commands  []string
+	results   map[string]localeExecStatus
 }
 
 func newAptGuest(installed map[string]string, available map[string]string) *aptGuestAPI {
-	return &aptGuestAPI{
-		installed: installed,
-		held:      map[string]bool{},
-		available: available,
-		debs:      map[string]aptDebFile{},
-		files:     map[string]string{},
-		modes:     map[string]string{},
-	}
+	return &aptGuestAPI{installed: installed, held: map[string]bool{}, available: available}
 }
 
 func (api *aptGuestAPI) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -93,13 +53,8 @@ func (api *aptGuestAPI) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	defer api.mutex.Unlock()
 	switch {
 	case request.Method == http.MethodPost && request.URL.Path == localesExecPath:
-		var body aptExecRequest
+		var body localeExecRequest
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-			http.Error(writer, err.Error(), http.StatusBadRequest)
-			return
-		}
-		stdin, err := base64.StdEncoding.DecodeString(body.InputData)
-		if err != nil {
 			http.Error(writer, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -108,7 +63,7 @@ func (api *aptGuestAPI) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		if api.results == nil {
 			api.results = make(map[string]localeExecStatus)
 		}
-		api.results[strconv.Itoa(processID)] = api.run(body.Command, stdin)
+		api.results[strconv.Itoa(processID)] = api.run(body.Command)
 		_ = json.NewEncoder(writer).Encode(localeExecStartEnvelope{Data: localeExecStart{PID: processID}})
 	case request.Method == http.MethodGet && request.URL.Path == localesExecStatusPath:
 		status, found := api.results[request.URL.Query().Get("pid")]
@@ -131,8 +86,8 @@ func aptOutput(exitCode int, stdout string, stderr string) localeExecStatus {
 	}
 }
 
-// run simulates guest commands using the package and file maps.
-func (api *aptGuestAPI) run(argv []string, stdin []byte) localeExecStatus {
+// run simulates dpkg-query, apt-get, and apt-mark using the test package maps.
+func (api *aptGuestAPI) run(argv []string) localeExecStatus {
 	arguments := argv
 	for len(arguments) > 0 && (arguments[0] == "env" || strings.Contains(arguments[0], "=")) {
 		arguments = arguments[1:]
@@ -149,56 +104,9 @@ func (api *aptGuestAPI) run(argv []string, stdin []byte) localeExecStatus {
 		return api.aptGet(arguments[1], names)
 	case "apt-mark":
 		return api.aptMark(arguments[1], names)
-	case "dpkg-deb":
-		return api.debVersion(names[0])
-	case "sh":
-		return api.shell(arguments[2], arguments[4], stdin)
-	case "chmod":
-		return api.chmod(names[0], arguments[1])
-	case "rm":
-		delete(api.files, names[0])
-		delete(api.modes, names[0])
-		return aptOutput(0, "", "")
 	default:
 		return aptOutput(unknownCommandExitCode, "", "unknown command")
 	}
-}
-
-func (api *aptGuestAPI) debVersion(debPath string) localeExecStatus {
-	deb, found := api.debs[debPath]
-	if !found {
-		return aptOutput(1, "", "dpkg-deb: error: cannot open "+debPath+": No such file or directory")
-	}
-	return aptOutput(0, deb.version+"\n", "")
-}
-
-// shell simulates the policy-rc.d existence check and creation script.
-// The creation script fails if the file exists, as a shell with noclobber set would.
-func (api *aptGuestAPI) shell(script string, target string, stdin []byte) localeExecStatus {
-	_, exists := api.files[target]
-	switch {
-	case strings.Contains(script, "test -e"):
-		if exists {
-			return aptOutput(0, "", "")
-		}
-		return aptOutput(1, "", "")
-	case strings.Contains(script, "set -C"):
-		if exists {
-			return aptOutput(1, "", "sh: cannot create "+target+": File exists")
-		}
-		api.files[target] = string(stdin)
-		return aptOutput(0, "", "")
-	default:
-		return aptOutput(unknownCommandExitCode, "", "unknown script")
-	}
-}
-
-func (api *aptGuestAPI) chmod(target string, mode string) localeExecStatus {
-	if _, exists := api.files[target]; !exists {
-		return aptOutput(1, "", "chmod: cannot access "+target+": No such file or directory")
-	}
-	api.modes[target] = mode
-	return aptOutput(0, "", "")
 }
 
 func (api *aptGuestAPI) query(arguments []string, names []string) localeExecStatus {
@@ -230,21 +138,7 @@ func (api *aptGuestAPI) query(arguments []string, names []string) localeExecStat
 func (api *aptGuestAPI) aptGet(verb string, specs []string) localeExecStatus {
 	switch verb {
 	case "install":
-		policy, hasPolicy := api.files[policyPath]
-		if hasPolicy {
-			api.policyAtInstall = append(api.policyAtInstall, policy+"mode="+api.modes[policyPath])
-		} else {
-			api.policyAtInstall = append(api.policyAtInstall, aptNoPolicy)
-		}
-		if api.failInstall {
-			return aptOutput(aptInstallFailureExitCode, "", "E: Sub-process /usr/bin/dpkg returned an error code (1)")
-		}
 		for _, spec := range specs {
-			deb, isDeb := api.debs[spec]
-			if isDeb {
-				api.installed[deb.name] = deb.version
-				continue
-			}
 			name, version, isPinned := strings.Cut(spec, "=")
 			if !isPinned {
 				version = api.available[name]
@@ -311,19 +205,6 @@ func (api *aptGuestAPI) installedVersion(name string) (string, bool) {
 	return version, isInstalled
 }
 
-func (api *aptGuestAPI) guestFile(path string) (string, bool) {
-	api.mutex.Lock()
-	defer api.mutex.Unlock()
-	content, exists := api.files[path]
-	return content, exists
-}
-
-func (api *aptGuestAPI) policyAtInstalls() []string {
-	api.mutex.Lock()
-	defer api.mutex.Unlock()
-	return slices.Clone(api.policyAtInstall)
-}
-
 func (api *aptGuestAPI) isHeld(name string) bool {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
@@ -353,7 +234,6 @@ type aptSpec struct {
 	versions       map[string]string
 	locked         []string
 	removeOnDelete *bool
-	startServices  *bool
 }
 
 func aptStringSet(names []string) tftypes.Value {
@@ -378,10 +258,6 @@ func aptValue(t *testing.T, resourceType tftypes.Type, spec aptSpec) *tfprotov6.
 	if spec.removeOnDelete != nil {
 		removeOnDelete = tftypes.NewValue(tftypes.Bool, *spec.removeOnDelete)
 	}
-	startServices := tftypes.NewValue(tftypes.Bool, nil)
-	if spec.startServices != nil {
-		startServices = tftypes.NewValue(tftypes.Bool, *spec.startServices)
-	}
 	value, err := tfprotov6.NewDynamicValue(resourceType, tftypes.NewValue(resourceType, map[string]tftypes.Value{
 		"node":             tftypes.NewValue(tftypes.String, optionsNode),
 		"vmid":             tftypes.NewValue(tftypes.Number, optionsVMID),
@@ -390,7 +266,7 @@ func aptValue(t *testing.T, resourceType tftypes.Type, spec aptSpec) *tfprotov6.
 		"versions":         versions,
 		"locked":           aptStringSet(spec.locked),
 		"remove_on_delete": removeOnDelete,
-		"start_services":   startServices,
+		"start_services":   tftypes.NewValue(tftypes.Bool, nil),
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -482,114 +358,6 @@ func requireAptCommands(t *testing.T, guest *aptGuestAPI, want ...string) {
 	got := guest.recordedCommands()
 	if !slices.Equal(got, want) {
 		t.Fatalf("Guest commands differ from the expected sequence (received, expected):\n%q\n%q", got, want)
-	}
-}
-
-func requireApplyError(t *testing.T, diagnostics []*tfprotov6.Diagnostic, text string) {
-	t.Helper()
-	for _, diagnostic := range diagnostics {
-		isError := diagnostic.Severity == tfprotov6.DiagnosticSeverityError
-		if isError && strings.Contains(diagnostic.Detail, text) {
-			return
-		}
-	}
-	t.Fatalf("Apply diagnostics %v have no error that contains %q", diagnostics, text)
-}
-
-func aptApplyWithError(
-	t *testing.T,
-	server tfprotov6.ProviderServer,
-	planned *tfprotov6.DynamicValue,
-	resourceType tftypes.Type,
-) *tfprotov6.ApplyResourceChangeResponse {
-	t.Helper()
-	applied, err := server.ApplyResourceChange(context.Background(), &tfprotov6.ApplyResourceChangeRequest{
-		TypeName:     aptType,
-		PriorState:   powerResourceNull(t, resourceType),
-		PlannedState: planned,
-		Config:       planned,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return applied
-}
-
-func TestAptPackagesStartServicesFalseBlocksStartsOnlyDuringInstall(t *testing.T) {
-	disabled := false
-	guest := newAptGuest(map[string]string{}, map[string]string{aptCurl: aptOldVersion})
-	server, resourceType := aptServer(t, guest)
-
-	planned := aptValue(t, resourceType, aptSpec{packages: []string{aptCurl}, startServices: &disabled})
-	applied := aptApply(t, server, powerResourceNull(t, resourceType), planned)
-
-	requireAptCommands(t, guest,
-		plainQueryCommand+aptCurl,
-		updateCommand,
-		policyExistsCommand,
-		policyCreateCommand,
-		policyModeCommand,
-		aptInstallPrefix+aptCurl,
-		policyRemoveCommand,
-		plainQueryCommand+aptCurl,
-	)
-	if got := guest.policyAtInstalls(); !slices.Equal(got, []string{policyAtInstallExpected}) {
-		t.Fatalf("Policy file at each install command is %q, want %q", got, []string{policyAtInstallExpected})
-	}
-	if _, exists := guest.guestFile(policyPath); exists {
-		t.Fatal("Guest still has the policy file after the apply.")
-	}
-	attributes := aptAttributes(t, resourceType, applied.NewState)
-	if !attributes["start_services"].Equal(tftypes.NewValue(tftypes.Bool, false)) {
-		t.Fatalf("State start_services is %s, want false.", attributes["start_services"])
-	}
-}
-
-func TestAptPackagesStartServicesFalseRefusesExistingPolicyFile(t *testing.T) {
-	disabled := false
-	guest := newAptGuest(map[string]string{}, map[string]string{aptCurl: aptOldVersion})
-	guest.files[policyPath] = existingPolicyContent
-	server, resourceType := aptServer(t, guest)
-
-	planned := aptValue(t, resourceType, aptSpec{packages: []string{aptCurl}, startServices: &disabled})
-	applied := aptApplyWithError(t, server, planned, resourceType)
-
-	requireApplyError(t, applied.Diagnostics, policyPath+" already exists")
-	requireAptCommands(t, guest,
-		plainQueryCommand+aptCurl,
-		updateCommand,
-		policyExistsCommand,
-	)
-	content, exists := guest.guestFile(policyPath)
-	if !exists || content != existingPolicyContent {
-		t.Fatalf("Guest policy file is %q (exists %t), want the original content.", content, exists)
-	}
-	if _, isInstalled := guest.installedVersion(aptCurl); isInstalled {
-		t.Fatal("Guest installed curl although the apply refused to run.")
-	}
-}
-
-func TestAptPackagesStartServicesFalseRemovesPolicyFileAfterFailedInstall(t *testing.T) {
-	disabled := false
-	guest := newAptGuest(map[string]string{}, map[string]string{aptCurl: aptOldVersion})
-	guest.failInstall = true
-	server, resourceType := aptServer(t, guest)
-
-	planned := aptValue(t, resourceType, aptSpec{packages: []string{aptCurl}, startServices: &disabled})
-	applied := aptApplyWithError(t, server, planned, resourceType)
-
-	requireApplyError(t, applied.Diagnostics, "returned an error code")
-	requireAptCommands(t, guest,
-		plainQueryCommand+aptCurl,
-		updateCommand,
-		policyExistsCommand,
-		policyCreateCommand,
-		policyModeCommand,
-		aptInstallPrefix+aptCurl,
-		policyRemoveCommand,
-	)
-	if _, exists := guest.guestFile(policyPath); exists {
-		t.Fatal("Guest still has the policy file after the failed install.")
 	}
 }
 

@@ -1,0 +1,7 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = purge ]; then
+	deb-systemd-helper purge pveguest-acc-svc.service
+	deb-systemd-helper unmask pveguest-acc-svc.service
+fi

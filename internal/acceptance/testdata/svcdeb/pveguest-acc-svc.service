@@ -1,0 +1,8 @@
+[Unit]
+Description=The test service runs for package acceptance tests
+
+[Service]
+ExecStart=/bin/sleep infinity
+
+[Install]
+WantedBy=multi-user.target

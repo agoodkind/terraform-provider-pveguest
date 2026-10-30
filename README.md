@@ -307,7 +307,7 @@ Apply installs the exact package versions in `versions`, including downgrades. R
 
 When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. When remove_on_delete is true, the plan for pveguest_apt_packages shows a warning that lists the declared packages that the provider removes during apply or destroy.
 
-When `start_services` is `false`, the provider writes `/usr/sbin/policy-rc.d` as an executable shell script that exits with status `101`, which tells `invoke-rc.d` to prevent package scripts from starting or restarting services. The provider deletes the file after `apt-get install` finishes, even if the command fails. If the path already contains a file or link, including a dangling link, the apply fails before `apt-get install` and leaves the guest unchanged. This setting affects only packages installed during that apply; it does not change packages that are already installed, and a later `pveguest_systemd_unit` resource can start the service.
+`start_services` defaults to `true`, which lets packages start services normally. Set it to `false` to prevent service starts and restarts during installs in that apply; already installed packages do not change. Both package resources use `/run/pveguest-package-install.lock` to serialize these installs, and the provider fails the apply without changing `/usr/sbin/policy-rc.d` if the path lacks the pveguest marker. After acquiring the lock, the provider deletes a stale `policy-rc.d` file with its marker before installing packages. A later `pveguest_systemd_unit` resource can start the service.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -331,7 +331,7 @@ The install excludes recommended packages and rejects dependencies that
 require a download. The provider serializes apt operations per guest.
 Destroy removes the resource from state and retains the installed packages.
 
-The `start_services` argument has the same behavior as in `pveguest_apt_packages`. When `start_services` is `false`, the provider creates `/usr/sbin/policy-rc.d` immediately before `apt-get install` and deletes it after the command finishes.
+`start_services` uses the same behavior as `pveguest_apt_packages`. Both resources share `/run/pveguest-package-install.lock`.
 
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
@@ -762,7 +762,8 @@ items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
-- `TestAccAptPackagesNoServiceStart` installs and purges `at`. During the test, the provider writes and deletes `/usr/sbin/policy-rc.d`.
+- The tests install and purge `at` and the generated package `pveguest-acc-svc`, which provides `pveguest-acc-svc.service`. The tests use `/root/pveguest-acc/postinst-sleep` to delay the postinst script.
+- The tests create and delete `/usr/sbin/policy-rc.d` and create `/run/pveguest-package-install.lock`. The tests do not delete the lock file.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 - The unit `pveguest-acc-removal.service` under `/etc/systemd/system/`.
