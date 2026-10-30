@@ -13,16 +13,16 @@ import (
 )
 
 const (
-	privatePath   = "/private.bin"
-	readyPath     = "/ready"
-	headerName    = "Authorization"
-	headerPrefix  = "Bearer "
-	redirectPath  = "/redirect"
+	privatePath  = "/private.bin"
+	readyPath    = "/ready"
+	headerName   = "Authorization"
+	headerPrefix = "Bearer "
+	redirectPath = "/redirect"
 
 	escapedHeaderName  = "X-Pveguest-Escaped"
 	escapedHeaderValue = `a"b\c`
-	processGlob   = "/proc/[0-9]*/cmdline"
-	stateFileMode = 0o644
+	processGlob        = "/proc/[0-9]*/cmdline"
+	stateFileMode      = 0o644
 )
 
 type serverState struct {
@@ -125,7 +125,7 @@ func main() {
 	mux.HandleFunc(redirectPath, func(writer http.ResponseWriter, request *http.Request) {
 		http.Redirect(writer, request, privatePath, http.StatusFound)
 	})
-	mux.HandleFunc(readyPath,func(writer http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc(readyPath, func(writer http.ResponseWriter, _ *http.Request) {
 		writer.WriteHeader(http.StatusOK)
 	})
 	httpServer := &http.Server{Addr: *address, Handler: mux}

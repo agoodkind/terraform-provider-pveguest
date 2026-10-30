@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -47,10 +48,11 @@ const (
 	requestHeaderEscapedLine = `X-Pveguest-Escaped = "a\"b\\c"`
 	requestHeaderLogLevel    = "DEBUG"
 	requestHeaderEchoToken   = "acc-request-header-echo-5e19"
+	requestHeaderEchoName    = "X-Pveguest-Echo"
 	requestHeaderRedacted    = `\[redacted\]`
 	requestHeaderLogLine     = "controller download failed"
 
-	guestWorkDirectory    = "/root/pveguest-acc"
+	guestWorkDirectory    = "/root/pveguest-acc-header"
 	guestServerUnit       = "pveguest-acc-https"
 	guestServerPort       = "18443"
 	guestServerBase       = "https://127.0.0.1:" + guestServerPort
@@ -261,7 +263,7 @@ func (g *testGuest) stopHeaderServer() {
 	g.run(nil, "systemctl", "stop", "--", unit)
 	g.run(nil, "systemctl", "reset-failed", "--", unit)
 	g.mustRun("rm", "-f", "--", guestCAPath)
-	g.mustRun("update-ca-certificates", "--fresh")
+	g.mustRun("update-ca-certificates")
 	g.mustRun("rm", "-rf", "--", guestWorkDirectory)
 }
 
@@ -329,8 +331,9 @@ resource "pveguest_download" %q {
 func (g *testGuest) workspaceConfig(fetch string, url string, hash string, path string, version int, headers bool) string {
 	extra := ""
 	if headers {
-		extra = fmt.Sprintf(`request_headers_wo         = { %s = "%s${var.secret}", %s }
-  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix, requestHeaderEscapedLine, version)
+		extra = fmt.Sprintf(`request_headers_wo         = { %s = "%s${var.secret}", %s = var.secret, %s }
+  request_headers_wo_version = %d`,
+			requestHeaderName, requestHeaderPrefix, requestHeaderEchoName, requestHeaderEscapedLine, version)
 	}
 	return g.providerBlock() + fmt.Sprintf(`
 variable "secret" {
@@ -560,21 +563,45 @@ func TestAccDownloadRequestHeaderRedirect(t *testing.T) {
 	workspace.mustRun("destroy", "-no-color", "-auto-approve")
 }
 
-func errorPathHandler() http.Handler {
+func closingHandler() http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		connection, _, err := writer.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		_ = connection.Close()
+	})
+}
+
+func startUntrustedServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	certificatePEM, keyPEM := guestServerCertificate(t)
+	pair, err := tls.X509KeyPair(certificatePEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(closingHandler())
+	server.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	return server
+}
+
+func errorPathHandler(closedURL string, untrustedURL string) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch {
-		case strings.HasPrefix(request.URL.Path, "/invalid"):
-			writer.Header().Set("Location", "https://[bad/"+requestHeaderEchoToken)
-			writer.WriteHeader(http.StatusFound)
-		case strings.HasPrefix(request.URL.Path, "/closed"):
-			connection, _, err := writer.(http.Hijacker).Hijack()
-			if err != nil {
-				return
-			}
-			_ = connection.Close()
+		echo := request.Header.Get(requestHeaderEchoName)
+		switch request.URL.Path {
+		case "/invalid":
+			writer.Header().Set("Location", "https://[bad/"+echo)
+		case "/closed":
+			writer.Header().Set("Location", closedURL+"/"+echo)
+		case "/untrusted":
+			writer.Header().Set("Location", untrustedURL+"/"+echo)
 		default:
 			http.NotFound(writer, request)
+			return
 		}
+		writer.WriteHeader(http.StatusFound)
 	})
 }
 
@@ -583,27 +610,25 @@ func TestAccDownloadRequestHeaderErrorsRedacted(t *testing.T) {
 	guest.useTestDirectory()
 	_, hash := requestHeaderPayload(t)
 	cases := []struct {
-		name    string
-		path    string
-		trusted bool
+		name         string
+		path         string
+		requireMarks bool
 	}{
-		{name: "invalid redirect location", path: "/invalid/", trusted: true},
-		{name: "closed connection", path: "/closed/", trusted: true},
-		{name: "untrusted certificate", path: "/closed/", trusted: false},
+		{name: "invalid redirect location", path: "/invalid", requireMarks: true},
+		{name: "closed connection after a redirect", path: "/closed"},
+		{name: "untrusted certificate after a redirect", path: "/untrusted"},
 	}
+	closed := httptest.NewTLSServer(closingHandler())
+	t.Cleanup(closed.Close)
+	untrusted := startUntrustedServer(t)
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			server := httptest.NewTLSServer(errorPathHandler())
+			server := httptest.NewTLSServer(errorPathHandler(closed.URL, untrusted.URL))
 			t.Cleanup(server.Close)
-			guest.controllerCAFile = ""
-			if testCase.trusted {
-				guest.controllerCAFile = writeServerCA(t, server)
-			}
+			guest.controllerCAFile = writeServerCA(t, server)
 			t.Setenv("XDG_CACHE_HOME", t.TempDir())
 			path := testDirectory + "/request-header/error.bin"
-			config := guest.workspaceConfig(
-				"controller", server.URL+testCase.path+requestHeaderEchoToken, hash, path, 1, true,
-			)
+			config := guest.workspaceConfig("controller", server.URL+testCase.path, hash, path, 1, true)
 			workspace := newHeaderWorkspace(t)
 			workspace.writeConfig(config)
 			workspace.variableValue = requestHeaderEchoToken
@@ -619,7 +644,7 @@ func TestAccDownloadRequestHeaderErrorsRedacted(t *testing.T) {
 			if !strings.Contains(output, requestHeaderLogLine) {
 				t.Fatalf("the provider log line %q is missing from the tofu output", requestHeaderLogLine)
 			}
-			if !redactedPattern.MatchString(output) {
+			if testCase.requireMarks && !redactedPattern.MatchString(output) {
 				t.Fatal("the tofu output does not contain a redaction marker")
 			}
 			if strings.Contains(output, requestHeaderEchoToken) {
