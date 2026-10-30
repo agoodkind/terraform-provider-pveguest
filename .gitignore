@@ -2,6 +2,7 @@
 /dist/
 /terraform-provider-pveguest
 .make/
+/.cache_ggshield
 go.work
 go.work.sum
 !.golangci-lint-baseline.txt

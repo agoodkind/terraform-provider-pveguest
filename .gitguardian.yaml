@@ -1,0 +1,8 @@
+version: 2
+
+secret:
+  ignored_matches:
+    - name: SMTP2GO API key header name in mail relay acceptance test
+      match: 1a2848dc540d3c674e2cbbd887ea0e887e276b26e58232eb8930da51582c467c
+    - name: SMTP2GO test user prefix and public relay host and port in mail relay acceptance test
+      match: 8bfbdf0389f08e162b14c05dc7e9a06d9d3ef32cec472232fd32b4a3eb267955
