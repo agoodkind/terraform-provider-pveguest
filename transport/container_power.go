@@ -121,11 +121,16 @@ func (client *Client) runContainerTask(
 	return nil
 }
 
-// WaitTask polls the task status until the task is stopped and returns an
-// error that includes the log tail unless the exit status is OK. The delay
-// between polls starts at 200 ms and doubles up to 2 s.
+// WaitTask calls WaitTaskWithin with a three-minute limit.
 func (client *Client) WaitTask(ctx context.Context, node string, upid string) error {
-	waitCtx, cancel := context.WithTimeout(ctx, taskWaitTimeout)
+	return client.WaitTaskWithin(ctx, node, upid, taskWaitTimeout)
+}
+
+// WaitTaskWithin polls the task status until the task stops or timeout expires.
+// If the exit status is not OK, it returns an error with the log tail. The
+// delay between polls starts at 200 ms and doubles up to 2 s.
+func (client *Client) WaitTaskWithin(ctx context.Context, node string, upid string, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	delay := pollInitialDelay
 	for {
