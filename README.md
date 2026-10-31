@@ -121,6 +121,14 @@ The token needs these privileges on `/nodes/<node>` for
 | `POST /nodes/{node}/host-artifacts/{target}/stage` | `Sys.HostArtifacts.Modify` |
 | `POST /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Modify` |
 
+The token needs these privileges on `/nodes/<node>` for
+`pveguest_host_secret`.
+
+| API method | Privilege |
+| --- | --- |
+| `GET /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Audit` |
+| `PUT /nodes/{node}/host-artifacts/{target}/secrets/{field}` | `Sys.HostSecrets.Modify` |
+
 The token needs these privileges on `/vms/<vmid>` for
 `pveguest_container_power`.
 
@@ -615,6 +623,81 @@ Import IDs use the format `<node>:<workspace>`, such as
 node. The first apply after import installs the archive unless the node
 already has it installed with matching files.
 
+## pveguest_host_secret
+
+`pveguest_host_secret` sets one secret field of one workspace selector on one
+Proxmox node through
+`PUT /nodes/{node}/host-artifacts/{target}/secrets/{field}`. The request body
+contains only `value` and `version`. The response contains a task identifier
+(UPID).
+
+`{target}` is the lowercase hexadecimal SHA-256 of the exact workspace selector.
+The resource reads and writes only the selected target and field.
+
+The target policy lists each field, its storage file, its value rules, and its
+consumer units. The node validates the value and writes `NAME=value` followed by
+a newline to the storage file. The node restarts the consumer units when the
+storage file content changes. The provider does not run a service action.
+
+`value_wo` is write-only, and OpenTofu does not store it in plans or state.
+Read calls only `GET /nodes/{node}/host-artifacts/{target}`. The response does
+not contain a secret value. Each entry in `secrets[]` reports these fields:
+
+- `field` identifies the secret field.
+- `configured` reports whether the storage file matches the policy.
+- `version` reports the recorded version.
+- `sha256` reports the storage file SHA-256.
+
+After each apply, private state stores the storage file SHA-256 from `GET` as
+the applied SHA-256. Read compares the current SHA-256 with the applied SHA-256
+and stores only a boolean in a second private key. The resource does not expose
+either SHA-256 as an attribute.
+
+A plan proposes a write when the resource needs replacement or when any of
+these conditions apply:
+
+- `value_wo_version` changes.
+- `GET` reports `configured` false for the field.
+- The storage file SHA-256 differs from the applied SHA-256.
+
+A changed `value_wo` at the same `value_wo_version` does not plan a write. A plan
+that needs a write fails when the configuration does not set `value_wo`.
+
+An apply sends `value_wo` as `value` and `value_wo_version` as `version`, waits
+up to 10 minutes for the `hostsecret` task, and calls `GET`. The apply fails
+unless `GET` reports `configured` true and the requested version. The node
+rejects a lower version and another value at the same version. The diagnostic
+reports the rejection.
+
+A request with the recorded version and value repairs the storage file.
+A metadata repair does not restart a consumer.
+
+The API does not provide a method that deletes a secret field. Destroy calls
+only `GET` and fails while the node stores the field. Destroy succeeds when
+the node does not record a version and does not store a storage file for the
+field. A change to `node`, `workspace`, or `field` replaces the resource and
+requires the same destroy check. `tofu state rm` stops managing a stored field.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | yes | Select a key in the provider's `nodes` map. A change replaces the resource. |
+| `workspace` | string | yes | The argument selects the exact target workspace, such as `suburban/mwan`. A change replaces the resource. |
+| `field` | string | yes | The argument selects a secret field in the target policy. A change replaces the resource. |
+| `value_wo` | string, write-only | when a write is planned | The argument supplies the secret value. |
+| `value_wo_version` | number | yes | The argument sets the secret version and requires a value of at least 1. A change sends `value_wo` to the node. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `configured` | The node reports true when the storage file is a regular file and its mode, owner, and group match the policy. |
+| `version` | The attribute reports the version that the node recorded for the field. |
+
+Import IDs use the format `<node>:<workspace>:<field>`, such as
+`suburban:suburban/mwan:SMTP2GO_API_KEY`. Import calls only `GET`, sets
+`value_wo_version` to the recorded version, and stores the current storage file
+SHA-256 as the applied SHA-256. A matching configuration does not plan a write
+while `GET` reports `configured` true and the storage file SHA-256 matches the
+applied SHA-256.
+
 ## pveguest_container_options
 
 The resource configures eBPF token delegation with `bpfdelegate` and passes host network interfaces into the container as LXC physical devices with `hostnic0` through `hostnic9`.
@@ -887,6 +970,26 @@ metadata, the journal, and the stage directory.
 After each step, the test checks that the files, metadata, installed record,
 journal, stage directory, lock file, and `GET` response of the unrelated
 target remain unchanged. The controller needs HTTPS access to `github.com`.
+
+`TestAccHostSecret` uses the same variables and fixture targets. Each target
+policy lists the field `PVEGUEST_ACC_SECRET` with the storage file `secret.env`
+in the fixture directory and a pattern that accepts `pveguest-acc-` followed by
+32 lowercase hexadecimal characters. The consumer units
+`hostartifact-acceptance.service` and `hostartifact-acceptance-b.service` must
+run on the node. The token also needs `Sys.HostSecrets.Modify` on
+`/nodes/<node>`.
+
+The test uses root ssh only for deliberate drift and protected observations,
+including `systemctl show`, `find`, and `cat` output. It passes random synthetic
+markers to OpenTofu only through `TF_VAR_secret` and does not print them.
+It checks for markers in these outputs:
+
+- The saved plan archive.
+- The JSON plan.
+- The state files.
+- The decoded provider private data.
+- The OpenTofu output.
+- The `hostsecret` task logs.
 
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
