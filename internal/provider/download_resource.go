@@ -284,8 +284,11 @@ func withRequestHeaderAttributes(attributes map[string]schema.Attribute) map[str
 	attributes[requestHeadersVersionAttribute] = schema.Int64Attribute{
 		Optional: true,
 		Description: "The provider requires request_headers_wo_version when request_headers_wo is set. " +
-			"Changing request_headers_wo_version downloads the object again and sends the headers " +
-			"from the current configuration.",
+			"Changing request_headers_wo_version plans a rewrite of the resource. " +
+			"During apply, the provider fetches the object using the headers from the current configuration. " +
+			"With fetch = \"controller\", the controller reuses a cached object that matches the configured sha256 " +
+			"without sending an HTTP request or using the headers. " +
+			"With fetch = \"guest\", the provider always runs curl in the guest with the headers.",
 		Validators: []validator.Int64{
 			int64validator.AlsoRequires(fwpath.MatchRoot(requestHeadersAttribute)),
 		},
