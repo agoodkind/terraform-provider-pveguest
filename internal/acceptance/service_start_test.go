@@ -8,8 +8,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,6 +104,61 @@ func buildServiceDeb(t *testing.T, name string, unsatisfiable bool) []byte {
 	return content
 }
 
+// The first test that records a package set stores it as the baseline.
+// TestAccGuestIsClean compares the guest's installed packages with the baseline.
+var (
+	baselineMutex    sync.Mutex
+	baselinePackages map[string]bool
+)
+
+// installedPackages returns a set of packages dpkg lists with the status installed.
+func (g *testGuest) installedPackages() map[string]bool {
+	g.t.Helper()
+	installed := make(map[string]bool)
+	output := g.mustRun("dpkg-query", "-W", "-f=${db:Status-Abbrev}\t${Package}\n")
+	for line := range strings.SplitSeq(output, "\n") {
+		status, name, found := strings.Cut(line, "\t")
+		if !found {
+			continue
+		}
+		if strings.HasPrefix(status, "ii") || strings.HasPrefix(status, "hi") {
+			installed[name] = true
+		}
+	}
+	return installed
+}
+
+// packagesAbsentFrom returns sorted package names in the current set but absent from the earlier set.
+func packagesAbsentFrom(before map[string]bool, current map[string]bool) []string {
+	var added []string
+	for name := range current {
+		if !before[name] {
+			added = append(added, name)
+		}
+	}
+	slices.Sort(added)
+	return added
+}
+
+// useAddedPackagePurge records the installed packages and registers cleanup
+// that purges packages the test added. Cleanup does not run autoremove.
+func (g *testGuest) useAddedPackagePurge() {
+	g.t.Helper()
+	before := g.installedPackages()
+	baselineMutex.Lock()
+	if baselinePackages == nil {
+		baselinePackages = before
+	}
+	baselineMutex.Unlock()
+	g.t.Cleanup(func() {
+		added := packagesAbsentFrom(before, g.installedPackages())
+		if len(added) == 0 {
+			return
+		}
+		g.mustRun(append([]string{"apt-get", "purge", "-y", "--"}, added...)...)
+	})
+}
+
 // useServicePackage builds a test .deb file with an enabled pveguest-acc-svc.service
 // unit, writes it to the guest, and purges the package after the test.
 // The argument selects a variant with an unsatisfiable dependency.
@@ -120,10 +177,8 @@ func (g *testGuest) useNamedServicePackage(name string, unsatisfiable bool) {
 	}
 	g.useTestDirectory()
 	g.useInstallLockCleanup()
-	g.t.Cleanup(func() {
-		g.run(nil, "systemctl", "stop", "--", name+".service")
-		g.mustRun("apt-get", "purge", "-y", "--", name)
-	})
+	g.useAddedPackagePurge()
+	g.t.Cleanup(func() { g.run(nil, "systemctl", "stop", "--", name+".service") })
 	g.writeFile(serviceDebPathFor(name), string(buildServiceDeb(g.t, name, unsatisfiable)))
 }
 
@@ -207,7 +262,7 @@ func TestAccAptPackagesNoServiceStart(t *testing.T) {
 		t.Fatalf("%s is already installed in the test guest; purge it before the test", noStartPackage)
 	}
 	guest.useInstallLockCleanup()
-	t.Cleanup(func() { guest.mustRun("apt-get", "purge", "-y", "--", noStartPackage) })
+	guest.useAddedPackagePurge()
 	config := guest.aptPackagesConfig([]string{noStartPackage}, "start_services = false")
 
 	resource.Test(t, resource.TestCase{
@@ -362,7 +417,7 @@ func TestAccPackagesApplyTogetherWithoutServiceStart(t *testing.T) {
 	if guest.packageInstalled(noStartPackage) {
 		t.Fatalf("%s is already installed in the test guest; purge it before the test", noStartPackage)
 	}
-	t.Cleanup(func() { guest.mustRun("apt-get", "purge", "-y", "--", noStartPackage) })
+	guest.useAddedPackagePurge()
 	aptBlock := strings.TrimPrefix(
 		guest.aptPackagesConfig([]string{noStartPackage}, "start_services = false"),
 		guest.providerBlock(),

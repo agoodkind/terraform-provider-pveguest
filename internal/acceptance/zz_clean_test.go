@@ -1,6 +1,9 @@
 package acceptance_test
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestAccGuestIsClean runs after every other test of the package, because
 // go test runs files in name order. It fails when a test left one of its
@@ -52,6 +55,14 @@ func TestAccGuestIsClean(t *testing.T) {
 	}
 	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", secondServiceUnit, state)
+	}
+	baselineMutex.Lock()
+	baseline := baselinePackages
+	baselineMutex.Unlock()
+	if baseline == nil {
+		t.Log("No test recorded a package baseline. The check for added packages did not run.")
+	} else if added := packagesAbsentFrom(baseline, guest.installedPackages()); len(added) > 0 {
+		t.Errorf("Packages added by the tests remain installed: %s.", strings.Join(added, ", "))
 	}
 	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
 	if hasSysrepo && guest.sysrepoModuleRow() != "" {
