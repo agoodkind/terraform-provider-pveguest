@@ -12,6 +12,9 @@ readonly POLICY_MODE=0755
 readonly DPKG_LOCK_PATHS=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock)
 readonly PROC_LOCKS_PATH=/proc/locks
 readonly POLL_SECONDS=1
+readonly APT_CONFIG_DIRECTORY=/run
+readonly APT_CONFIG_PREFIX=pveguest-apt-policy.
+readonly APT_CONFIG_SUFFIX=.conf
 
 policy_path=$1
 lock_path=$2
@@ -19,8 +22,10 @@ lock_wait_seconds=$3
 marker_line=$4
 shift 4
 
-staged_path="${policy_path}.pveguest-staged.$$"
-apt_config_path="/run/pveguest-apt-policy.$$.conf"
+marker_text=${marker_line#"# "}
+staged_prefix="${policy_path}.pveguest-staged."
+staged_path="${staged_prefix}$$"
+apt_config_path="$APT_CONFIG_DIRECTORY/$APT_CONFIG_PREFIX$$$APT_CONFIG_SUFFIX"
 
 remove_policy() {
 	rm -f -- "$policy_path"
@@ -53,6 +58,37 @@ dpkg_lock_is_held() {
 	return 1
 }
 
+# After acquiring the install lock, remove marked staged and apt configuration
+# files for process IDs that no longer run.
+remove_stale_owned_files() {
+	local file suffix
+	for file in "${staged_prefix}"*; do
+		suffix=${file#"$staged_prefix"}
+		remove_if_stale "$file" "$suffix" "$marker_line"
+	done
+	for file in "$APT_CONFIG_DIRECTORY/$APT_CONFIG_PREFIX"*"$APT_CONFIG_SUFFIX"; do
+		suffix=${file#"$APT_CONFIG_DIRECTORY/$APT_CONFIG_PREFIX"}
+		suffix=${suffix%"$APT_CONFIG_SUFFIX"}
+		remove_if_stale "$file" "$suffix" "// $marker_text"
+	done
+}
+
+# Remove the file only if its name has a numeric process ID, it is a regular
+# file rather than a link, and it contains the expected marker line.
+# Keep the file if its process ID identifies the current script or a running
+# process.
+remove_if_stale() {
+	local file=$1 pid=$2 expected_line=$3
+	[[ $pid =~ ^[0-9]+$ ]] || return 0
+	[[ -f $file && ! -L $file ]] || return 0
+	[[ $pid -ne $$ && ! -d /proc/$pid ]] || return 0
+	if ! grep -qxF -- "$expected_line" "$file"; then
+		printf 'File %s matches a pveguest file name but lacks the marker. The script leaves it in place.\n' "$file" >&2
+		return 0
+	fi
+	rm -f -- "$file"
+}
+
 if ! exec 9>"$lock_path"; then
 	exit "$EXIT_SETUP_FAILED"
 fi
@@ -62,6 +98,7 @@ if ! flock -w "$lock_wait_seconds" 9; then
 	exit "$EXIT_LOCK_TIMEOUT"
 fi
 
+remove_stale_owned_files
 if [[ -e $policy_path || -L $policy_path ]]; then
 	if ! is_marked_policy; then
 		printf '%s exists without the pveguest marker. The script will not change it.\n' "$policy_path" >&2
@@ -99,8 +136,8 @@ fi
 # The link fails if the policy file exists, and apt-get stops before dpkg runs.
 # The post-invoke hook deletes the policy file after dpkg finishes.
 # apt-get owns both dpkg locks while it runs these hooks.
-if ! printf 'DPkg::Pre-Invoke:: "ln -T -- %s %s";\nDPkg::Post-Invoke:: "rm -f -- %s";\n' \
-	"$staged_path" "$policy_path" "$policy_path" >"$apt_config_path"; then
+if ! printf '// %s\nDPkg::Pre-Invoke:: "ln -T -- %s %s";\nDPkg::Post-Invoke:: "rm -f -- %s";\n' \
+	"$marker_text" "$staged_path" "$policy_path" "$policy_path" >"$apt_config_path"; then
 	printf 'The script could not create the apt configuration %s.\n' "$apt_config_path" >&2
 	exit "$EXIT_SETUP_FAILED"
 fi

@@ -56,13 +56,18 @@ func TestAccGuestIsClean(t *testing.T) {
 	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", secondServiceUnit, state)
 	}
+	installed := guest.installedPackages()
+	recordBaseline(installed)
 	baselineMutex.Lock()
 	baseline := baselinePackages
 	baselineMutex.Unlock()
-	if baseline == nil {
-		t.Log("No test recorded a package baseline. The check for added packages did not run.")
-	} else if added := packagesAbsentFrom(baseline, guest.installedPackages()); len(added) > 0 {
+	if added := packagesAbsentFrom(baseline, installed); len(added) > 0 {
 		t.Errorf("Packages added by the tests remain installed: %s.", strings.Join(added, ", "))
+	}
+	for _, pattern := range ownedFilePatterns {
+		if remaining := guest.findFiles(pattern.directory, pattern.name); len(remaining) > 0 {
+			t.Errorf("Files matching %s remain after the tests: %s", pattern.directory+"/"+pattern.name, strings.Join(remaining, ", "))
+		}
 	}
 	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
 	if hasSysrepo && guest.sysrepoModuleRow() != "" {

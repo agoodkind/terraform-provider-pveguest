@@ -35,6 +35,10 @@ const (
 
 	foreignPolicyContent = "#!/bin/sh\nexit 0\n"
 
+	unrelatedStagedPath = "/usr/sbin/policy-rc.d.pveguest-staged.keep"
+	unrelatedConfigPath = "/run/pveguest-apt-policy.4000001.conf"
+	killedScriptPattern = "^bash -c .*pveguest-package-install[.]lock"
+
 	servicePackage    = "pveguest-acc-svc"
 	serviceUnit       = "pveguest-acc-svc.service"
 	serviceDebPath    = testDirectory + "/pveguest-acc-svc.deb"
@@ -111,6 +115,14 @@ var (
 	baselinePackages map[string]bool
 )
 
+func recordBaseline(installed map[string]bool) {
+	baselineMutex.Lock()
+	defer baselineMutex.Unlock()
+	if baselinePackages == nil {
+		baselinePackages = installed
+	}
+}
+
 // installedPackages returns a set of packages dpkg lists with the status installed.
 func (g *testGuest) installedPackages() map[string]bool {
 	g.t.Helper()
@@ -145,11 +157,7 @@ func packagesAbsentFrom(before map[string]bool, current map[string]bool) []strin
 func (g *testGuest) useAddedPackagePurge() {
 	g.t.Helper()
 	before := g.installedPackages()
-	baselineMutex.Lock()
-	if baselinePackages == nil {
-		baselinePackages = before
-	}
-	baselineMutex.Unlock()
+	recordBaseline(before)
 	g.t.Cleanup(func() {
 		added := packagesAbsentFrom(before, g.installedPackages())
 		if len(added) == 0 {
@@ -617,6 +625,106 @@ func TestAccDebPackagesWaitsForInstallLock(t *testing.T) {
 		},
 	})
 	guest.requireBackgroundSuccess(done, "the lock holder command")
+}
+
+type ownedFilePattern struct {
+	directory string
+	name      string
+}
+
+var ownedFilePatterns = []ownedFilePattern{
+	{directory: "/usr/sbin", name: "policy-rc.d.pveguest-staged.*"},
+	{directory: "/run", name: "pveguest-apt-policy.*.conf"},
+}
+
+func (g *testGuest) findFiles(directory string, name string) []string {
+	g.t.Helper()
+	return strings.Fields(g.mustRun("find", directory, "-maxdepth", "1", "-name", name))
+}
+
+func (g *testGuest) ownedFilesIn(pattern ownedFilePattern) []string {
+	g.t.Helper()
+	var owned []string
+	for _, path := range g.findFiles(pattern.directory, pattern.name) {
+		if path != unrelatedStagedPath && path != unrelatedConfigPath {
+			owned = append(owned, path)
+		}
+	}
+	return owned
+}
+
+// TestAccDebPackagesRemovesFilesOfKilledScript kills a guest install script
+// with SIGKILL and checks that the next install removes its marked files,
+// preserves unrelated files, and installs another package.
+func TestAccDebPackagesRemovesFilesOfKilledScript(t *testing.T) {
+	guest := newTestGuest(t)
+	guest.useNamedServicePackage(servicePackage, false)
+	guest.useNamedServicePackage(secondServicePackage, false)
+	if guest.exists(policyFilePath) {
+		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
+	}
+	guest.writeFile(unrelatedStagedPath, "#!/bin/sh\n"+policyMarker+"\nexit 101\n")
+	guest.writeFile(unrelatedConfigPath, "DPkg::Pre-Invoke:: \"true\";\n")
+	t.Cleanup(func() { guest.mustRun("rm", "-f", "--", unrelatedStagedPath, unrelatedConfigPath) })
+	guest.writeFile(postinstSleepPath, fmt.Sprintf("%d\n", killedApplySleepSeconds))
+
+	binary := requireVariable(t, tofuPathVariable)
+	first := &tofuWorkspace{t: t, directory: t.TempDir(), binary: binary}
+	second := &tofuWorkspace{t: t, directory: t.TempDir(), binary: binary}
+	first.writeConfig(guest.providerBlock() + guest.debPackagesBlockFor(servicePackage, "start_services = false"))
+	second.writeConfig(guest.providerBlock() + guest.debPackagesBlockFor(secondServicePackage, "start_services = false"))
+	first.mustRun("init", "-no-color")
+	second.mustRun("init", "-no-color")
+	t.Cleanup(func() { first.run("destroy", "-no-color", "-auto-approve") })
+	t.Cleanup(func() { second.run("destroy", "-no-color", "-auto-approve") })
+
+	firstCommand, _ := startApply(t, first)
+	guest.waitFor(fmt.Sprintf("the slow installation to enable %s", serviceUnit), func() bool {
+		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
+	})
+	stagedFiles := guest.ownedFilesIn(ownedFilePatterns[0])
+	configFiles := guest.ownedFilesIn(ownedFilePatterns[1])
+	if len(stagedFiles) != 1 || len(configFiles) != 1 {
+		t.Fatalf("The running install has %d staged files and %d apt configuration files; the test expects one of each.",
+			len(stagedFiles), len(configFiles))
+	}
+	staleFiles := append(stagedFiles, configFiles...)
+	// Match the guest script by the lock path in its command line and kill it.
+	// The apt-get process that the script started continues to run.
+	guest.mustRun("pkill", "-KILL", "-f", "--", killedScriptPattern)
+	_ = firstCommand.Wait()
+	for _, path := range staleFiles {
+		if !guest.exists(path) {
+			t.Fatalf("The killed script should leave %s in place, but the file is missing.", path)
+		}
+	}
+
+	guest.writeFile(postinstSleepPath, "0\n")
+	second.mustRun("apply", "-no-color", "-auto-approve")
+
+	for _, path := range staleFiles {
+		if guest.exists(path) {
+			t.Fatalf("The next install should delete %s, but the file remains.", path)
+		}
+	}
+	for _, path := range []string{unrelatedStagedPath, unrelatedConfigPath} {
+		if !guest.exists(path) {
+			t.Fatalf("The next install should leave %s in place, but the file is missing.", path)
+		}
+	}
+	for _, name := range []string{servicePackage, secondServicePackage} {
+		if err := guest.expectPackageInstalled(name)(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, unit := range []string{serviceUnit, secondServiceUnit} {
+		if err := guest.expectUnitState(unit, "enabled", "inactive")(nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := guest.expectNoPolicyFile()(nil); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // startApply starts a tofu apply process and returns the process and its output buffer.
