@@ -89,7 +89,7 @@ resource "pveguest_systemd_unit" "ssh" {
 | `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
 | `nodes.<name>.max_exec_requests` | number | no | `4` | This setting limits concurrent guest commands for this node configuration and requires a value of at least 1. |
 | `max_requests` | number | no | `4` | Concurrent API requests per hypervisor. |
-| `controller_ca_file` | string | no | | Path of a PEM file with certificate authorities that the controller trusts in addition to the system roots when `pveguest_download` uses `fetch = "controller"`. |
+| `controller_ca_file` | string | no | | The controller trusts certificate authorities from this PEM file in addition to the system roots when `pveguest_download` uses `fetch = "controller"` or `pveguest_host_artifact` downloads release assets. |
 | `smtp2go_api_key` | string, sensitive | no | | The key authenticates SMTP2GO requests for `pveguest_mail_relay`. The provider uses `PVEGUEST_SMTP2GO_API_KEY` when the argument is empty. |
 | `smtp2go_api_url` | string | no | `https://api.smtp2go.com/v3` | The URL selects the SMTP2GO endpoint. The provider accepts HTTPS, or HTTP for localhost and loopback addresses. |
 
@@ -111,6 +111,15 @@ The token needs these privileges on `/nodes/<node>` for
 | --- | --- |
 | `GET /nodes/{node}/kernel-modules` | `Sys.KernelModules.Audit` |
 | `PUT /nodes/{node}/kernel-modules` | `Sys.KernelModules.Modify` |
+
+The token needs these privileges on `/nodes/<node>` for
+`pveguest_host_artifact`.
+
+| API method | Privilege |
+| --- | --- |
+| `GET /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Audit` |
+| `POST /nodes/{node}/host-artifacts/{target}/stage` | `Sys.HostArtifacts.Modify` |
+| `POST /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Modify` |
 
 The token needs these privileges on `/vms/<vmid>` for
 `pveguest_container_power`.
@@ -529,6 +538,83 @@ value is false.
 | `modules` | set of string | The set contains every module in the persistent list. |
 | `loaded` | map of bool | Each value reports whether the listed module is loaded. |
 
+## pveguest_host_artifact
+
+This resource installs a signed host artifact archive for one workspace
+selector on a node. The node must provide the overlay host artifact methods
+under `/nodes/{node}/host-artifacts/{target}`, a policy file for the target,
+and the trusted root. Stock Proxmox VE does not provide these methods. The
+`{target}` value is the lowercase hexadecimal SHA-256 of the exact `workspace`
+value. The resource calls only the methods of that target.
+
+The controller downloads release assets from
+`https://github.com/<repository>/releases/download/<release_tag>/<asset>` into
+the cache that `pveguest_download` uses with `fetch = "controller"`. A download
+fails when its SHA-256 does not match the configured value. The archive must
+contain `manifest.json` with schema version 1. The manifest values for
+`repository`, `source_revision`, and `workspace` must equal the arguments.
+
+Read calls only `GET`. Read stores the installed archive SHA-256 and source
+revision, the target state, `observed_sha256`, and the live values of each
+present file and owned directory.
+
+A plan downloads the pinned archive into the controller cache, reads
+`manifest.json`, and compares the manifest with the refreshed state. The plan
+proposes an update in these cases:
+
+- The installed archive differs from `sha256` or `source_revision`.
+- The target state is not `committed`.
+- A file is missing, or its SHA-256, mode, owner, or group differs from the
+  manifest.
+- An owned directory is missing, or its mode, owner, or group differs from the
+  manifest.
+- `GET` reports `matches` false for a file or an owned directory.
+- `observed_sha256` differs from the value after the last apply.
+
+An apply calls `GET` before deciding whether to install. When the node already
+has the pinned archive installed and every file and owned directory matches
+the manifest, the apply does not install. Otherwise the apply downloads the
+attestation bundle, stages the archive and bundle in 96 KiB chunks, starts the
+`hostartifact` task, waits up to 10 minutes with `WaitTaskWithin`, and calls
+`GET` again. The apply fails when the node still reports a difference.
+
+The node runs `gh attestation verify` to verify the archive. The provider does
+not verify attestations. The node restores an interrupted transaction and
+repairs file and owned directory metadata. The node does not repair an
+inspect-only parent directory.
+
+Destroy calls only `GET`. Destroy fails while the installed record lists
+files. To remove the files of a target, install an archive with an empty file
+list before destroying the resource.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | yes | Select a key in the provider's `nodes` map. A change replaces the resource. |
+| `workspace` | string | yes | Exact workspace selector of the target, such as `suburban/mwan`. A change replaces the resource. |
+| `repository` | string | yes | GitHub repository of the release, such as `agoodkind/configs`. |
+| `release_tag` | string | yes | Release tag of the archive and the bundle. |
+| `asset` | string | yes | Release asset name of the archive. |
+| `sha256` | string | yes | SHA-256 of the archive. |
+| `bundle_asset` | string | yes | Release asset name of the attestation bundle. |
+| `bundle_sha256` | string | yes | SHA-256 of the attestation bundle. |
+| `source_revision` | string | yes | 40-character commit that built the archive. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `target` | SHA-256 of `workspace`. |
+| `state` | `none`, `committed`, or `interrupted`. |
+| `installed_sha256` | SHA-256 of the installed archive, or an empty string without an installed record. |
+| `installed_source_revision` | Source revision of the installed archive, or an empty string without an installed record. |
+| `observed_sha256` | Digest of the live files and owned directories that `GET` reports. |
+| `files` | Map from path to the live `sha256`, `mode`, `owner`, and `group` of each present file. |
+| `directories` | Map from path to the live `mode`, `owner`, and `group` of each present owned directory. |
+| `write_ids` | Map from path to the UPID of the task that last wrote the file. A file that an install does not change keeps its `write_id`. Use these values in `restart_on` of the units that read the files. |
+
+Import IDs use the format `<node>:<workspace>`, such as
+`suburban:suburban/mwan`. Import calls only `GET` and does not write to the
+node. The first apply after import installs the archive unless the node
+already has it installed with matching files.
+
 ## pveguest_container_options
 
 The resource configures eBPF token delegation with `bpfdelegate` and passes host network interfaces into the container as LXC physical devices with `hostnic0` through `hostnic9`.
@@ -746,6 +832,8 @@ make testacc \
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 | `PVEGUEST_ACC_SMTP2GO_API_KEY_FILE` | File containing the SMTP2GO API key for `TestAccMailRelayImport`. The test fails if `TF_ACC` is set and this variable is missing. |
+| `PVEGUEST_ACC_HOST_SSH` | `TestAccHostArtifact` uses this ssh destination to run a root shell on `PVEGUEST_ACC_NODE`. The test skips when unset. |
+| `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | This JSON file maps the fixture cases `valid-v1`, `valid-v2`, `other-target`, `recovery-v1`, and `recovery-v2` to the pin JSON of their releases in `agoodkind/configs`. The test skips when unset. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the
@@ -771,6 +859,35 @@ items at the end:
 - The controller needs HTTPS access to `api.smtp2go.com`.
 - The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
+`TestAccHostArtifact` changes files on the node. The node needs policies for
+the disposable fixture targets `suburban/hostartifact-acceptance` and
+`suburban/hostartifact-acceptance-b`. The token needs `Sys.HostArtifacts.Audit`
+and `Sys.HostArtifacts.Modify` on `/nodes/<node>`. The test uses the root shell
+at `PVEGUEST_ACC_HOST_SSH` to run `stat`, `sha256sum`, `tee`, `chmod`, and `rm`.
+The test deletes `suburban/hostartifact-acceptance` at the start and both
+fixture targets at the end. It changes only these items:
+
+- `/srv/hostartifact-acceptance` and `/srv/hostartifact-acceptance-b`.
+- The directories of both targets under `/var/lib/pve-overlay/host-artifacts/`.
+
+The test installs the unrelated target, then imports and installs the fixture
+target. It repairs a changed file, a missing file, and an owned directory mode
+separately. Each repair runs a plan, an apply, and an empty repeat plan.
+
+The test stops one install with `DELETE /nodes/{node}/tasks/{upid}` and checks
+the task result and target state. If SIGKILL leaves a journal, the next
+install restores the files before installing the requested archive.
+
+The test then installs `valid-v1` through the API, imports the target into
+fresh state, and applies the matching pin. It checks that the target snapshot
+stays unchanged after import and apply. The snapshot covers the installed
+record bytes, the UPID and write IDs in the `GET` response, file contents and
+metadata, the journal, and the stage directory.
+
+After each step, the test checks that the files, metadata, installed record,
+journal, stage directory, lock file, and `GET` response of the unrelated
+target remain unchanged. The controller needs HTTPS access to `github.com`.
+
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
 access to `www.rfc-editor.org` over HTTPS.
@@ -789,6 +906,7 @@ The last test, `TestAccGuestIsClean`, fails when one of these items is still
 in the guest. `TESTARGS` passes extra arguments to `go test`, for example
 `TESTARGS="-run TestAccLink"`.
 
-One test runs the `tofu` binary against the installed provider in a temporary
-directory and reads the raw state file and the saved plan. The other tests use
+Some tests, including `TestAccHostArtifact`, run the `tofu` binary against the
+installed provider in a temporary directory. `TestAccInstalledProviderWriteOnly`
+also reads the raw state file and the saved plan. The other tests use
 `terraform-plugin-testing` with the provider in the test process.
