@@ -863,19 +863,30 @@ items at the end:
 the disposable fixture targets `suburban/hostartifact-acceptance` and
 `suburban/hostartifact-acceptance-b`. The token needs `Sys.HostArtifacts.Audit`
 and `Sys.HostArtifacts.Modify` on `/nodes/<node>`. The test uses the root shell
-at `PVEGUEST_ACC_HOST_SSH` to run `stat`, `sha256sum`, `tee`, `chmod`, `rm`,
-and `kill`. The test changes only these items and deletes them at the start and
-at the end:
+at `PVEGUEST_ACC_HOST_SSH` to run `stat`, `sha256sum`, `tee`, `chmod`, and `rm`.
+The test deletes `suburban/hostartifact-acceptance` at the start and both
+fixture targets at the end. It changes only these items:
 
 - `/srv/hostartifact-acceptance` and `/srv/hostartifact-acceptance-b`.
 - The directories of both targets under `/var/lib/pve-overlay/host-artifacts/`.
 
-The test installs the unrelated target, then imports, installs, and repairs
-the fixture target. It stops one install with SIGKILL and checks that the next
-apply recovers it. After each step it checks that the files, metadata,
-installed record, journal, stage directory, lock file, and `GET` response of
-the unrelated target are unchanged. The controller needs HTTPS access to
-`github.com`.
+The test installs the unrelated target, then imports and installs the fixture
+target. It repairs a changed file, a missing file, and an owned directory mode
+separately. Each repair runs a plan, an apply, and an empty repeat plan.
+
+The test stops one install with `DELETE /nodes/{node}/tasks/{upid}` and checks
+the task result and target state. If SIGKILL leaves a journal, the next
+install restores the files before installing the requested archive.
+
+The test then installs `valid-v1` through the API, imports the target into
+fresh state, and applies the matching pin. It checks that the target snapshot
+stays unchanged after import and apply. The snapshot covers the installed
+record bytes, the UPID and write IDs in the `GET` response, file contents and
+metadata, the journal, and the stage directory.
+
+After each step, the test checks that the files, metadata, installed record,
+journal, stage directory, lock file, and `GET` response of the unrelated
+target remain unchanged. The controller needs HTTPS access to `github.com`.
 
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
