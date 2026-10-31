@@ -56,6 +56,18 @@ func TestAccGuestIsClean(t *testing.T) {
 	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", secondServiceUnit, state)
 	}
+	if guest.packageInstalled(thirdServicePackage) {
+		t.Errorf("%s is installed after the tests", thirdServicePackage)
+	}
+	if state := guest.systemctlState("is-active", thirdServiceUnit); state != "inactive" {
+		t.Errorf("%s has state %s after the tests; expected inactive", thirdServiceUnit, state)
+	}
+	if guest.packageInstalled(fourthServicePackage) {
+		t.Errorf("%s is installed after the tests", fourthServicePackage)
+	}
+	if state := guest.systemctlState("is-active", fourthServiceUnit); state != "inactive" {
+		t.Errorf("%s has state %s after the tests; expected inactive", fourthServiceUnit, state)
+	}
 	installed := guest.installedPackages()
 	recordBaseline(installed)
 	baselineMutex.Lock()

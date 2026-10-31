@@ -12,6 +12,7 @@ readonly POLICY_MODE=0755
 readonly DPKG_LOCK_PATHS=(/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock)
 readonly PROC_LOCKS_PATH=/proc/locks
 readonly POLL_SECONDS=1
+readonly SIGNAL_STATUS_BASE=128
 readonly APT_CONFIG_DIRECTORY=/run
 readonly APT_CONFIG_PREFIX=pveguest-apt-policy.
 readonly APT_CONFIG_SUFFIX=.conf
@@ -34,24 +35,43 @@ remove_policy() {
 # Delete the policy file if it is a hard link to the staged file.
 # Delete the staged file and the temporary apt configuration.
 cleanup() {
+	local exit_status=$?
 	if [[ $policy_path -ef $staged_path ]]; then
+		if ((exit_status > SIGNAL_STATUS_BASE)); then
+			wait_for_dpkg_locks
+		fi
 		remove_policy
 	fi
 	rm -f -- "$staged_path" "$apt_config_path"
+}
+
+# wait_for_dpkg_locks waits up to the lock wait limit after a signal exit.
+# A surviving dpkg process owns the dpkg lock while its maintainer scripts run.
+# The script deletes the policy file only after processes release the dpkg locks.
+wait_for_dpkg_locks() {
+	local deadline=$((SECONDS + lock_wait_seconds))
+	while dpkg_lock_is_held; do
+		if ((SECONDS >= deadline)); then
+			return 0
+		fi
+		sleep "$POLL_SECONDS"
+	done
 }
 
 is_marked_policy() {
 	[[ -f $policy_path && ! -L $policy_path ]] && grep -qxF -- "$marker_line" "$policy_path"
 }
 
-# Check /proc/locks for a lock on either dpkg lock inode.
-# This check does not take a lock.
+# dpkg_lock_is_held reads /proc/locks and matches the lock file's
+# hexadecimal device major and minor numbers and inode to check
+# whether a process owns the lock.
 dpkg_lock_is_held() {
-	local lock_file inode
+	local lock_file device_major device_minor inode lock_key
 	for lock_file in "${DPKG_LOCK_PATHS[@]}"; do
 		[[ -e $lock_file ]] || continue
-		inode=$(stat -c %i -- "$lock_file") || continue
-		if grep -q ":${inode} " "$PROC_LOCKS_PATH"; then
+		read -r device_major device_minor inode < <(stat -c '%Hd %Ld %i' -- "$lock_file") || continue
+		lock_key=$(printf '%02x:%02x:%d' "$device_major" "$device_minor" "$inode")
+		if grep -qF -- " ${lock_key} " "$PROC_LOCKS_PATH"; then
 			return 0
 		fi
 	done
@@ -73,15 +93,34 @@ remove_stale_owned_files() {
 	done
 }
 
-# Remove the file only if its name has a numeric process ID, it is a regular
-# file rather than a link, and it contains the expected marker line.
-# Keep the file if its process ID identifies the current script or a running
-# process.
+# files_in_use returns success for the current script or a pid with a /proc entry.
+# It also returns success when an exclusive, non-blocking flock on that pid's
+# apt configuration file fails.
+# An apt-get process that survives a dead script keeps this lock until it ends.
+files_in_use() {
+	local pid=$1
+	local config_file="$APT_CONFIG_DIRECTORY/$APT_CONFIG_PREFIX$pid$APT_CONFIG_SUFFIX"
+	if [[ $pid -eq $$ || -d /proc/$pid ]]; then
+		return 0
+	fi
+	if [[ ! -f $config_file || -L $config_file ]]; then
+		return 1
+	fi
+	if flock -x -n "$config_file" true; then
+		return 1
+	fi
+	return 0
+}
+
+# Skip links, names without digits, and files that files_in_use reports.
+# Delete the remaining file only when it contains the expected marker line.
 remove_if_stale() {
 	local file=$1 pid=$2 expected_line=$3
 	[[ $pid =~ ^[0-9]+$ ]] || return 0
 	[[ -f $file && ! -L $file ]] || return 0
-	[[ $pid -ne $$ && ! -d /proc/$pid ]] || return 0
+	if files_in_use "$pid"; then
+		return 0
+	fi
 	if ! grep -qxF -- "$expected_line" "$file"; then
 		printf 'File %s matches a pveguest file name but lacks the marker. The script leaves it in place.\n' "$file" >&2
 		return 0
@@ -142,6 +181,15 @@ if ! printf '// %s\nDPkg::Pre-Invoke:: "ln -T -- %s %s";\nDPkg::Post-Invoke:: "r
 	exit "$EXIT_SETUP_FAILED"
 fi
 export APT_CONFIG="$apt_config_path"
+
+# The script opens the apt configuration file on descriptor 8 and takes a shared flock.
+# apt-get inherits descriptor 8 and keeps the lock while waiting for the dpkg lock.
+# apt-get marks descriptors above 2 as close-on-exec before starting dpkg.
+# dpkg and its maintainer scripts do not inherit descriptor 8.
+if ! exec 8<"$apt_config_path" || ! flock -s -n 8; then
+	printf 'The script could not create the apt configuration %s.\n' "$apt_config_path" >&2
+	exit "$EXIT_SETUP_FAILED"
+fi
 
 # Close file descriptor 9 so a daemon started by a package script
 # does not inherit the lock.
