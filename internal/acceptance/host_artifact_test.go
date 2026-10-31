@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,9 +63,10 @@ const (
 	hostTaskTimeout     = 10 * time.Minute
 	interruptDeadline   = 5 * time.Minute
 	interruptPollPeriod = 20 * time.Millisecond
-	upidPIDField        = 2
-	upidPIDBase         = 16
-	upidPIDBits         = 64
+	taskStopDeadline    = time.Minute
+	taskStopPollPeriod  = 200 * time.Millisecond
+	taskInterruptedExit = "received interrupt"
+	taskKilledExit      = "unexpected status"
 	missingPathMessage  = "No such file or directory"
 	absentSnapshotValue = "absent"
 	destroyRefusalText  = "empty file list"
@@ -119,8 +119,8 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 		nodeConfig: nodeConfig,
 		ssh:        ssh,
 		pins:       readFixturePins(t, pinFile),
-		workspace:  &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)},
 	}
+	test.workspace = test.newWorkspace()
 	// The provider and the test download release assets into this cache.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	return test
@@ -190,15 +190,16 @@ func TestAccHostArtifact(t *testing.T) {
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 
 	test.hostWrite(fixtureDirectory+"/"+firstFixtureFile, editedFixtureContent)
+	test.expectRepair(caseValidV1)
+	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+
 	test.hostMustRun("rm", "-f", "--", fixtureDirectory+"/"+secondFixtureFile)
-	test.expectPlannedChange()
-	test.applyClean(caseValidV1)
+	test.expectRepair(caseValidV1)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 
 	writeIDs := fileWriteIDs(test.get(target))
 	test.hostMustRun("chmod", driftedDirectoryMode, "--", fixtureDirectory)
-	test.expectPlannedChange()
-	repaired := test.applyClean(caseValidV1)
+	repaired := test.expectRepair(caseValidV1)
 	if got := fileWriteIDs(repaired); !maps.Equal(got, writeIDs) {
 		t.Fatalf("write_ids after the directory repair are %v, want %v", got, writeIDs)
 	}
@@ -211,11 +212,10 @@ func TestAccHostArtifact(t *testing.T) {
 
 	test.workspace.writeConfig(test.config(caseRecoveryV1))
 	test.applyClean(caseRecoveryV1)
-	test.interruptInstall(target, caseRecoveryV2)
+	test.stopInstall(target, caseRecoveryV1, caseRecoveryV2)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 	test.workspace.writeConfig(test.config(caseRecoveryV2))
-	test.expectPlannedChange()
-	test.applyClean(caseRecoveryV2)
+	test.expectRepair(caseRecoveryV2)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 
 	// Destroy fails while the installed record lists files.
@@ -227,6 +227,25 @@ func TestAccHostArtifact(t *testing.T) {
 	test.expectSnapshot(installed, target, fixtureDirectory)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 	test.workspace.mustRun("state", "rm", hostArtifactAddress)
+
+	// The test installs valid-v1 through the API, imports the target into fresh
+	// state, and applies the matching pin. The target snapshot stays unchanged.
+	test.installDirectly(fixtureWorkspace, caseValidV1)
+	matching := test.snapshot(target, fixtureDirectory)
+	test.workspace = test.newWorkspace()
+	test.workspace.writeConfig(test.config(caseValidV1))
+	test.workspace.mustRun("init", "-no-color")
+	test.workspace.mustRun("import", "-no-color", hostArtifactAddress, test.node+":"+fixtureWorkspace)
+	test.expectSnapshot(matching, target, fixtureDirectory)
+	test.applyClean(caseValidV1)
+	test.expectSnapshot(matching, target, fixtureDirectory)
+	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	test.workspace.mustRun("state", "rm", hostArtifactAddress)
+}
+
+func (h *hostArtifactTest) newWorkspace() *tofuWorkspace {
+	h.t.Helper()
+	return &tofuWorkspace{t: h.t, directory: h.t.TempDir(), binary: requireVariable(h.t, tofuPathVariable)}
 }
 
 func (h *hostArtifactTest) config(fixtureCase string) string {
@@ -282,12 +301,16 @@ func (h *hostArtifactTest) applyClean(fixtureCase string) transport.HostArtifact
 	return current
 }
 
-func (h *hostArtifactTest) expectPlannedChange() {
+// expectRepair checks that the plan proposes a change. It calls applyClean to
+// repair the target and check that the repeat plan is empty. It returns the
+// GET response after the apply.
+func (h *hostArtifactTest) expectRepair(fixtureCase string) transport.HostArtifactState {
 	h.t.Helper()
 	output, exitCode := h.workspace.run("plan", "-no-color", "-detailed-exitcode")
 	if exitCode != planChangesExitCode {
 		h.t.Fatalf("plan exited with status %d, want %d:\n%s", exitCode, planChangesExitCode, output)
 	}
+	return h.applyClean(fixtureCase)
 }
 
 func (h *hostArtifactTest) expectInstalled(current transport.HostArtifactState, pin hostArtifactPinEntry) {
@@ -381,10 +404,10 @@ func (h *hostArtifactTest) startInstall(target string, fixtureCase string) strin
 	return upid
 }
 
-// interruptInstall starts an install, waits until GET reports the journal of
-// the install, and kills the task worker with SIGKILL. The journal stays on
-// the node, and GET reports the target as interrupted.
-func (h *hostArtifactTest) interruptInstall(target string, fixtureCase string) {
+// stopInstall starts an install of fixtureCase over the installed priorCase.
+// It waits until GET reports the install journal, then calls
+// DELETE /nodes/{node}/tasks/{upid}. It checks the task result and target state.
+func (h *hostArtifactTest) stopInstall(target string, priorCase string, fixtureCase string) {
 	h.t.Helper()
 	pin := h.pins[fixtureCase]
 	upid := h.startInstall(target, fixtureCase)
@@ -398,32 +421,64 @@ func (h *hostArtifactTest) interruptInstall(target string, fixtureCase string) {
 			h.t.Fatalf("the install of %s committed before the test stopped it", fixtureCase)
 		}
 		if time.Now().After(deadline) {
-			h.t.Fatalf("GET did not report the journal of %s within %s", fixtureCase, interruptDeadline)
+			h.t.Fatalf("the GET response did not report the journal of %s within %s", fixtureCase, interruptDeadline)
 		}
 		time.Sleep(interruptPollPeriod)
 	}
-	h.hostMustRun("kill", "-KILL", "--", strconv.FormatInt(upidPID(h.t, upid), 10))
-	if err := h.client.WaitTaskWithin(context.Background(), h.node, upid, hostTaskTimeout); err == nil {
-		h.t.Fatalf("the stopped install task %s ended with exit status OK", upid)
+	if err := h.client.StopTask(context.Background(), h.node, upid); err != nil {
+		h.t.Fatalf("stop task %s with DELETE: %v", upid, err)
 	}
-	if state := h.get(target).State; state != transport.HostArtifactStateInterrupted {
-		h.t.Fatalf("target state after SIGKILL is %s, want %s", state, transport.HostArtifactStateInterrupted)
+	h.expectStopResult(target, h.pins[priorCase], h.waitTaskStopped(upid))
+}
+
+// waitTaskStopped polls until the node reports TaskStopped. It fails the test
+// if a status read fails or the task does not stop before the deadline.
+func (h *hostArtifactTest) waitTaskStopped(upid string) transport.TaskStatus {
+	h.t.Helper()
+	deadline := time.Now().Add(taskStopDeadline)
+	for {
+		status, err := h.client.GetTaskStatus(context.Background(), h.node, upid)
+		if err != nil {
+			h.t.Fatalf("read the status of task %s: %v", upid, err)
+		}
+		if status.Status == transport.TaskStopped {
+			return status
+		}
+		if time.Now().After(deadline) {
+			h.t.Fatalf("task %s did not stop within %s", upid, taskStopDeadline)
+		}
+		time.Sleep(taskStopPollPeriod)
 	}
 }
 
-// upidPID returns the worker process ID, which the UPID stores as the third
-// field in hexadecimal.
-func upidPID(t *testing.T, upid string) int64 {
-	t.Helper()
-	fields := strings.Split(upid, ":")
-	if len(fields) <= upidPIDField {
-		t.Fatalf("UPID %q does not contain a process ID", upid)
+// expectStopResult checks the SIGTERM and SIGKILL results of a stopped install.
+// On SIGTERM, the hostartifact task restores the files and removes the journal
+// before it ends with exit status "received interrupt". GET reports committed
+// with the prior installed record.
+// After SIGKILL, the task log does not end with a result line, and the task
+// exits with "unexpected status". The journal stays, and GET reports
+// interrupted. The next install restores the files first.
+func (h *hostArtifactTest) expectStopResult(target string, prior hostArtifactPinEntry, status transport.TaskStatus) {
+	h.t.Helper()
+	current := h.get(target)
+	journal := h.hostPathState(hostStateDirectory + target + "/" + journalRecord)
+	switch status.ExitStatus {
+	case taskInterruptedExit:
+		if journal != absentSnapshotValue {
+			h.t.Fatalf("journal after the task restored the files is %q, want %s", journal, absentSnapshotValue)
+		}
+		h.expectInstalled(current, prior)
+	case taskKilledExit:
+		if journal == absentSnapshotValue || current.State != transport.HostArtifactStateInterrupted {
+			h.t.Fatalf("target state after SIGKILL is %s with journal %q, want %s with a journal",
+				current.State, journal, transport.HostArtifactStateInterrupted)
+		}
+		if current.Installed == nil || current.Installed.SHA256 != prior.SHA256 {
+			h.t.Fatalf("installed record after SIGKILL is %+v, want archive sha256 %s", current.Installed, prior.SHA256)
+		}
+	default:
+		h.t.Fatalf("stopped task has exit status %q, want %q or %q", status.ExitStatus, taskInterruptedExit, taskKilledExit)
 	}
-	pid, err := strconv.ParseInt(fields[upidPIDField], upidPIDBase, upidPIDBits)
-	if err != nil {
-		t.Fatalf("UPID %q has an invalid process ID: %v", upid, err)
-	}
-	return pid
 }
 
 func (h *hostArtifactTest) download(releaseTag string, asset string, wantHash string) []byte {
