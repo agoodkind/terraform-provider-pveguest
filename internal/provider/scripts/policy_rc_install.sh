@@ -32,30 +32,36 @@ remove_policy() {
 	rm -f -- "$policy_path"
 }
 
-# Delete the policy file if it is a hard link to the staged file.
-# Delete the staged file and the temporary apt configuration.
+# After a signal exit, cleanup waits for processes to release the dpkg locks.
+# If the wait limit passes first, cleanup keeps the policy file, the staged copy,
+# and the apt configuration and reports this to standard error.
+# Otherwise, cleanup deletes the policy file if it is a hard link to the staged copy.
+# It then deletes the staged copy and the apt configuration.
 cleanup() {
 	local exit_status=$?
 	if [[ $policy_path -ef $staged_path ]]; then
-		if ((exit_status > SIGNAL_STATUS_BASE)); then
-			wait_for_dpkg_locks
+		if ((exit_status > SIGNAL_STATUS_BASE)) && ! wait_for_dpkg_locks; then
+			printf 'A process still owns a dpkg lock after %s seconds. The script leaves the policy file %s, the staged copy, and the apt configuration in place.\n' \
+				"$lock_wait_seconds" "$policy_path" >&2
+			return 0
 		fi
 		remove_policy
 	fi
 	rm -f -- "$staged_path" "$apt_config_path"
 }
 
-# wait_for_dpkg_locks waits up to the lock wait limit after a signal exit.
-# A surviving dpkg process owns the dpkg lock while its maintainer scripts run.
-# The script deletes the policy file only after processes release the dpkg locks.
+# wait_for_dpkg_locks waits for at most the lock wait seconds.
+# It returns success when processes do not own any dpkg locks.
+# It returns failure if a process still owns a lock when the wait limit passes.
 wait_for_dpkg_locks() {
 	local deadline=$((SECONDS + lock_wait_seconds))
 	while dpkg_lock_is_held; do
 		if ((SECONDS >= deadline)); then
-			return 0
+			return 1
 		fi
 		sleep "$POLL_SECONDS"
 	done
+	return 0
 }
 
 is_marked_policy() {
