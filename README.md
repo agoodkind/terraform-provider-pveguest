@@ -245,12 +245,33 @@ runs `gzip -dc` into the second temporary file. The provider compares the
 SHA-256 hash of that file with the hash that the controller computed from the
 payload.
 
+Each header name must be an HTTP token containing only letters, digits, and
+the characters ``!#$%&'*+-.^_`|~``. A header value must not contain a carriage
+return, a line feed, or a NUL character. Validation errors identify the header
+without printing its value. Apply replaces each header value with `[redacted]`
+in every error message.
+
+With `fetch = "controller"`, the provider process on the machine that runs
+OpenTofu sends each header on its HTTPS request. The HTTP client follows at
+most 10 redirects. A redirect to a different scheme, host, or port removes
+every configured header from the redirected request. A signed asset URL on
+another host does not receive the headers.
+
+With `fetch = "guest"`, the provider writes each header as a
+`header = "Name: value"` line to the standard input of `curl --config -`.
+The headers do not appear in command arguments or the process list. With
+headers set, `curl` runs without `-L` and does not follow redirects. A redirect
+response fails the apply with an error that directs the operator to set
+`fetch = "controller"`.
+
 | Argument | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `url` | string | yes | | HTTPS URL. The guest needs network access to it with `fetch = "guest"`. |
 | `sha256` | string | yes | | Expected hash of the object at `url` as 64 lowercase hexadecimal characters. With `archive_member`, the hash of the archive. |
 | `fetch` | string | no | `guest` | `guest` runs `curl` in the guest. `controller` downloads on the machine that runs OpenTofu and sends the file through the exec API. |
 | `archive_member` | string | no | | Relative path of one file inside a `.tar.gz` archive at `url`. The installed file is that member. |
+| `request_headers_wo` | map of string, sensitive, write-only | with `request_headers_wo_version` | | Each key is an HTTP request header name and each value is its header value, for example `Authorization = "Bearer <token>"`. OpenTofu does not store the header values or the plan value in state or plan files. A change to this argument alone does not plan a change. |
+| `request_headers_wo_version` | number | with `request_headers_wo` | | A changed value plans a rewrite. Apply downloads the object again with the headers from the current configuration unless a cached object with the expected hash skips the request. |
 | `path` | string | yes | | Absolute path. An apply creates each missing parent directory with mode `0755` and owner `root:root`. A change replaces the resource. |
 | `mode` | string | no | `0644` | Four octal digits. |
 | `owner` | string | no | `root` | User name. |

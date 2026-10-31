@@ -2,11 +2,18 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"regexp"
+	"slices"
+	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	fwpath "github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -14,6 +21,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
+	"github.com/hashicorp/terraform-plugin-framework/tfsdk"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
@@ -23,26 +31,145 @@ import (
 // transport limit is 3600 seconds.
 const downloadTimeoutSeconds = 600
 
-var httpsURLPattern = regexp.MustCompile(`^https://[^\s\x00]+$`)
+const (
+	redactedHeaderValue = "[redacted]"
+
+	headerConfigLineFormat = "header = \"%s: %s\"\n"
+
+	requestHeadersAttribute        = "request_headers_wo"
+	requestHeadersVersionAttribute = "request_headers_wo_version"
+
+	invalidHeaderNameSummary = "The HTTP request header name is invalid."
+	invalidHeaderNameDetail  = "The HTTP request header name %q must contain only letters, digits, " +
+		"and these characters: ! # $ %% & ' * + - . ^ _ ` | ~."
+	invalidHeaderValueSummary = "The HTTP request header value is invalid."
+	invalidHeaderValueDetail  = "The HTTP request header value for %q must not contain a carriage " +
+		"return, a line feed, or a NUL character."
+	unknownHeadersSummary = "request_headers_wo is unknown during apply."
+	unknownHeadersDetail  = "Set request_headers_wo to a value that is known during apply."
+
+	guestRedirectMessage = "The server returned a redirect. Set fetch to controller."
+
+	headerDownloadFileMode = "0600"
+	nullDevicePath         = "/dev/null"
+	redirectWriteOut       = "%{redirect_url}"
+)
+
+var (
+	httpsURLPattern = regexp.MustCompile(`^https://[^\s\x00]+$`)
+
+	headerNamePattern  = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+	headerValuePattern = regexp.MustCompile(`^[^\x00\r\n]*$`)
+
+	curlConfigEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+)
 
 type downloadResource struct {
 	data *providerData
 }
 
 type downloadModel struct {
-	Node          types.String `tfsdk:"node"`
-	VMID          types.Int64  `tfsdk:"vmid"`
-	Kind          types.String `tfsdk:"kind"`
-	URL           types.String `tfsdk:"url"`
-	SHA256        types.String `tfsdk:"sha256"`
-	Fetch         types.String `tfsdk:"fetch"`
-	ArchiveMember types.String `tfsdk:"archive_member"`
-	Path          types.String `tfsdk:"path"`
-	Mode          types.String `tfsdk:"mode"`
-	Owner         types.String `tfsdk:"owner"`
-	Group         types.String `tfsdk:"group"`
-	FileSHA256    types.String `tfsdk:"file_sha256"`
-	WriteID       types.String `tfsdk:"write_id"`
+	Node                    types.String `tfsdk:"node"`
+	VMID                    types.Int64  `tfsdk:"vmid"`
+	Kind                    types.String `tfsdk:"kind"`
+	URL                     types.String `tfsdk:"url"`
+	SHA256                  types.String `tfsdk:"sha256"`
+	Fetch                   types.String `tfsdk:"fetch"`
+	ArchiveMember           types.String `tfsdk:"archive_member"`
+	RequestHeadersWO        types.Map    `tfsdk:"request_headers_wo"`
+	RequestHeadersWOVersion types.Int64  `tfsdk:"request_headers_wo_version"`
+	Path                    types.String `tfsdk:"path"`
+	Mode                    types.String `tfsdk:"mode"`
+	Owner                   types.String `tfsdk:"owner"`
+	Group                   types.String `tfsdk:"group"`
+	FileSHA256              types.String `tfsdk:"file_sha256"`
+	WriteID                 types.String `tfsdk:"write_id"`
+}
+
+// requestHeaders stores the header names and values that apply reads from
+// request_headers_wo.
+type requestHeaders map[string]string
+
+func (headers requestHeaders) sortedNames() []string {
+	return slices.Sorted(maps.Keys(headers))
+}
+
+func (headers requestHeaders) curlConfig() []byte {
+	var config strings.Builder
+	for _, name := range headers.sortedNames() {
+		fmt.Fprintf(&config, headerConfigLineFormat, name, curlConfigEscaper.Replace(headers[name]))
+	}
+	return []byte(config.String())
+}
+
+// redact returns an error that replaces each header value in the original error text
+// with [redacted], starting with the longest value.
+func (headers requestHeaders) redact(err error) error {
+	if err == nil || len(headers) == 0 {
+		return err
+	}
+	return errors.New(headers.redactText(err.Error()))
+}
+
+func (headers requestHeaders) redactText(text string) string {
+	values := slices.Collect(maps.Values(headers))
+	slices.SortFunc(values, func(left string, right string) int {
+		return len(right) - len(left)
+	})
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		text = strings.ReplaceAll(text, value, redactedHeaderValue)
+	}
+	return text
+}
+
+func requestHeadersFrom(ctx context.Context, config tfsdk.Config) (requestHeaders, diag.Diagnostics) {
+	var configured types.Map
+	diagnostics := config.GetAttribute(ctx, fwpath.Root(requestHeadersAttribute), &configured)
+	if diagnostics.HasError() {
+		return nil, diagnostics
+	}
+	if configured.IsNull() {
+		return nil, diagnostics
+	}
+	if configured.IsUnknown() {
+		diagnostics.AddAttributeError(
+			fwpath.Root(requestHeadersAttribute), unknownHeadersSummary, unknownHeadersDetail,
+		)
+		return nil, diagnostics
+	}
+	headers := requestHeaders{}
+	diagnostics.Append(configured.ElementsAs(ctx, &headers, false)...)
+	return headers, diagnostics
+}
+
+func validateRequestHeaders(ctx context.Context, configured types.Map) diag.Diagnostics {
+	var diagnostics diag.Diagnostics
+	elements := map[string]types.String{}
+	diagnostics.Append(configured.ElementsAs(ctx, &elements, false)...)
+	if diagnostics.HasError() {
+		return diagnostics
+	}
+	for _, name := range slices.Sorted(maps.Keys(elements)) {
+		headerPath := fwpath.Root(requestHeadersAttribute).AtMapKey(name)
+		if !headerNamePattern.MatchString(name) {
+			diagnostics.AddAttributeError(
+				headerPath, invalidHeaderNameSummary, fmt.Sprintf(invalidHeaderNameDetail, name),
+			)
+		}
+		value := elements[name]
+		if value.IsUnknown() || value.IsNull() {
+			continue
+		}
+		if !headerValuePattern.MatchString(value.ValueString()) {
+			diagnostics.AddAttributeError(
+				headerPath, invalidHeaderValueSummary, fmt.Sprintf(invalidHeaderValueDetail, name),
+			)
+		}
+	}
+	return diagnostics
 }
 
 func newDownloadResource() resource.Resource {
@@ -57,7 +184,7 @@ func (r *downloadResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 	resp.Schema = schema.Schema{
 		Description: "A file that is downloaded over HTTPS, optionally extracted from a .tar.gz archive, " +
 			"and that must match a SHA-256 hash.",
-		Attributes: withGuestAttributes(map[string]schema.Attribute{
+		Attributes: withGuestAttributes(withRequestHeaderAttributes(map[string]schema.Attribute{
 			"url": schema.StringAttribute{
 				Required:    true,
 				Description: "HTTPS URL of the object. The guest downloads it with curl, or the controller downloads it when fetch is controller.",
@@ -134,8 +261,39 @@ func (r *downloadResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 				Description: "Random identifier that changes each time an apply writes the file, mode, owner, or group. " +
 					"A rewrite after drift produces the same file_sha256 and a new write_id.",
 			},
-		}),
+		})),
 	}
+}
+
+func withRequestHeaderAttributes(attributes map[string]schema.Attribute) map[string]schema.Attribute {
+	attributes[requestHeadersAttribute] = schema.MapAttribute{
+		ElementType: types.StringType,
+		Optional:    true,
+		Sensitive:   true,
+		WriteOnly:   true,
+		Description: "request_headers_wo is a sensitive, write-only map of HTTP request header names to values. " +
+			"OpenTofu does not store its value in the plan or state. " +
+			"When fetch = \"controller\", the provider sends the headers and removes them from redirected " +
+			"requests that change the scheme, host, or port. " +
+			"When fetch = \"guest\", curl sends the headers and does not follow redirects. " +
+			"A cached object with the expected hash skips the request.",
+		Validators: []validator.Map{
+			mapvalidator.AlsoRequires(fwpath.MatchRoot(requestHeadersVersionAttribute)),
+		},
+	}
+	attributes[requestHeadersVersionAttribute] = schema.Int64Attribute{
+		Optional: true,
+		Description: "The provider requires request_headers_wo_version when request_headers_wo is set. " +
+			"Changing request_headers_wo_version plans a rewrite of the resource. " +
+			"During apply, the provider fetches the object using the headers from the current configuration. " +
+			"With fetch = \"controller\", the controller reuses a cached object that matches the configured sha256 " +
+			"without sending an HTTP request or using the headers. " +
+			"With fetch = \"guest\", the provider always runs curl in the guest with the headers.",
+		Validators: []validator.Int64{
+			int64validator.AlsoRequires(fwpath.MatchRoot(requestHeadersAttribute)),
+		},
+	}
+	return attributes
 }
 
 func (r *downloadResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -152,6 +310,9 @@ func (r *downloadResource) ValidateConfig(ctx context.Context, req resource.Vali
 		if err := validateArchiveMember(config.ArchiveMember.ValueString()); err != nil {
 			resp.Diagnostics.AddAttributeError(fwpath.Root("archive_member"), "Invalid archive_member", err.Error())
 		}
+	}
+	if !config.RequestHeadersWO.IsNull() && !config.RequestHeadersWO.IsUnknown() {
+		resp.Diagnostics.Append(validateRequestHeaders(ctx, config.RequestHeadersWO)...)
 	}
 }
 
@@ -175,7 +336,8 @@ func (r *downloadResource) ModifyPlan(ctx context.Context, req resource.ModifyPl
 	// Read stores the hash of the guest file in file_sha256, and the private
 	// state stores the hash that the last apply wrote.
 	sourceChanged := !plan.URL.Equal(state.URL) || !plan.SHA256.Equal(state.SHA256) ||
-		!plan.ArchiveMember.Equal(state.ArchiveMember) || !plan.Fetch.Equal(state.Fetch)
+		!plan.ArchiveMember.Equal(state.ArchiveMember) || !plan.Fetch.Equal(state.Fetch) ||
+		!plan.RequestHeadersWOVersion.Equal(state.RequestHeadersWOVersion)
 	drifted := decodeAppliedHash(appliedHash) != state.FileSHA256.ValueString()
 	if sourceChanged || drifted {
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("file_sha256"), types.StringUnknown())...)
@@ -201,8 +363,13 @@ func (r *downloadResource) Create(ctx context.Context, req resource.CreateReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
+	headers, diagnostics := requestHeadersFrom(ctx, req.Config)
+	resp.Diagnostics.Append(diagnostics...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
-	fileHash, err := r.install(ctx, guest, plan)
+	fileHash, err := r.install(ctx, guest, plan, headers)
 	if err != nil {
 		resp.Diagnostics.AddError("Download file", err.Error())
 		return
@@ -258,7 +425,12 @@ func (r *downloadResource) Update(ctx context.Context, req resource.UpdateReques
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
 	switch {
 	case plan.FileSHA256.IsUnknown():
-		fileHash, err := r.install(ctx, guest, plan)
+		headers, diagnostics := requestHeadersFrom(ctx, req.Config)
+		resp.Diagnostics.Append(diagnostics...)
+		if resp.Diagnostics.HasError() {
+			return
+		}
+		fileHash, err := r.install(ctx, guest, plan, headers)
 		if err != nil {
 			resp.Diagnostics.AddError("Download file", err.Error())
 			return
@@ -310,7 +482,12 @@ func (r *downloadResource) Delete(ctx context.Context, req resource.DeleteReques
 // destination, sets mode and owner, and renames the temporary file after the
 // hash matches. A rename inside one directory is atomic. The result is the
 // SHA-256 hash of the installed file.
-func (r *downloadResource) install(ctx context.Context, guest transport.Guest, plan downloadModel) (string, error) {
+func (r *downloadResource) install(
+	ctx context.Context,
+	guest transport.Guest,
+	plan downloadModel,
+	headers requestHeaders,
+) (string, error) {
 	destination := plan.Path.ValueString()
 	finalTemporaryPath, err := temporaryPathFor(destination)
 	if err != nil {
@@ -333,13 +510,13 @@ func (r *downloadResource) install(ctx context.Context, guest transport.Guest, p
 
 	var fileHash string
 	if plan.Fetch.ValueString() == fetchController {
-		fileHash, err = r.stageFromController(ctx, guest, plan, intermediatePath, finalTemporaryPath)
+		fileHash, err = r.stageFromController(ctx, guest, plan, headers, intermediatePath, finalTemporaryPath)
 	} else {
-		fileHash, err = r.stageFromGuest(ctx, guest, plan, intermediatePath, finalTemporaryPath)
+		fileHash, err = r.stageFromGuest(ctx, guest, plan, headers, intermediatePath, finalTemporaryPath)
 	}
 	if err != nil {
 		r.removeTemporaryFile(ctx, guest, finalTemporaryPath)
-		return "", err
+		return "", headers.redact(err)
 	}
 
 	err = setGuestAttributes(ctx, r.data.client, guest, plan.Mode, plan.Owner, plan.Group, finalTemporaryPath)
@@ -364,6 +541,7 @@ func (r *downloadResource) stageFromGuest(
 	ctx context.Context,
 	guest transport.Guest,
 	plan downloadModel,
+	headers requestHeaders,
 	intermediatePath string,
 	finalTemporaryPath string,
 ) (string, error) {
@@ -375,14 +553,20 @@ func (r *downloadResource) stageFromGuest(
 
 	// The umask makes the temporary file unreadable for other users until
 	// chmod sets the declared mode.
-	downloadCommand := guestCommand(
-		"sh", "-c",
-		`umask 077 && cd -- "$1" && exec curl -fsSL --proto =https -o "$2" -- "$3"`,
-		"sh", path.Dir(plan.Path.ValueString()), downloadPath, plan.URL.ValueString(),
-	)
-	downloadCommand.TimeoutSeconds = downloadTimeoutSeconds
-	if err := runChecked(ctx, r.data.client, guest, downloadCommand); err != nil {
-		return "", err
+	if len(headers) > 0 {
+		if err := r.downloadWithHeaders(ctx, guest, plan.URL.ValueString(), downloadPath, headers); err != nil {
+			return "", err
+		}
+	} else {
+		downloadCommand := guestCommand(
+			"sh", "-c",
+			`umask 077 && cd -- "$1" && exec curl -fsSL --proto =https -o "$2" -- "$3"`,
+			"sh", path.Dir(plan.Path.ValueString()), downloadPath, plan.URL.ValueString(),
+		)
+		downloadCommand.TimeoutSeconds = downloadTimeoutSeconds
+		if err := runChecked(ctx, r.data.client, guest, downloadCommand); err != nil {
+			return "", err
+		}
 	}
 
 	receivedHash, found, err := readGuestSHA256(ctx, r.data.client, guest, downloadPath)
@@ -423,6 +607,36 @@ func (r *downloadResource) stageFromGuest(
 	return fileHash, nil
 }
 
+func (r *downloadResource) downloadWithHeaders(
+	ctx context.Context,
+	guest transport.Guest,
+	url string,
+	downloadPath string,
+	headers requestHeaders,
+) error {
+	createCommand := guestCommand("install", "-m", headerDownloadFileMode, nullDevicePath, downloadPath)
+	if err := runChecked(ctx, r.data.client, guest, createCommand); err != nil {
+		return err
+	}
+	curlCommand := guestCommand(
+		"curl", "-fsS", "--proto", "=https", "--config", "-",
+		"-o", downloadPath, "-w", redirectWriteOut, "--", url,
+	)
+	curlCommand.Stdin = headers.curlConfig()
+	curlCommand.TimeoutSeconds = downloadTimeoutSeconds
+	result, err := runGuest(ctx, r.data.client, guest, curlCommand)
+	if err != nil {
+		return err
+	}
+	if result.ExitCode != 0 {
+		return headers.redact(commandFailure(guest, curlCommand, result))
+	}
+	if strings.TrimSpace(string(result.Stdout)) != "" {
+		return fmt.Errorf("%s: %s", guest, guestRedirectMessage)
+	}
+	return nil
+}
+
 // stageFromController downloads and extracts on the controller, compresses the
 // payload, writes the compressed stream to the intermediate file, and runs
 // gzip -dc in the guest into the final temporary file. The hash of the guest
@@ -431,6 +645,7 @@ func (r *downloadResource) stageFromController(
 	ctx context.Context,
 	guest transport.Guest,
 	plan downloadModel,
+	headers requestHeaders,
 	intermediatePath string,
 	finalTemporaryPath string,
 ) (string, error) {
@@ -439,7 +654,7 @@ func (r *downloadResource) stageFromController(
 		member = plan.ArchiveMember.ValueString()
 	}
 	payload, err := fetchControllerPayload(
-		ctx, r.data.controllerCAFile, plan.URL.ValueString(), plan.SHA256.ValueString(), member,
+		ctx, r.data.controllerCAFile, plan.URL.ValueString(), plan.SHA256.ValueString(), member, headers,
 	)
 	if err != nil {
 		return "", err
