@@ -100,6 +100,7 @@ type HostArtifactState struct {
 	Files          []HostArtifactFile
 	Directories    []HostArtifactDirectory
 	ObservedSHA256 string
+	Secrets        []HostSecretState
 }
 
 type hostArtifactStageBody struct {
@@ -148,6 +149,7 @@ type hostArtifactStateData struct {
 	Files          []hostArtifactFileData      `json:"files"`
 	Directories    []hostArtifactDirectoryData `json:"directories"`
 	ObservedSHA256 string                      `json:"observed_sha256"`
+	Secrets        []hostSecretData            `json:"secrets"`
 }
 
 // HostArtifactTarget returns the {target} path value of a workspace selector:
@@ -284,6 +286,7 @@ func (client *Client) GetHostArtifact(ctx context.Context, node string, target s
 		Files:          make([]HostArtifactFile, 0, len(parsed.Files)),
 		Directories:    make([]HostArtifactDirectory, 0, len(parsed.Directories)),
 		ObservedSHA256: parsed.ObservedSHA256,
+		Secrets:        make([]HostSecretState, 0, len(parsed.Secrets)),
 	}
 	for _, entry := range parsed.Files {
 		file, err := entry.convert()
@@ -300,6 +303,14 @@ func (client *Client) GetHostArtifact(ctx context.Context, node string, target s
 			return HostArtifactState{}, fmt.Errorf("node %q target %s: directory %s: %w", node, target, entry.Path, err)
 		}
 		state.Directories = append(state.Directories, directory)
+	}
+	for _, entry := range parsed.Secrets {
+		secret, err := entry.convert()
+		if err != nil {
+			slog.ErrorContext(ctx, "host secret entry is malformed", "node", node, "target", target, "field", entry.Field, "err", err)
+			return HostArtifactState{}, fmt.Errorf("node %q target %s: secret field %s: %w", node, target, entry.Field, err)
+		}
+		state.Secrets = append(state.Secrets, secret)
 	}
 	return state, nil
 }
