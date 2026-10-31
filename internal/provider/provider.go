@@ -130,8 +130,8 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 			},
 			"controller_ca_file": schema.StringAttribute{
 				Optional: true,
-				Description: "Path of a PEM file with certificate authorities that the controller trusts in addition to " +
-					"the system roots when a pveguest_download with fetch = \"controller\" downloads a URL.",
+				Description: "The controller trusts certificate authorities from this PEM file in addition to " +
+					"the system roots when a pveguest_download with fetch = \"controller\" or a pveguest_host_artifact downloads a URL.",
 			},
 			"smtp2go_api_key": schema.StringAttribute{
 				Optional:    true,
@@ -250,6 +250,7 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newSysrepoModuleResource,
 		newSysrepoDataResource,
 		newHostKernelModulesResource,
+		newHostArtifactResource,
 		newContainerOptionsResource,
 		newContainerPowerResource,
 		newVMOptionsResource,
