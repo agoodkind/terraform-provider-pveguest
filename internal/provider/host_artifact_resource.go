@@ -173,7 +173,7 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 			},
 		},
 		"program_bundles": schema.MapNestedAttribute{
-			Description: "Each entry selects a program's attestation bundle from the configured release and pins its filename and SHA-256 digest. " +
+			Description: "Each entry selects a program's attestation bundle from the configured release and pins its asset name and SHA-256 digest. " +
 				"The entries must match all programs in the manifest. Archives without programs do not require this argument.",
 			Optional: true,
 			Validators: []validator.Map{
