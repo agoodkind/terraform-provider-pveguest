@@ -34,8 +34,9 @@ const (
 	// The private state key stores the storage file SHA-256 that the last apply
 	// or import read from the node.
 	hostSecretAppliedEntry = "applied_sha256"
-	// The private state key stores whether the storage file SHA-256 in the last
-	// Read differs from the applied SHA-256.
+	// content_drift is a private Boolean. Read sets it to true when the storage
+	// file SHA-256 differs from the applied SHA-256 or GET reports restart_pending.
+	// Import stores the current SHA-256 and sets content_drift to restart_pending.
 	hostSecretDriftEntry = "content_drift"
 
 	hostSecretMinimumVersion = 1
@@ -273,7 +274,7 @@ func (r *hostSecretResource) Read(ctx context.Context, req resource.ReadRequest,
 		return
 	}
 	setHostSecretObservation(&state, entry)
-	drift, err := encodeHostSecretDrift(ctx, entry.SHA256 != decodeAppliedHash(applied))
+	drift, err := encodeHostSecretDrift(ctx, entry.RestartPending || entry.SHA256 != decodeAppliedHash(applied))
 	if err != nil {
 		resp.Diagnostics.AddError(hostSecretReadSummary, err.Error())
 		return
@@ -294,8 +295,6 @@ func (r *hostSecretResource) Delete(ctx context.Context, req resource.DeleteRequ
 // destroyField uses only GET and never changes the node. It returns an error
 // while the node stores the field. OpenTofu keeps the resource in state on
 // error and removes it on success.
-//
-// Root review may replace this interim destroy behavior.
 func (r *hostSecretResource) destroyField(ctx context.Context, state hostSecretModel) diag.Diagnostics {
 	entry, diagnostics := r.readEntry(ctx, state, hostSecretDestroySummary)
 	if diagnostics.HasError() {
@@ -381,10 +380,11 @@ func (r *hostSecretResource) write(
 	if diagnostics.HasError() {
 		return transport.HostSecretState{}, diagnostics
 	}
-	if !entry.Configured || entry.Version != version {
+	if !entry.Configured || entry.Version != version || entry.RestartPending {
 		diagnostics.AddError(hostSecretWriteSummary, fmt.Sprintf(
-			"After the hostsecret task, node %q reports configured %t and version %d for secret field %s. The apply requires configured true and version %d.",
-			node, entry.Configured, entry.Version, field, version,
+			"After the hostsecret task succeeds, node %q reports configured as %t, version as %d, and restart_pending as %t for secret field %s. "+
+				"The apply requires configured to be true, version to be %d, and restart_pending to be false.",
+			node, entry.Configured, entry.Version, entry.RestartPending, field, version,
 		))
 	}
 	return entry, diagnostics
@@ -399,8 +399,8 @@ func setHostSecretObservation(model *hostSecretModel, entry transport.HostSecret
 	}
 }
 
-// storeHostSecretApplied stores the storage file SHA-256 from GET in private
-// state and sets content_drift to false.
+// storeHostSecretApplied stores the storage file SHA-256 from GET as the applied
+// SHA-256 in private state. It sets content_drift to the GET restart_pending value.
 func storeHostSecretApplied(ctx context.Context, private privateSetter, entry transport.HostSecretState) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	applied, err := encodeAppliedHash(entry.SHA256)
@@ -408,7 +408,7 @@ func storeHostSecretApplied(ctx context.Context, private privateSetter, entry tr
 		diagnostics.AddError(hostSecretWriteSummary, err.Error())
 		return diagnostics
 	}
-	drift, err := encodeHostSecretDrift(ctx, false)
+	drift, err := encodeHostSecretDrift(ctx, entry.RestartPending)
 	if err != nil {
 		diagnostics.AddError(hostSecretWriteSummary, err.Error())
 		return diagnostics

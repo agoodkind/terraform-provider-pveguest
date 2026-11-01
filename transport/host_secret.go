@@ -22,11 +22,16 @@ const (
 // secret value. Version is 0 when the node does not record the field.
 // SHA256 is empty when the storage file is not a regular file.
 type HostSecretState struct {
-	Field      string
-	Configured bool
-	Version    int64
-	SHA256     string
+	Field          string
+	Configured     bool
+	Version        int64
+	SHA256         string
+	RestartPending bool
 }
+
+// errHostSecretOverlay indicates that a secrets[] entry in GET does not contain
+// restart_pending.
+var errHostSecretOverlay = errors.New("the node overlay is too old: a secrets[] entry in the GET response does not contain restart_pending")
 
 type hostSecretBody struct {
 	Value   string `json:"value"`
@@ -34,10 +39,11 @@ type hostSecretBody struct {
 }
 
 type hostSecretData struct {
-	Field      string      `json:"field"`
-	Configured flag        `json:"configured"`
-	Version    json.Number `json:"version"`
-	SHA256     string      `json:"sha256"`
+	Field          string      `json:"field"`
+	Configured     flag        `json:"configured"`
+	Version        json.Number `json:"version"`
+	SHA256         string      `json:"sha256"`
+	RestartPending *flag       `json:"restart_pending"`
 }
 
 // SetHostSecret sends value and version in the request body to
@@ -82,10 +88,14 @@ func (entry hostSecretData) convert() (HostSecretState, error) {
 	if err != nil {
 		return HostSecretState{}, err
 	}
+	if entry.RestartPending == nil {
+		return HostSecretState{}, errHostSecretOverlay
+	}
 	return HostSecretState{
-		Field:      entry.Field,
-		Configured: bool(entry.Configured),
-		Version:    numbers[0],
-		SHA256:     entry.SHA256,
+		Field:          entry.Field,
+		Configured:     bool(entry.Configured),
+		Version:        numbers[0],
+		SHA256:         entry.SHA256,
+		RestartPending: bool(*entry.RestartPending),
 	}, nil
 }
