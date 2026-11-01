@@ -17,6 +17,8 @@ const (
 	controlsUnitContent = "[Unit]\nDescription=pveguest acceptance test controls service\n\n[Service]\nType=simple\nExecStart=/bin/sleep 3600\n\n[Install]\nWantedBy=multi-user.target\n"
 	controlsFailingUnit = "[Unit]\nDescription=pveguest acceptance test failing service\n\n[Service]\nType=oneshot\nExecStart=/bin/false\n\n[Install]\nWantedBy=multi-user.target\n"
 
+	controlsBaselineVersion = "0.1.2"
+
 	// systemctl mask fails for regular unit files in /etc/systemd/system.
 	vendorUnitDirectory = "/usr/lib/systemd/system"
 )
@@ -313,10 +315,11 @@ func testControlsUnset(t *testing.T) {
 func testControlsUpgrade(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useRemovalUnit()
+	var invocationID string
 	installed := map[string]resource.ExternalProvider{
 		"pveguest": {
 			Source:            providerSource,
-			VersionConstraint: candidateInstalledVersion,
+			VersionConstraint: controlsBaselineVersion,
 		},
 	}
 
@@ -326,7 +329,19 @@ func testControlsUpgrade(t *testing.T) {
 			{
 				ExternalProviders: installed,
 				Config:            guest.externalProviderConfig(),
-				Check:             guest.expectRemovalUnit("enabled", "active"),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckNoResourceAttr(removalUnitAddress, "allow_missing"),
+					resource.TestCheckNoResourceAttr(removalUnitAddress, "masked"),
+					resource.TestCheckNoResourceAttr(removalUnitAddress, "reset_failed"),
+					guest.expectRemovalUnit("enabled", "active"),
+					checkGuest(func() error {
+						invocationID = strings.TrimSpace(guest.mustRun("systemctl", "show", "--property=InvocationID", "--value", "--", testRemovalService))
+						if invocationID == "" {
+							return fmt.Errorf("%s does not report an InvocationID after the baseline apply", testRemovalService)
+						}
+						return nil
+					}),
+				),
 			},
 			{
 				ProtoV6ProviderFactories: protoV6ProviderFactories,
@@ -337,6 +352,13 @@ func testControlsUpgrade(t *testing.T) {
 					resource.TestCheckResourceAttr(removalUnitAddress, "masked", "false"),
 					resource.TestCheckResourceAttr(removalUnitAddress, "reset_failed", "false"),
 					guest.expectRemovalUnit("enabled", "active"),
+					checkGuest(func() error {
+						currentInvocationID := strings.TrimSpace(guest.mustRun("systemctl", "show", "--property=InvocationID", "--value", "--", testRemovalService))
+						if invocationID == "" || currentInvocationID != invocationID {
+							return fmt.Errorf("%s reports InvocationID %q after the upgrade; it should match the nonempty baseline InvocationID %q", testRemovalService, currentInvocationID, invocationID)
+						}
+						return nil
+					}),
 				),
 			},
 		},
