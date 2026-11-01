@@ -363,8 +363,6 @@ func (r *downloadResource) ImportState(ctx context.Context, req resource.ImportS
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, downloadImportedEntry, importedMarker)...)
 }
 
-// readGuestFileType returns the file type text that stat prints for the path
-// without following a symbolic link.
 func readGuestFileType(
 	ctx context.Context,
 	client *transport.Client,
@@ -565,7 +563,6 @@ func (r *downloadResource) Update(ctx context.Context, req resource.UpdateReques
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// sourceOutcome is the result of the source step of an Update.
 type sourceOutcome struct {
 	fileHash    string
 	keepWriteID bool
