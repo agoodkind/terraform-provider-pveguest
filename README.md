@@ -654,10 +654,10 @@ The provider rejects a `GET` response when a `secrets[]` entry omits
 The provider does not treat an absent field as false.
 
 After each apply, the provider stores the storage file SHA-256 from `GET` as
-the applied SHA-256 in private state. Read calls only `GET` and sets the
-private Boolean `content_drift` to true when the current SHA-256 differs from
-the applied SHA-256 or `GET` reports `restart_pending` as `1`. The resource
-does not expose either SHA-256 as an attribute.
+the applied SHA-256 in private state. Read sets the private Boolean
+`content_drift` to true when the current SHA-256 differs from the applied
+SHA-256 or `GET` reports `restart_pending` as `1`. The resource does not expose
+either SHA-256 as an attribute.
 
 A plan proposes a write when the resource needs replacement or when any of
 these conditions apply:
@@ -667,8 +667,8 @@ these conditions apply:
 - The storage file SHA-256 differs from the applied SHA-256.
 - `GET` reports `restart_pending` as `1` for the field.
 
-A changed `value_wo` at the same `value_wo_version` does not plan a write. A plan
-that needs a write fails when the configuration does not set `value_wo`.
+Changing `value_wo` alone does not plan a write. A write plan requires the
+configured value of `value_wo`.
 
 An apply sends `value_wo` as `value` and `value_wo_version` as `version`, waits
 up to 10 minutes for the `hostsecret` task to succeed, and calls `GET`. The
@@ -679,7 +679,7 @@ at the same version. The diagnostic reports the rejection.
 A request with the recorded version and value repairs the storage file and runs
 a pending consumer restart. A metadata repair does not restart a consumer.
 
-The API does not provide a method that deletes a secret field. Destroy calls
+The API does not provide a method to delete a secret field. Destroy calls
 only `GET` and fails while the node stores the field. Destroy succeeds when
 the node does not record a version and does not store a storage file for the
 field. A change to `node`, `workspace`, or `field` replaces the resource and
@@ -999,10 +999,19 @@ through the existing API helpers. The rejection checks call the existing
 transport directly and compare both targets after each task. A rejected
 request may create its own stages and one failed task record. The test removes
 only its request-owned stages and checks
-that the other stages remain unchanged. It also submits the valid archive
-under A policies with a different permitted workflow, source ref, environment,
-or an omitted destination, and with a different retained source revision in
-the install request. These controls must fail before installed state changes.
+that the other stages remain unchanged.
+
+Four controls submit the valid signed fixture unchanged. Each control
+independently changes one of these A policy inputs:
+
+- Workflow URI
+- Source ref
+- Environment
+- Destination allowlist
+
+A separate control changes the source revision in the install request to the
+revision of another retained fixture. All five controls must fail before
+installed state changes.
 
 Use a privilege-separated audit token. Grant the parent user the required
 user ACL and grant the audit token only `Sys.HostArtifacts.Audit` through its

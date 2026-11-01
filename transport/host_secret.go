@@ -75,7 +75,6 @@ func (client *Client) SetHostSecret(
 	return upid, nil
 }
 
-// redactHostSecret replaces value with [redacted] in the text of err.
 func redactHostSecret(err error, value string) error {
 	if err == nil || value == "" || !strings.Contains(err.Error(), value) {
 		return err
