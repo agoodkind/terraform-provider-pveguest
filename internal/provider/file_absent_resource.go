@@ -18,6 +18,7 @@ import (
 )
 
 const (
+	notADirectoryMessage    = "Not a directory"
 	fileAbsentImportSummary = "Cannot import pveguest_file_absent"
 
 	invalidPathSummary    = "Path must be a clean absolute path"
@@ -215,7 +216,8 @@ func lstatType(
 		return "", false, err
 	}
 	if result.ExitCode != 0 {
-		if strings.Contains(string(result.Stderr), missingFileMessage) {
+		stderr := string(result.Stderr)
+		if strings.Contains(stderr, missingFileMessage) || strings.Contains(stderr, notADirectoryMessage) {
 			return "", false, nil
 		}
 		return "", false, commandFailure(guest, command, result)

@@ -159,12 +159,9 @@ func testFileAbsentDestroy(t *testing.T) {
 
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy: checkGuest(func() error {
-			if !guest.exists(fileAbsentPath) {
-				return fmt.Errorf("%s does not exist after destroy but should remain a file", fileAbsentPath)
-			}
-			return nil
-		}),
+		AdditionalCLIOptions: &resource.AdditionalCLIOptions{
+			Plan: resource.PlanOptions{NoRefresh: true},
+		},
 		Steps: []resource.TestStep{
 			{
 				Config: config,
@@ -175,6 +172,15 @@ func testFileAbsentDestroy(t *testing.T) {
 				PreConfig: func() { guest.writeFile(fileAbsentPath, fileAbsentContent) },
 				Config:    config,
 				Destroy:   true,
+			},
+			{
+				PreConfig: func() {
+					if !guest.exists(fileAbsentPath) {
+						t.Fatalf("%s does not exist after destroy but should remain a file", fileAbsentPath)
+					}
+				},
+				Config: config,
+				Check:  guest.expectPathAbsent(fileAbsentPath),
 			},
 		},
 	})

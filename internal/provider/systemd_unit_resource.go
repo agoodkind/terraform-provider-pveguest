@@ -53,6 +53,7 @@ const (
 	unitFileGenerated      unitFileState = "generated"
 	unitFileTransient      unitFileState = "transient"
 	unitFileMasked         unitFileState = "masked"
+	unitFileMaskedRuntime  unitFileState = "masked-runtime"
 
 	// systemd 253 and later print this state when the unit file does not
 	// exist. Earlier versions print an error message.
@@ -364,7 +365,8 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 	// Read compares masked and reset_failed with the guest only for
 	// attributes that are true in state.
-	if state.Masked.ValueBool() && status.FileState != unitFileMasked {
+	isMasked := status.FileState == unitFileMasked || status.FileState == unitFileMaskedRuntime
+	if state.Masked.ValueBool() && !isMasked {
 		state.Masked = types.BoolValue(false)
 	}
 	if state.ResetFailed.ValueBool() && status.Active == unitFailed {
@@ -711,7 +713,7 @@ func classifyEnabledState(state unitFileState) enablement {
 		return enablementEnabled
 	case unitFileStatic, unitFileAlias, unitFileIndirect, unitFileGenerated, unitFileTransient:
 		return enablementFixed
-	case unitFileNotFound, unitFileMasked:
+	case unitFileNotFound, unitFileMasked, unitFileMaskedRuntime:
 		return enablementDisabled
 	default:
 		return enablementDisabled
