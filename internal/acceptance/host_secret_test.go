@@ -600,7 +600,7 @@ func (s *hostSecretTest) secretSnapshot(target string, directory string, unit st
 
 // taskRecords returns sorted paths to the target's task logs. Each task log file
 // name is its UPID. Each host artifact task uses the target as its ID.
-func (s *hostSecretTest) taskRecords(target string) string {
+func (s *hostArtifactTest) taskRecords(target string) string {
 	s.t.Helper()
 	records := strings.Fields(s.hostMustRun("find", hostTaskLogDirectory, "-type", "f", "-name", "*:"+target+":*"))
 	slices.Sort(records)
