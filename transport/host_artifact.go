@@ -86,14 +86,26 @@ func FormatProgramStages(stages []HostProgramStage) (string, error) {
 
 // HostArtifactInstalled is the installed record of a target.
 type HostArtifactInstalled struct {
+	ReleaseTag     string                         `json:"release_tag"`
+	Asset          string                         `json:"asset"`
+	SHA256         string                         `json:"sha256"`
+	SourceRevision string                         `json:"source_revision"`
+	ManifestSHA256 string                         `json:"manifest_sha256"`
+	UPID           string                         `json:"upid"`
+	User           string                         `json:"user"`
+	InstalledAt    string                         `json:"installed_at"`
+	Programs       []HostArtifactInstalledProgram `json:"programs,omitempty"`
+}
+
+// HostArtifactInstalledProgram records the release identity of one installed program.
+type HostArtifactInstalledProgram struct {
+	Name           string `json:"name"`
+	Repository     string `json:"repository"`
 	ReleaseTag     string `json:"release_tag"`
 	Asset          string `json:"asset"`
 	SHA256         string `json:"sha256"`
 	SourceRevision string `json:"source_revision"`
-	ManifestSHA256 string `json:"manifest_sha256"`
-	UPID           string `json:"upid"`
-	User           string `json:"user"`
-	InstalledAt    string `json:"installed_at"`
+	SignerRevision string `json:"signer_revision"`
 }
 
 // HostArtifactFile contains the live state of one target file. HasMatches is

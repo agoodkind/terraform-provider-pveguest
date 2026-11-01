@@ -105,12 +105,16 @@ type hostArtifactBundleEntry struct {
 
 // fixtureProgram stores the manifest program fields that acceptance tests read.
 type fixtureProgram struct {
-	Name       string `json:"name"`
-	Repository string `json:"repository"`
-	ReleaseTag string `json:"release_tag"`
-	Asset      string `json:"asset"`
-	SHA256     string `json:"sha256"`
-	Path       string `json:"path"`
+	Name           string `json:"name"`
+	Repository     string `json:"repository"`
+	ReleaseTag     string `json:"release_tag"`
+	Asset          string `json:"asset"`
+	SHA256         string `json:"sha256"`
+	SourceRevision string `json:"source_revision"`
+	SignerRevision string `json:"signer_revision"`
+	Path           string `json:"path"`
+	Member         string `json:"member"`
+	MemberSHA256   string `json:"member_sha256"`
 }
 
 type hostArtifactTest struct {
@@ -174,45 +178,46 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 		caseRecoveryV1:  fixtureWorkspace,
 		caseRecoveryV2:  fixtureWorkspace,
 		caseOtherTarget: unrelatedFixtureWorkspace,
-
-		caseProgramValid:        fixtureWorkspace,
-		caseProgramWrongSource:  fixtureWorkspace,
-		caseProgramWrongSigner:  fixtureWorkspace,
-		caseProgramWrongArchive: fixtureWorkspace,
-		caseProgramWrongMember:  fixtureWorkspace,
-		caseProgramCollision:    fixtureWorkspace,
 	}
 	for _, rejection := range hostArtifactDefects {
 		workspaces[rejection.fixtureCase] = fixtureWorkspace
 	}
 	for fixtureCase, workspace := range workspaces {
-		pin, found := pins[fixtureCase]
-		if !found {
-			t.Fatalf("%s does not contain the case %s", pinFile, fixtureCase)
-		}
-		want := fixtureAssetPrefix + fixtureCase + "-" + transport.HostArtifactTarget(workspace) + fixtureAssetSuffix
-		if pin.Asset != want {
-			t.Fatalf("%s pins asset %s for the case %s, want %s", pinFile, pin.Asset, fixtureCase, want)
-		}
-		if pin.ReleaseTag == "" || pin.BundleAsset != pin.Asset+".sigstore.json" {
-			t.Fatalf("%s: set the release tag and matching bundle asset for %s", pinFile, fixtureCase)
-		}
-		for label, value := range map[string]string{"sha256": pin.SHA256, "bundle_sha256": pin.BundleSHA256, "source_revision": pin.SourceRevision} {
-			length := sha256.Size * 2
-			if label == "source_revision" {
-				length = 40
-			}
-			if len(value) != length || strings.Trim(value, "0123456789abcdef") != "" {
-				t.Fatalf("%s: set a complete lowercase hexadecimal %s for %s", pinFile, label, fixtureCase)
-			}
-		}
+		checkFixturePin(t, pinFile, pins, fixtureCase, workspace)
 	}
 	return pins
 }
 
-func prepareHostArtifactFixtures(t *testing.T) (*hostArtifactTest, map[string]string) {
+func checkFixturePin(t *testing.T, pinFile string, pins map[string]hostArtifactPinEntry, fixtureCase string, workspace string) {
+	t.Helper()
+	pin, found := pins[fixtureCase]
+	if !found {
+		t.Fatalf("%s does not contain the case %s", pinFile, fixtureCase)
+	}
+	want := fixtureAssetPrefix + fixtureCase + "-" + transport.HostArtifactTarget(workspace) + fixtureAssetSuffix
+	if pin.Asset != want {
+		t.Fatalf("%s pins asset %s for the case %s, want %s", pinFile, pin.Asset, fixtureCase, want)
+	}
+	if pin.ReleaseTag == "" || pin.BundleAsset != pin.Asset+".sigstore.json" {
+		t.Fatalf("%s: set the release tag and matching bundle asset for %s", pinFile, fixtureCase)
+	}
+	for label, value := range map[string]string{"sha256": pin.SHA256, "bundle_sha256": pin.BundleSHA256, "source_revision": pin.SourceRevision} {
+		length := sha256.Size * 2
+		if label == "source_revision" {
+			length = 40
+		}
+		if len(value) != length || strings.Trim(value, "0123456789abcdef") != "" {
+			t.Fatalf("%s: set a complete lowercase hexadecimal %s for %s", pinFile, label, fixtureCase)
+		}
+	}
+}
+
+func prepareHostArtifactFixtures(t *testing.T, requiredCases ...string) (*hostArtifactTest, map[string]string) {
 	t.Helper()
 	test := newHostArtifactTest(t)
+	for _, fixtureCase := range requiredCases {
+		checkFixturePin(t, os.Getenv(hostArtifactPinsVariable), test.pins, fixtureCase, fixtureWorkspace)
+	}
 	target := transport.HostArtifactTarget(fixtureWorkspace)
 	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
 	t.Cleanup(func() {
@@ -311,47 +316,6 @@ func TestAccHostArtifact(t *testing.T) {
 	test.expectSnapshot(matching, target, fixtureDirectory)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 	test.workspace.mustRun("state", "rm", hostArtifactAddress)
-
-	// Import reads host state with GET. The first apply installs the schema
-	// version 2 archive and its programs.
-	test.workspace.writeConfig(test.config(caseProgramValid))
-	beforeImport := test.snapshot(target, fixtureDirectory)
-	test.workspace.mustRun("import", "-no-color", hostArtifactAddress, test.node+":"+fixtureWorkspace)
-	test.expectSnapshot(beforeImport, target, fixtureDirectory)
-	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-	test.applyClean(caseProgramValid)
-	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-
-	programPaths := test.programPaths(caseProgramValid)
-	for _, programPath := range programPaths {
-		test.hostWrite(programPath, editedFixtureContent)
-		test.expectRepair(caseProgramValid)
-		test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-
-		test.hostMustRun("rm", "-f", "--", programPath)
-		test.expectRepair(caseProgramValid)
-		test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-	}
-
-	for _, rejected := range []string{
-		caseProgramWrongSource,
-		caseProgramWrongSigner,
-		caseProgramWrongArchive,
-		caseProgramWrongMember,
-		caseProgramCollision,
-	} {
-		test.expectRejected(rejected, caseProgramValid)
-		test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-	}
-
-	// Apply repairs the target after an interrupted program install.
-	test.workspace.writeConfig(test.config(caseValidV1))
-	test.applyClean(caseValidV1)
-	test.stopInstall(target, caseValidV1, caseProgramValid)
-	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-	test.workspace.writeConfig(test.config(caseProgramValid))
-	test.expectRepair(caseProgramValid)
-	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 }
 
 func (h *hostArtifactTest) newWorkspace() *tofuWorkspace {
@@ -411,38 +375,6 @@ func programBundlesBlock(pin hostArtifactPinEntry) string {
 	}
 	block.WriteString("  }\n")
 	return block.String()
-}
-
-// expectRejected checks that apply fails for fixtureCase and preserves the
-// installedCase archive and file hashes. It then checks that installedCase
-// produces a plan without changes.
-func (h *hostArtifactTest) expectRejected(fixtureCase string, installedCase string) {
-	h.t.Helper()
-	target := transport.HostArtifactTarget(fixtureWorkspace)
-	before := h.get(target)
-	h.workspace.writeConfig(h.config(fixtureCase))
-	output, exitCode := h.workspace.run("apply", "-no-color", "-auto-approve")
-	if exitCode == 0 {
-		h.t.Fatalf("apply for %s returned status 0 instead of failing:\n%s", fixtureCase, output)
-	}
-	after := h.get(target)
-	h.expectInstalled(after, h.pins[installedCase])
-	if got, want := fileHashes(after), fileHashes(before); !maps.Equal(got, want) {
-		h.t.Fatalf("file hashes after apply rejected %s are %v instead of %v", fixtureCase, got, want)
-	}
-	h.workspace.writeConfig(h.config(installedCase))
-	planOutput, planExitCode := h.workspace.run("plan", "-no-color", "-detailed-exitcode")
-	if planExitCode != 0 {
-		h.t.Fatalf("plan after apply rejected %s returned status %d instead of 0:\n%s", fixtureCase, planExitCode, planOutput)
-	}
-}
-
-func fileHashes(current transport.HostArtifactState) map[string]string {
-	hashes := make(map[string]string, len(current.Files))
-	for _, file := range current.Files {
-		hashes[file.Path] = file.SHA256
-	}
-	return hashes
 }
 
 // programPaths reads the manifest for fixtureCase and returns each program's
@@ -809,9 +741,6 @@ func (h *hostArtifactTest) snapshot(target string, directory string) map[string]
 		entries := strings.Fields(h.hostMustRun("find", root, "-mindepth", "1", "-print"))
 		slices.Sort(entries)
 		snapshot["contents "+root] = strings.Join(entries, "\n")
-		if root == directory {
-			continue
-		}
 		for _, path := range entries {
 			snapshot[path] = h.hostPathState(path)
 		}

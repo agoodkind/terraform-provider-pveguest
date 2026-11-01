@@ -951,13 +951,13 @@ provider address.
 
 Run each host group in a separate Make invocation after configuring the host
 variables above. Each invocation retains the existing 30-minute Go timeout.
-The positive artifact command excludes the separate rejection test with
-Go's `-skip` flag:
+The exact test selections keep each group separate:
 
 ```sh
-make testacc "TESTARGS=-failfast -run TestAccHostArtifactRejections"
-make testacc "TESTARGS=-failfast -run TestAccHostArtifact -skip TestAccHostArtifactRejections"
-make testacc "TESTARGS=-failfast -run TestAccHostSecret"
+make testacc 'TESTARGS=-failfast -run ^TestAccHostArtifactRejections$$'
+make testacc 'TESTARGS=-failfast -run ^TestAccHostArtifact$$'
+make testacc 'TESTARGS=-failfast -run ^TestAccHostArtifactPrograms$$'
+make testacc 'TESTARGS=-failfast -run ^TestAccHostSecret$$'
 ```
 
 The tests change only these items in the guest, and each test removes its
@@ -980,8 +980,9 @@ items at the end:
 - The controller needs HTTPS access to `api.smtp2go.com`.
 - The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
-`TestAccHostArtifact` and `TestAccHostArtifactRejections` change files on the
-node. The node needs policies for the disposable fixture targets
+`TestAccHostArtifact`, `TestAccHostArtifactRejections`, and
+`TestAccHostArtifactPrograms` change files on the node. The node needs policies
+for the disposable fixture targets
 `suburban/hostartifact-acceptance` and
 `suburban/hostartifact-acceptance-b`. The token needs `Sys.HostArtifacts.Audit`
 and `Sys.HostArtifacts.Modify` on `/nodes/<node>`. The test uses the root shell
@@ -1008,6 +1009,28 @@ Host fixture cases:
 | `other-target` | The API installs B and rejects the same archive when the request selects A. |
 | `recovery-v1`, `recovery-v2` | The provider checks stopped-install handling and recovery. |
 | `digest`, `size`, `symlink`, `hardlink`, `traversal`, `absolute`, `extra`, `missing`, `duplicate`, `member-mode` | Each real host task rejects its specific defect without changing A's installed files, metadata, record, journal, or GET response. |
+
+`TestAccHostArtifactPrograms` also requires the following pins in the same
+case-name-keyed JSON map. Each program pin includes `program_bundles`, which
+maps each manifest program name to its bundle `asset` and `sha256`. The other
+host tests require only the fifteen legacy cases above.
+
+Program fixture cases:
+
+| Cases | Required result |
+| --- | --- |
+| `program-valid` | The provider installs schema 2, repairs a modified program and a missing program separately, and produces a clean repeat plan. The typed installed record matches every program identity field in the qualified manifest after installation, repair, and interrupted recovery. |
+| `program-collision` | Planning rejects the duplicate destination before staging or starting a task. |
+| `program-wrong-archive` | Apply rejects the original program archive checksum before staging or starting a task. |
+| `program-wrong-source`, `program-wrong-signer`, `program-wrong-member` | Each host task rejects its intended defect before installed state changes. Provider apply also reports the intended diagnostic. |
+
+The program test imports A's legacy baseline through OpenTofu before applying
+the schema 2 pin. It stops a program install through the task API and requires
+an actual interrupted result before the next apply recovers the target. It
+compares selected-target observations for import, repeat plans, and rejected
+operations, and checks B's complete snapshot, task history, and consumer
+InvocationID throughout the sequence. The node policy must permit the fixture
+program destination under A's owned directory.
 
 `TestAccHostArtifactRejections` installs valid-v1 for A and other-target for B
 through the existing API helpers. The rejection checks call the existing
