@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // GET /nodes/{node}/host-artifacts/{target} reports these host artifact states.
@@ -23,8 +24,16 @@ const (
 
 // POST /nodes/{node}/host-artifacts/{target}/stage accepts these stage kinds.
 const (
-	HostArtifactKindArchive = "archive"
-	HostArtifactKindBundle  = "bundle"
+	HostArtifactKindArchive       = "archive"
+	HostArtifactKindBundle        = "bundle"
+	HostArtifactKindProgram       = "program"
+	HostArtifactKindProgramBundle = "program-bundle"
+)
+
+const (
+	hostArtifactProgramStageEntrySep = ","
+	hostArtifactProgramStageNameSep  = "="
+	hostArtifactProgramStagePairSep  = ":"
 )
 
 const (
@@ -45,18 +54,57 @@ type HostArtifactInstall struct {
 	SourceRevision string `json:"source-revision"`
 	ArchiveStage   string `json:"archive-stage"`
 	BundleStage    string `json:"bundle-stage"`
+	// Omit program-stages when this value is empty.
+	ProgramStages string `json:"program-stages,omitempty"`
+}
+
+// HostProgramStage stores a program name and its archive and bundle stage IDs.
+type HostProgramStage struct {
+	Name         string
+	ArchiveStage string
+	BundleStage  string
+}
+
+// FormatProgramStages joins <name>=<archive-stage>:<bundle-stage> entries with
+// commas to format program-stages. It rejects empty values and values that
+// contain ',', '=', or ':'.
+func FormatProgramStages(stages []HostProgramStage) (string, error) {
+	separators := hostArtifactProgramStageEntrySep + hostArtifactProgramStageNameSep + hostArtifactProgramStagePairSep
+	entries := make([]string, 0, len(stages))
+	for _, stage := range stages {
+		for _, value := range []string{stage.Name, stage.ArchiveStage, stage.BundleStage} {
+			if value == "" || strings.ContainsAny(value, separators) {
+				return "", fmt.Errorf("program %q stage value %q must be nonempty and must not contain ',', '=', or ':'", stage.Name, value)
+			}
+		}
+		entries = append(entries, stage.Name+hostArtifactProgramStageNameSep+
+			stage.ArchiveStage+hostArtifactProgramStagePairSep+stage.BundleStage)
+	}
+	return strings.Join(entries, hostArtifactProgramStageEntrySep), nil
 }
 
 // HostArtifactInstalled is the installed record of a target.
 type HostArtifactInstalled struct {
+	ReleaseTag     string                         `json:"release_tag"`
+	Asset          string                         `json:"asset"`
+	SHA256         string                         `json:"sha256"`
+	SourceRevision string                         `json:"source_revision"`
+	ManifestSHA256 string                         `json:"manifest_sha256"`
+	UPID           string                         `json:"upid"`
+	User           string                         `json:"user"`
+	InstalledAt    string                         `json:"installed_at"`
+	Programs       []HostArtifactInstalledProgram `json:"programs,omitempty"`
+}
+
+// HostArtifactInstalledProgram records the release identity of one installed program.
+type HostArtifactInstalledProgram struct {
+	Name           string `json:"name"`
+	Repository     string `json:"repository"`
 	ReleaseTag     string `json:"release_tag"`
 	Asset          string `json:"asset"`
 	SHA256         string `json:"sha256"`
 	SourceRevision string `json:"source_revision"`
-	ManifestSHA256 string `json:"manifest_sha256"`
-	UPID           string `json:"upid"`
-	User           string `json:"user"`
-	InstalledAt    string `json:"installed_at"`
+	SignerRevision string `json:"signer_revision"`
 }
 
 // HostArtifactFile contains the live state of one target file. HasMatches is
@@ -104,10 +152,11 @@ type HostArtifactState struct {
 }
 
 type hostArtifactStageBody struct {
-	Kind   string `json:"kind"`
-	Offset int64  `json:"offset"`
-	Data   string `json:"data"`
-	Stage  string `json:"stage,omitempty"`
+	Kind    string `json:"kind"`
+	Offset  int64  `json:"offset"`
+	Data    string `json:"data"`
+	Stage   string `json:"stage,omitempty"`
+	Program string `json:"program,omitempty"`
 }
 
 type hostArtifactStageData struct {
@@ -170,6 +219,21 @@ func (client *Client) StageHostArtifact(
 	content io.Reader,
 	size int64,
 ) (string, error) {
+	return client.StageHostArtifactProgram(ctx, node, target, kind, "", content, size)
+}
+
+// StageHostArtifactProgram uploads content in 96 KiB chunks to a new stage.
+// Calls for program and program-bundle stages must supply the program name.
+// Calls for other stage kinds must supply an empty program value.
+func (client *Client) StageHostArtifactProgram(
+	ctx context.Context,
+	node string,
+	target string,
+	kind string,
+	program string,
+	content io.Reader,
+	size int64,
+) (string, error) {
 	buffer := make([]byte, hostArtifactChunkBytes)
 	stage := ""
 	var offset int64
@@ -184,7 +248,7 @@ func (client *Client) StageHostArtifact(
 		if count == 0 && offset > 0 {
 			break
 		}
-		length, nextStage, err := client.stageChunk(ctx, node, target, kind, offset, buffer[:count], stage)
+		length, nextStage, err := client.stageChunk(ctx, node, target, kind, program, offset, buffer[:count], stage)
 		if err != nil {
 			return "", err
 		}
@@ -209,15 +273,17 @@ func (client *Client) stageChunk(
 	node string,
 	target string,
 	kind string,
+	program string,
 	offset int64,
 	chunk []byte,
 	stage string,
 ) (int64, string, error) {
 	body := hostArtifactStageBody{
-		Kind:   kind,
-		Offset: offset,
-		Data:   base64.StdEncoding.EncodeToString(chunk),
-		Stage:  stage,
+		Kind:    kind,
+		Offset:  offset,
+		Data:    base64.StdEncoding.EncodeToString(chunk),
+		Stage:   stage,
+		Program: program,
 	}
 	document, err := encodeJSON(&body)
 	if err != nil {

@@ -628,8 +628,16 @@ The controller downloads release assets from
 `https://github.com/<repository>/releases/download/<release_tag>/<asset>` into
 the cache that `pveguest_download` uses with `fetch = "controller"`. A download
 fails when its SHA-256 does not match the configured value. The archive must
-contain `manifest.json` with schema version 1. The manifest values for
+contain `manifest.json` with schema version 1 or 2. The manifest values for
 `repository`, `source_revision`, and `workspace` must equal the arguments.
+
+Schema version 2 accepts `programs`. Schema version 1 cannot list programs.
+Each program specifies a release archive from its own GitHub repository and
+release. Each program requires `name`, `repository`, `release_tag`, `asset`,
+`sha256`, `source_revision`, `signer_revision`, `member`, `member_sha256`,
+`path`, `mode`, `owner`, and `group`. The plan compares program files using
+`member_sha256`, `mode`, `owner`, and `group` under the same update conditions
+as other files.
 
 Read calls only `GET`. Read stores the installed archive SHA-256 and source
 revision, the target state, `observed_sha256`, and the live values of each
@@ -651,14 +659,19 @@ proposes an update in these cases:
 An apply calls `GET` before deciding whether to install. When the node already
 has the pinned archive installed and every file and owned directory matches
 the manifest, the apply does not install. Otherwise the apply downloads the
-attestation bundle, stages the archive and bundle in 96 KiB chunks, starts the
-`hostartifact` task, waits up to 10 minutes with `WaitTaskWithin`, and calls
-`GET` again. The apply fails when the node still reports a difference.
+attestation bundle, each program archive from its own release, and each
+program bundle from the configured release. The provider checks their
+SHA-256 values and stages the archive, bundle, program archives, and program
+bundles in 96 KiB chunks before starting the `hostartifact` task. The provider
+sends the stages with the install request, waits up to 10 minutes with
+`WaitTaskWithin`, and calls `GET` again. The apply fails when the node still
+reports a difference.
 
-The node runs `gh attestation verify` to verify the archive. The provider does
-not verify attestations. The node restores an interrupted transaction and
-repairs file and owned directory metadata. The node does not repair an
-inspect-only parent directory.
+The node uses native `gh attestation verify` to verify the configuration archive
+and each program archive before reading the selected members. The provider does
+not verify attestations or read program members. The node restores interrupted
+transactions and repairs file and owned directory metadata while preserving
+inspect-only parent directories.
 
 Destroy calls only `GET`. Destroy fails while the installed record lists
 files. To remove the files of a target, install an archive with an empty file
@@ -675,6 +688,7 @@ list before destroying the resource.
 | `bundle_asset` | string | yes | Release asset name of the attestation bundle. |
 | `bundle_sha256` | string | yes | SHA-256 of the attestation bundle. |
 | `source_revision` | string | yes | 40-character commit that built the archive. |
+| `program_bundles` | map of object | no | Each key selects a manifest program. Each object specifies `asset` and `sha256` for that program's attestation bundle in the release selected by the resource's `repository` and `release_tag`. A plan or apply fails when the keys differ from the manifest program names. |
 
 | Attribute | Meaning |
 | --- | --- |
@@ -689,8 +703,10 @@ list before destroying the resource.
 
 Import IDs use the format `<node>:<workspace>`, such as
 `suburban:suburban/mwan`. Import calls only `GET` and does not write to the
-node. The first apply after import installs the archive unless the node
-already has it installed with matching files.
+node. When the configuration includes `program_bundles`, OpenTofu plans an
+in-place state update after import. Apply installs the archive only when the
+target differs from the configuration; otherwise, it completes the planned
+state update without writing to the node, and the next plan is empty.
 
 ## pveguest_host_secret
 
@@ -1005,13 +1021,13 @@ provider address.
 
 Run each host group in a separate Make invocation after configuring the host
 variables above. Each invocation retains the existing 30-minute Go timeout.
-The positive artifact command excludes the separate rejection test with
-Go's `-skip` flag:
+The exact test selections keep each group separate:
 
 ```sh
-make testacc "TESTARGS=-failfast -run TestAccHostArtifactRejections"
-make testacc "TESTARGS=-failfast -run TestAccHostArtifact -skip TestAccHostArtifactRejections"
-make testacc "TESTARGS=-failfast -run TestAccHostSecret"
+make testacc 'TESTARGS=-failfast -run ^TestAccHostArtifactRejections$$'
+make testacc 'TESTARGS=-failfast -run ^TestAccHostArtifact$$'
+make testacc 'TESTARGS=-failfast -run ^TestAccHostArtifactPrograms$$'
+make testacc 'TESTARGS=-failfast -run ^TestAccHostSecret$$'
 ```
 
 The tests change only these items in the guest, and each test removes its
@@ -1036,8 +1052,9 @@ items at the end:
 - The controller needs HTTPS access to `api.smtp2go.com`.
 - The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
-`TestAccHostArtifact` and `TestAccHostArtifactRejections` change files on the
-node. The node needs policies for the disposable fixture targets
+`TestAccHostArtifact`, `TestAccHostArtifactRejections`, and
+`TestAccHostArtifactPrograms` change files on the node. The node needs policies
+for the disposable fixture targets
 `suburban/hostartifact-acceptance` and
 `suburban/hostartifact-acceptance-b`. The token needs `Sys.HostArtifacts.Audit`
 and `Sys.HostArtifacts.Modify` on `/nodes/<node>`. The test uses the root shell
@@ -1064,6 +1081,28 @@ Host fixture cases:
 | `other-target` | The API installs B and rejects the same archive when the request selects A. |
 | `recovery-v1`, `recovery-v2` | The provider checks stopped-install handling and recovery. |
 | `digest`, `size`, `symlink`, `hardlink`, `traversal`, `absolute`, `extra`, `missing`, `duplicate`, `member-mode` | Each real host task rejects its specific defect without changing A's installed files, metadata, record, journal, or GET response. |
+
+`TestAccHostArtifactPrograms` also requires the following pins in the same
+case-name-keyed JSON map. Each program pin includes `program_bundles`, which
+maps each manifest program name to its bundle `asset` and `sha256`. The other
+host tests require only the fifteen legacy cases above.
+
+Program fixture cases:
+
+| Cases | Required result |
+| --- | --- |
+| `program-valid` | The provider installs schema 2, repairs a modified program and a missing program separately, and produces a clean repeat plan. The typed installed record matches every program identity field in the qualified manifest after installation, repair, and interrupted recovery. |
+| `program-collision` | Planning rejects the duplicate destination before staging or starting a task. |
+| `program-wrong-archive` | Apply rejects the original program archive checksum before staging or starting a task. |
+| `program-wrong-source`, `program-wrong-signer`, `program-wrong-member` | Each host task rejects its intended defect before installed state changes. Provider apply also reports the intended diagnostic. |
+
+The program test imports A's legacy baseline through OpenTofu before applying
+the schema 2 pin. It stops a program install through the task API and requires
+an actual interrupted result before the next apply recovers the target. It
+compares selected-target observations for import, repeat plans, and rejected
+operations, and checks B's complete snapshot, task history, and consumer
+InvocationID throughout the sequence. The node policy must permit the fixture
+program destination under A's owned directory.
 
 `TestAccHostArtifactRejections` installs valid-v1 for A and other-target for B
 through the existing API helpers. The rejection checks call the existing

@@ -1,7 +1,9 @@
 package acceptance_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	pathutil "path"
 	"slices"
 	"strings"
 	"testing"
@@ -50,6 +53,15 @@ const (
 	caseRecoveryV1  = "recovery-v1"
 	caseRecoveryV2  = "recovery-v2"
 
+	caseProgramValid        = "program-valid"
+	caseProgramWrongSource  = "program-wrong-source"
+	caseProgramWrongSigner  = "program-wrong-signer"
+	caseProgramWrongArchive = "program-wrong-archive"
+	caseProgramWrongMember  = "program-wrong-member"
+	caseProgramCollision    = "program-collision"
+
+	manifestMember = "manifest.json"
+
 	fixtureAssetPrefix = "hostconfig_fixture-"
 	fixtureAssetSuffix = ".tar.gz"
 	releaseBaseURL     = "https://github.com/"
@@ -76,12 +88,31 @@ const (
 // hostArtifactPinEntry is the pin JSON that the host-artifact job writes to
 // its summary.
 type hostArtifactPinEntry struct {
+	ReleaseTag     string                             `json:"release_tag"`
+	Asset          string                             `json:"asset"`
+	SHA256         string                             `json:"sha256"`
+	BundleAsset    string                             `json:"bundle_asset"`
+	BundleSHA256   string                             `json:"bundle_sha256"`
+	SourceRevision string                             `json:"source_revision"`
+	ProgramBundles map[string]hostArtifactBundleEntry `json:"program_bundles"`
+}
+
+type hostArtifactBundleEntry struct {
+	Asset  string `json:"asset"`
+	SHA256 string `json:"sha256"`
+}
+
+type fixtureProgram struct {
+	Name           string `json:"name"`
+	Repository     string `json:"repository"`
 	ReleaseTag     string `json:"release_tag"`
 	Asset          string `json:"asset"`
 	SHA256         string `json:"sha256"`
-	BundleAsset    string `json:"bundle_asset"`
-	BundleSHA256   string `json:"bundle_sha256"`
 	SourceRevision string `json:"source_revision"`
+	SignerRevision string `json:"signer_revision"`
+	Path           string `json:"path"`
+	Member         string `json:"member"`
+	MemberSHA256   string `json:"member_sha256"`
 }
 
 type hostArtifactTest struct {
@@ -182,33 +213,41 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 		workspaces[rejection.fixtureCase] = fixtureWorkspace
 	}
 	for fixtureCase, workspace := range workspaces {
-		pin, found := pins[fixtureCase]
-		if !found {
-			t.Fatalf("%s does not contain the case %s", pinFile, fixtureCase)
-		}
-		want := fixtureAssetPrefix + fixtureCase + "-" + transport.HostArtifactTarget(workspace) + fixtureAssetSuffix
-		if pin.Asset != want {
-			t.Fatalf("%s pins asset %s for the case %s, want %s", pinFile, pin.Asset, fixtureCase, want)
-		}
-		if pin.ReleaseTag == "" || pin.BundleAsset != pin.Asset+".sigstore.json" {
-			t.Fatalf("%s: set the release tag and matching bundle asset for %s", pinFile, fixtureCase)
-		}
-		for label, value := range map[string]string{"sha256": pin.SHA256, "bundle_sha256": pin.BundleSHA256, "source_revision": pin.SourceRevision} {
-			length := sha256.Size * 2
-			if label == "source_revision" {
-				length = 40
-			}
-			if len(value) != length || strings.Trim(value, "0123456789abcdef") != "" {
-				t.Fatalf("%s: set a complete lowercase hexadecimal %s for %s", pinFile, label, fixtureCase)
-			}
-		}
+		checkFixturePin(t, pinFile, pins, fixtureCase, workspace)
 	}
 	return pins
 }
 
-func prepareHostArtifactFixtures(t *testing.T) (*hostArtifactTest, map[string]string) {
+func checkFixturePin(t *testing.T, pinFile string, pins map[string]hostArtifactPinEntry, fixtureCase string, workspace string) {
+	t.Helper()
+	pin, found := pins[fixtureCase]
+	if !found {
+		t.Fatalf("%s does not contain the case %s", pinFile, fixtureCase)
+	}
+	want := fixtureAssetPrefix + fixtureCase + "-" + transport.HostArtifactTarget(workspace) + fixtureAssetSuffix
+	if pin.Asset != want {
+		t.Fatalf("%s pins asset %s for the case %s, want %s", pinFile, pin.Asset, fixtureCase, want)
+	}
+	if pin.ReleaseTag == "" || pin.BundleAsset != pin.Asset+".sigstore.json" {
+		t.Fatalf("%s: set the release tag and matching bundle asset for %s", pinFile, fixtureCase)
+	}
+	for label, value := range map[string]string{"sha256": pin.SHA256, "bundle_sha256": pin.BundleSHA256, "source_revision": pin.SourceRevision} {
+		length := sha256.Size * 2
+		if label == "source_revision" {
+			length = 40
+		}
+		if len(value) != length || strings.Trim(value, "0123456789abcdef") != "" {
+			t.Fatalf("%s: set a complete lowercase hexadecimal %s for %s", pinFile, label, fixtureCase)
+		}
+	}
+}
+
+func prepareHostArtifactFixtures(t *testing.T, requiredCases ...string) (*hostArtifactTest, map[string]string) {
 	t.Helper()
 	test := newHostArtifactTest(t)
+	for _, fixtureCase := range requiredCases {
+		checkFixturePin(t, os.Getenv(hostArtifactPinsVariable), test.pins, fixtureCase, fixtureWorkspace)
+	}
 	target := transport.HostArtifactTarget(fixtureWorkspace)
 	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
 	t.Cleanup(func() {
@@ -346,10 +385,67 @@ resource "pveguest_host_artifact" "test" {
   bundle_asset    = %q
   bundle_sha256   = %q
   source_revision = %q
-}
+%s}
 `, providerSource, candidateInstalledVersion, h.node, h.nodeConfig.Endpoint, h.nodeConfig.APIToken, h.nodeConfig.Insecure,
 		h.node, fixtureWorkspace, hostArtifactRepository, pin.ReleaseTag, pin.Asset, pin.SHA256,
-		pin.BundleAsset, pin.BundleSHA256, pin.SourceRevision)
+		pin.BundleAsset, pin.BundleSHA256, pin.SourceRevision, programBundlesBlock(pin))
+}
+
+// Omit the argument for archives without programs.
+func programBundlesBlock(pin hostArtifactPinEntry) string {
+	if len(pin.ProgramBundles) == 0 {
+		return ""
+	}
+	var block strings.Builder
+	block.WriteString("  program_bundles = {\n")
+	for _, name := range slices.Sorted(maps.Keys(pin.ProgramBundles)) {
+		bundle := pin.ProgramBundles[name]
+		fmt.Fprintf(&block, "    %q = {\n      asset  = %q\n      sha256 = %q\n    }\n", name, bundle.Asset, bundle.SHA256)
+	}
+	block.WriteString("  }\n")
+	return block.String()
+}
+
+func (h *hostArtifactTest) programPaths(fixtureCase string) []string {
+	h.t.Helper()
+	programs := h.manifestPrograms(h.pins[fixtureCase])
+	if len(programs) == 0 {
+		h.t.Fatalf("manifest for test case %s does not list any programs", fixtureCase)
+	}
+	paths := make([]string, 0, len(programs))
+	for _, program := range programs {
+		paths = append(paths, program.Path)
+	}
+	return paths
+}
+
+func (h *hostArtifactTest) manifestPrograms(pin hostArtifactPinEntry) []fixtureProgram {
+	h.t.Helper()
+	archive := h.download(pin.ReleaseTag, pin.Asset, pin.SHA256)
+	decompressed, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		h.t.Fatalf("gzip reader could not open archive %s: %v", pin.Asset, err)
+	}
+	reader := tar.NewReader(decompressed)
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			h.t.Fatalf("archive %s does not contain member %s", pin.Asset, manifestMember)
+		}
+		if err != nil {
+			h.t.Fatalf("tar reader could not read the next member of archive %s: %v", pin.Asset, err)
+		}
+		if pathutil.Clean(header.Name) != manifestMember {
+			continue
+		}
+		var manifest struct {
+			Programs []fixtureProgram `json:"programs"`
+		}
+		if err := json.NewDecoder(reader).Decode(&manifest); err != nil {
+			h.t.Fatalf("JSON decoder could not parse member %s in archive %s: %v", manifestMember, pin.Asset, err)
+		}
+		return manifest.Programs
+	}
 }
 
 // applyClean applies the configuration, checks that the node reports the
@@ -468,6 +564,7 @@ func (h *hostArtifactTest) stageInstall(target string, fixtureCase string) (tran
 		h.t.Fatalf("stage the bundle of %s: %v", fixtureCase, err)
 	}
 	removeBundle := h.stageCleanup(target, bundleStage)
+	programStages, removePrograms := h.stagePrograms(target, pin)
 	return transport.HostArtifactInstall{
 		ReleaseTag:     pin.ReleaseTag,
 		Asset:          pin.Asset,
@@ -475,9 +572,53 @@ func (h *hostArtifactTest) stageInstall(target string, fixtureCase string) (tran
 		SourceRevision: pin.SourceRevision,
 		ArchiveStage:   archiveStage,
 		BundleStage:    bundleStage,
+		ProgramStages:  programStages,
 	}, func() {
 		removeArchive()
 		removeBundle()
+		removePrograms()
+	}
+}
+
+func (h *hostArtifactTest) stagePrograms(target string, pin hostArtifactPinEntry) (string, func()) {
+	h.t.Helper()
+	if len(pin.ProgramBundles) == 0 {
+		return "", func() {}
+	}
+	ctx := context.Background()
+	var stages []transport.HostProgramStage
+	var cleanups []func()
+	for _, program := range h.manifestPrograms(pin) {
+		bundle, found := pin.ProgramBundles[program.Name]
+		if !found {
+			h.t.Fatalf("program_bundles does not include program %s", program.Name)
+		}
+		archive := h.downloadFrom(program.Repository, program.ReleaseTag, program.Asset, program.SHA256)
+		bundleContent := h.download(pin.ReleaseTag, bundle.Asset, bundle.SHA256)
+		archiveStage, err := h.client.StageHostArtifactProgram(
+			ctx, h.node, target, transport.HostArtifactKindProgram, program.Name, bytes.NewReader(archive), int64(len(archive)),
+		)
+		if err != nil {
+			h.t.Fatalf("archive staging failed for program %s: %v", program.Name, err)
+		}
+		cleanups = append(cleanups, h.stageCleanup(target, archiveStage))
+		bundleStage, err := h.client.StageHostArtifactProgram(
+			ctx, h.node, target, transport.HostArtifactKindProgramBundle, program.Name, bytes.NewReader(bundleContent), int64(len(bundleContent)),
+		)
+		if err != nil {
+			h.t.Fatalf("bundle staging failed for program %s: %v", program.Name, err)
+		}
+		cleanups = append(cleanups, h.stageCleanup(target, bundleStage))
+		stages = append(stages, transport.HostProgramStage{Name: program.Name, ArchiveStage: archiveStage, BundleStage: bundleStage})
+	}
+	programStages, err := transport.FormatProgramStages(stages)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return programStages, func() {
+		for _, cleanup := range cleanups {
+			cleanup()
+		}
 	}
 }
 
@@ -565,7 +706,12 @@ func (h *hostArtifactTest) expectStopResult(target string, prior hostArtifactPin
 
 func (h *hostArtifactTest) download(releaseTag string, asset string, wantHash string) []byte {
 	h.t.Helper()
-	address := releaseBaseURL + hostArtifactRepository + "/releases/download/" + releaseTag + "/" + asset
+	return h.downloadFrom(hostArtifactRepository, releaseTag, asset, wantHash)
+}
+
+func (h *hostArtifactTest) downloadFrom(repository string, releaseTag string, asset string, wantHash string) []byte {
+	h.t.Helper()
+	address := releaseBaseURL + repository + "/releases/download/" + releaseTag + "/" + asset
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, address, nil)
 	if err != nil {
 		h.t.Fatal(err)
@@ -617,9 +763,6 @@ func (h *hostArtifactTest) snapshot(target string, directory string) map[string]
 		entries := strings.Fields(h.hostMustRun("find", root, "-mindepth", "1", "-print"))
 		slices.Sort(entries)
 		snapshot["contents "+root] = strings.Join(entries, "\n")
-		if root == directory {
-			continue
-		}
 		for _, path := range entries {
 			snapshot[path] = h.hostPathState(path)
 		}
