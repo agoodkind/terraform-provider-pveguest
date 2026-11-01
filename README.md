@@ -926,7 +926,7 @@ make testacc \
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 | `PVEGUEST_ACC_SMTP2GO_API_KEY_FILE` | File containing the SMTP2GO API key for `TestAccMailRelayImport`. The test fails if `TF_ACC` is set and this variable is missing. |
 | `PVEGUEST_ACC_HOST_SSH` | Every host acceptance test requires this ssh destination for a root shell on `PVEGUEST_ACC_NODE`. A selected host test fails when `TF_ACC` is set and this variable is unset. |
-| `PVEGUEST_ACC_HOST_SSH_CONTROL_PATH` | Optional path to an existing private OpenSSH ControlMaster Unix socket. The operator starts and closes the master. The test requires `ssh -O check` to succeed before reading credentials or changing fixtures and uses this socket for host commands and persistent locks. A missing or closed master fails without opening a new connection. When unset, the test keeps its existing SSH behavior. |
+| `PVEGUEST_ACC_HOST_SSH_CONTROL_PATH` | Optional path to an existing private OpenSSH ControlMaster socket. Start the master before the test and close it afterward. Connection loss fails the test. |
 | `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | Every host acceptance test requires this JSON file with release pins from `agoodkind/configs` for every case in the host fixture table below. A selected host test fails when `TF_ACC` is set and this variable is unset. |
 | `PVEGUEST_ACC_HOST_AUDIT_TOKEN_FILE` | Every host acceptance test requires a private file containing a separate API token with `Sys.HostArtifacts.Audit` and without `Sys.HostArtifacts.Modify` or `Sys.HostSecrets.Modify`. A selected host test fails when `TF_ACC` is set and this variable is unset. |
 
