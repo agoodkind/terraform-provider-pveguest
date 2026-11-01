@@ -1013,9 +1013,10 @@ A separate control changes the source revision in the install request to the
 revision of another retained fixture. All five controls must fail before
 installed state changes.
 
-Use a privilege-separated audit token. Grant the parent user the required
-user ACL and grant the audit token only `Sys.HostArtifacts.Audit` through its
-separate token ACL.
+Use a privilege-separated audit token. Grant the parent user
+`Sys.HostArtifacts.Audit`, `Sys.HostArtifacts.Modify`, and `Sys.HostSecrets.Modify`
+on `/nodes/<node>`. Grant the audit token only `Sys.HostArtifacts.Audit` on that
+same node through its separate nonpropagating ACL.
 The test requires audit `GET` to succeed. Otherwise valid stage `POST`, install
 `POST`, and secret `PUT` requests must each return actual HTTP 403 without
 creating a task, stage, or target mutation. The audit token and random synthetic
