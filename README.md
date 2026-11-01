@@ -598,11 +598,11 @@ sends the stages with the install request, waits up to 10 minutes with
 `WaitTaskWithin`, and calls `GET` again. The apply fails when the node still
 reports a difference.
 
-The node runs `gh attestation verify` to verify the archive and each program
-archive. The node reads each program member. The provider does not verify
-attestations or read program members. The node restores an interrupted
-transaction and repairs file and owned directory metadata. The node does not
-repair an inspect-only parent directory.
+The node uses native `gh attestation verify` to verify the configuration archive
+and each program archive before reading the selected members. The provider does
+not verify attestations or read program members. The node restores interrupted
+transactions and repairs file and owned directory metadata while preserving
+inspect-only parent directories.
 
 Destroy calls only `GET`. Destroy fails while the installed record lists
 files. To remove the files of a target, install an archive with an empty file

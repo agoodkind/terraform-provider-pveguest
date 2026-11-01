@@ -54,8 +54,7 @@ type HostArtifactInstall struct {
 	SourceRevision string `json:"source-revision"`
 	ArchiveStage   string `json:"archive-stage"`
 	BundleStage    string `json:"bundle-stage"`
-	// ProgramStages stores the value from FormatProgramStages. Install requests
-	// omit program-stages when this value is empty.
+	// Omit program-stages when this value is empty.
 	ProgramStages string `json:"program-stages,omitempty"`
 }
 

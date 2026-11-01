@@ -41,14 +41,11 @@ type hostArtifactPin struct {
 	ProgramBundles map[string]hostArtifactProgramBundle
 }
 
-// hostArtifactProgramBundle stores a program's attestation bundle asset and SHA-256.
 type hostArtifactProgramBundle struct {
 	Asset  string
 	SHA256 string
 }
 
-// hostArtifactProgramBundleValue stores the Terraform values for one
-// program_bundles entry.
 type hostArtifactProgramBundleValue struct {
 	Asset  types.String `tfsdk:"asset"`
 	SHA256 types.String `tfsdk:"sha256"`
@@ -68,9 +65,6 @@ type hostArtifactManifest struct {
 	Programs       []hostArtifactManifestProgram   `json:"programs"`
 }
 
-// hostArtifactManifestProgram defines a program from a separate release archive.
-// Repository and ReleaseTag select that release. Member selects the file that
-// the host reads from the archive.
 type hostArtifactManifestProgram struct {
 	Name           string `json:"name"`
 	Repository     string `json:"repository"`
@@ -260,8 +254,7 @@ func (program hostArtifactManifestProgram) check() error {
 	return nil
 }
 
-// checkProgramBundles checks that program_bundles has exactly one key for each
-// manifest program name.
+// Require exactly one bundle for each manifest program.
 func (manifest hostArtifactManifest) checkProgramBundles(bundles map[string]hostArtifactProgramBundle) error {
 	programNames := map[string]bool{}
 	var missing []string

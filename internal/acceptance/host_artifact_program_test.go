@@ -18,8 +18,6 @@ var programFixtureCases = []string{
 	caseProgramWrongArchive, caseProgramWrongMember, caseProgramCollision,
 }
 
-// TestAccHostArtifactPrograms checks program installation, drift, rejection,
-// and interrupted recovery through the existing fixture targets and OpenTofu.
 func TestAccHostArtifactPrograms(t *testing.T) {
 	test, unrelated := prepareHostArtifactFixtures(t, programFixtureCases...)
 	test.requireProgramPins()
@@ -191,8 +189,7 @@ func (h *hostArtifactTest) expectProgramRepeatPlan(programs []fixtureProgram) {
 	}
 }
 
-// expectProgramProviderRejection checks the provider diagnostic and installed
-// observations. expectRejectedInstall checks the host task for each host defect.
+// Verify host task rejection with expectRejectedInstall.
 func (h *hostArtifactTest) expectProgramProviderRejection(fixtureCase string, summary string, failureText string, newTasks int, rejectPlan bool) {
 	h.t.Helper()
 	target := transport.HostArtifactTarget(fixtureWorkspace)

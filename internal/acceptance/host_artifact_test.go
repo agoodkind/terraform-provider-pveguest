@@ -88,23 +88,20 @@ const (
 // hostArtifactPinEntry is the pin JSON that the host-artifact job writes to
 // its summary.
 type hostArtifactPinEntry struct {
-	ReleaseTag     string `json:"release_tag"`
-	Asset          string `json:"asset"`
-	SHA256         string `json:"sha256"`
-	BundleAsset    string `json:"bundle_asset"`
-	BundleSHA256   string `json:"bundle_sha256"`
-	SourceRevision string `json:"source_revision"`
-	// ProgramBundles maps program names to bundles for this test case.
+	ReleaseTag     string                             `json:"release_tag"`
+	Asset          string                             `json:"asset"`
+	SHA256         string                             `json:"sha256"`
+	BundleAsset    string                             `json:"bundle_asset"`
+	BundleSHA256   string                             `json:"bundle_sha256"`
+	SourceRevision string                             `json:"source_revision"`
 	ProgramBundles map[string]hostArtifactBundleEntry `json:"program_bundles"`
 }
 
-// hostArtifactBundleEntry stores a program bundle asset and SHA-256 from pin JSON.
 type hostArtifactBundleEntry struct {
 	Asset  string `json:"asset"`
 	SHA256 string `json:"sha256"`
 }
 
-// fixtureProgram stores the manifest program fields that acceptance tests read.
 type fixtureProgram struct {
 	Name           string `json:"name"`
 	Repository     string `json:"repository"`
@@ -409,8 +406,6 @@ func programBundlesBlock(pin hostArtifactPinEntry) string {
 	return block.String()
 }
 
-// programPaths reads the manifest for fixtureCase and returns each program's
-// installation path.
 func (h *hostArtifactTest) programPaths(fixtureCase string) []string {
 	h.t.Helper()
 	programs := h.manifestPrograms(h.pins[fixtureCase])
@@ -424,8 +419,6 @@ func (h *hostArtifactTest) programPaths(fixtureCase string) []string {
 	return paths
 }
 
-// manifestPrograms downloads the pinned archive and reads its manifest's
-// programs list.
 func (h *hostArtifactTest) manifestPrograms(pin hostArtifactPinEntry) []fixtureProgram {
 	h.t.Helper()
 	archive := h.download(pin.ReleaseTag, pin.Asset, pin.SHA256)
@@ -587,9 +580,6 @@ func (h *hostArtifactTest) stageInstall(target string, fixtureCase string) (tran
 	}
 }
 
-// stagePrograms uploads each pinned program archive and bundle to host stages.
-// It returns the program-stages value, or an empty string when the pin does
-// not include programs.
 func (h *hostArtifactTest) stagePrograms(target string, pin hostArtifactPinEntry) (string, func()) {
 	h.t.Helper()
 	if len(pin.ProgramBundles) == 0 {

@@ -670,8 +670,6 @@ func (r *hostArtifactResource) downloadPrograms(
 	return files, diagnostics
 }
 
-// stagePrograms uploads program archives and bundles to host stages and formats
-// program-stages. It returns an empty string when programFiles is empty.
 func (r *hostArtifactResource) stagePrograms(
 	ctx context.Context,
 	node string,
@@ -728,7 +726,6 @@ func (r *hostArtifactResource) stageFile(
 }
 
 // pinOf returns the pin of the model and whether every pin attribute is known.
-// pinOf converts a null program_bundles attribute to an empty map.
 func pinOf(ctx context.Context, model hostArtifactModel) (hostArtifactPin, bool, diag.Diagnostics) {
 	values := []types.String{
 		model.Node, model.Workspace, model.Repository, model.ReleaseTag, model.Asset,
@@ -756,8 +753,6 @@ func pinOf(ctx context.Context, model hostArtifactModel) (hostArtifactPin, bool,
 	}, true, diagnostics
 }
 
-// programBundlesOf reads program_bundles and reports whether the map and every
-// asset and sha256 value are known and non-null.
 func programBundlesOf(ctx context.Context, model hostArtifactModel) (map[string]hostArtifactProgramBundle, bool, diag.Diagnostics) {
 	bundles := map[string]hostArtifactProgramBundle{}
 	if model.ProgramBundles.IsNull() {
