@@ -56,12 +56,16 @@ const (
 
 	downloadImportSummary       = "Cannot import pveguest_download"
 	downloadImportMissingFormat = "on guest %s, the file %s does not exist"
+	downloadImportTypeFormat    = "on guest %s, %s has file type %s; import accepts only a regular file"
+	fileTypeFormat              = "%F"
 
 	// ImportState sets this private state key; the first successful Update deletes it.
 	downloadImportedEntry = "imported"
 )
 
 var (
+	regularFileTypes = []string{"regular file", "regular empty file"}
+
 	httpsURLPattern = regexp.MustCompile(`^https://[^\s\x00]+$`)
 
 	headerNamePattern  = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -265,10 +269,7 @@ func (r *downloadResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"write_id": schema.StringAttribute{
 				Computed: true,
 				Description: "Random identifier that changes each time an apply writes the file, mode, owner, or group. " +
-					"A rewrite after drift produces the same file_sha256 and a new write_id. " +
-					"Import sets write_id to import- followed by the first 16 lowercase hexadecimal characters of the guest file hash. " +
-					"When the guest file hash matches the desired file hash and mode, owner, and group match the configuration, " +
-					"the first apply retains this value.",
+					"A rewrite after drift produces the same file_sha256 and a new write_id.",
 			},
 		})),
 	}
@@ -328,6 +329,21 @@ func (r *downloadResource) ImportState(ctx context.Context, req resource.ImportS
 	}
 
 	guest := transport.Guest{Node: parsed.Node, VMID: parsed.VMID, Kind: transport.Kind(parsed.Kind)}
+	// ImportState uses stat to reject paths that are not regular files. sha256sum follows
+	// symbolic links.
+	fileType, found, err := readGuestFileType(ctx, r.data.client, guest, filePath)
+	if err != nil {
+		resp.Diagnostics.AddError(downloadImportSummary, err.Error())
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(downloadImportSummary, fmt.Sprintf(downloadImportMissingFormat, guest, filePath))
+		return
+	}
+	if !slices.Contains(regularFileTypes, fileType) {
+		resp.Diagnostics.AddError(downloadImportSummary, fmt.Sprintf(downloadImportTypeFormat, guest, filePath, fileType))
+		return
+	}
 	fileHash, found, err := readGuestSHA256(ctx, r.data.client, guest, filePath)
 	if err != nil {
 		resp.Diagnostics.AddError(downloadImportSummary, err.Error())
@@ -345,6 +361,28 @@ func (r *downloadResource) ImportState(ctx context.Context, req resource.ImportS
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("file_sha256"), fileHash)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("write_id"), importedWriteID(fileHash))...)
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, downloadImportedEntry, importedMarker)...)
+}
+
+// readGuestFileType returns the file type text that stat prints for the path
+// without following a symbolic link.
+func readGuestFileType(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	filePath string,
+) (string, bool, error) {
+	statCommand := guestCommand("stat", "-c", fileTypeFormat, "--", filePath)
+	result, err := runReadOnlyGuest(ctx, client, guest, statCommand)
+	if err != nil {
+		return "", false, err
+	}
+	if result.ExitCode != 0 {
+		if strings.Contains(string(result.Stderr), missingFileMessage) {
+			return "", false, nil
+		}
+		return "", false, commandFailure(guest, statCommand, result)
+	}
+	return firstLine(result.Stdout), true, nil
 }
 
 func (r *downloadResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {

@@ -7,13 +7,20 @@ import (
 	"testing"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
+
+var randomWriteIDPattern = regexp.MustCompile(fmt.Sprintf("^[0-9a-f]{%d}$", importWriteIDHexLength))
 
 const (
 	importDownloadName    = "conf"
 	importDownloadAddress = "pveguest_download." + importDownloadName
 	importObjectPath      = "/import.conf"
+	importLaterPath       = "/later.conf"
+	importLinkPath        = testDirectory + "/link-import.conf"
+	importLinkTargetPath  = testDirectory + "/link-target.conf"
+	importDirectoryPath   = testDirectory + "/directory-import"
 	importArchivePath     = "/stack.tar.gz"
 	importArchiveMember   = "import.conf"
 	importOtherMember     = "debs/manifest.txt"
@@ -34,6 +41,10 @@ type downloadImportCase struct {
 	wantFileHash string
 	wantWriteID  *regexp.Regexp
 	wantRewrite  bool
+
+	// laterConfig and laterFileHash describe an optional apply after the adoption.
+	laterConfig   string
+	laterFileHash string
 }
 
 // importFileIdentity returns the inode and modification time of the import test file.
@@ -128,18 +139,23 @@ func TestAccDownloadImport(t *testing.T) {
 	t.Run("matching archive member avoids file rewrite and unit restart", testDownloadImportArchiveMember)
 	t.Run("missing file error includes the path", testDownloadImportMissingFile)
 	t.Run("malformed import error includes the required format", testDownloadImportMalformedID)
+	t.Run("symbolic link import fails with path in error", func(t *testing.T) { testDownloadImportRefusesType(t, importLinkPath, makeImportLink) })
+	t.Run("directory import fails with path in error", func(t *testing.T) { testDownloadImportRefusesType(t, importDirectoryPath, makeImportDirectory) })
 }
 
 func testDownloadImportMatching(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useImportUnit()
 	content := []byte(adoptedConfContent)
-	baseURL := guest.serveObjects(t, map[string][]byte{importObjectPath: content})
+	later := []byte(changedConfContent)
+	baseURL := guest.serveObjects(t, map[string][]byte{importObjectPath: content, importLaterPath: later})
 	runDownloadImport(t, guest, downloadImportCase{
-		config:       guest.importDownloadConfig(baseURL+importObjectPath, bytesHash(content), ""),
-		wantFileHash: bytesHash(content),
-		wantWriteID:  regexp.MustCompile("^" + importedWriteID(content) + "$"),
-		wantRewrite:  false,
+		config:        guest.importDownloadConfig(baseURL+importObjectPath, bytesHash(content), ""),
+		wantFileHash:  bytesHash(content),
+		wantWriteID:   regexp.MustCompile("^" + importedWriteID(content) + "$"),
+		wantRewrite:   false,
+		laterConfig:   guest.importDownloadConfig(baseURL+importLaterPath, bytesHash(later), ""),
+		laterFileHash: bytesHash(later),
 	})
 }
 
@@ -151,7 +167,7 @@ func testDownloadImportDiffering(t *testing.T) {
 	runDownloadImport(t, guest, downloadImportCase{
 		config:       guest.importDownloadConfig(baseURL+importObjectPath, bytesHash(content), ""),
 		wantFileHash: bytesHash(content),
-		wantWriteID:  regexp.MustCompile(fmt.Sprintf("^[0-9a-f]{%d}$", importWriteIDHexLength)),
+		wantWriteID:  randomWriteIDPattern,
 		wantRewrite:  true,
 	})
 }
@@ -188,43 +204,95 @@ func runDownloadImport(t *testing.T, guest *testGuest, testCase downloadImportCa
 	identity := guest.importFileIdentity()
 	wantImportedWriteID := importedWriteID([]byte(adoptedConfContent))
 
+	steps := []resource.TestStep{
+		{
+			Config:             testCase.config,
+			ResourceName:       importDownloadAddress,
+			ImportState:        true,
+			ImportStateId:      guest.importFileID(),
+			ImportStatePersist: true,
+			ImportStateCheck:   expectImportedDownload(wantImportedWriteID),
+		},
+		{
+			Config:             testCase.config,
+			ResourceName:       importUnitAddress,
+			ImportState:        true,
+			ImportStateId:      guest.importUnitID(),
+			ImportStatePersist: true,
+			ImportStateCheck:   expectImportedAttributes,
+		},
+		{
+			Config:           testCase.config,
+			ConfigPlanChecks: expectActions(importDownloadAddress, importUnitAddress),
+			Check: resource.ComposeAggregateTestCheckFunc(
+				resource.TestCheckResourceAttr(importDownloadAddress, "file_sha256", testCase.wantFileHash),
+				resource.TestMatchResourceAttr(importDownloadAddress, "write_id", testCase.wantWriteID),
+				checkGuest(guest.expectFileHash(testImportConfPath, testCase.wantFileHash)),
+				guest.expectImportFileIdentity(identity, !testCase.wantRewrite),
+				guest.expectImportUnitInvocation(&invocationID, !testCase.wantRewrite),
+			),
+		},
+		{
+			Config:   testCase.config,
+			PlanOnly: true,
+		},
+	}
+	steps = append(steps, guest.laterSteps(testCase, &invocationID)...)
+
 	resource.Test(t, resource.TestCase{
 		ProtoV6ProviderFactories: protoV6ProviderFactories,
 		CheckDestroy:             guest.expectImportUnit(),
+		Steps:                    steps,
+	})
+}
+
+// laterSteps returns the steps that apply a changed sha256 after the adoption.
+func (g *testGuest) laterSteps(testCase downloadImportCase, invocationID *string) []resource.TestStep {
+	if testCase.laterConfig == "" {
+		return nil
+	}
+	return []resource.TestStep{{
+		Config:           testCase.laterConfig,
+		ConfigPlanChecks: expectAction(importDownloadAddress, plancheck.ResourceActionUpdate),
+		Check: resource.ComposeAggregateTestCheckFunc(
+			resource.TestCheckResourceAttr(importDownloadAddress, "file_sha256", testCase.laterFileHash),
+			resource.TestMatchResourceAttr(importDownloadAddress, "write_id", randomWriteIDPattern),
+			checkGuest(g.expectFileHash(testImportConfPath, testCase.laterFileHash)),
+			g.expectImportUnitInvocation(invocationID, false),
+		),
+	}}
+}
+
+// testDownloadImportRefusesType imports a path that is not a regular file and checks that
+// the error contains the path.
+func testDownloadImportRefusesType(t *testing.T, path string, prepare func(guest *testGuest)) {
+	guest := newTestGuest(t)
+	guest.useTestDirectory()
+	prepare(guest)
+	config := guest.providerBlock() +
+		guest.controllerDownloadBlock(importDownloadName, importUnusedURL, bytesHash([]byte("unused")), path, "")
+
+	resource.Test(t, resource.TestCase{
+		ProtoV6ProviderFactories: protoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config:             testCase.config,
-				ResourceName:       importDownloadAddress,
-				ImportState:        true,
-				ImportStateId:      guest.importFileID(),
-				ImportStatePersist: true,
-				ImportStateCheck:   expectImportedDownload(wantImportedWriteID),
-			},
-			{
-				Config:             testCase.config,
-				ResourceName:       importUnitAddress,
-				ImportState:        true,
-				ImportStateId:      guest.importUnitID(),
-				ImportStatePersist: true,
-				ImportStateCheck:   expectImportedAttributes,
-			},
-			{
-				Config:           testCase.config,
-				ConfigPlanChecks: expectActions(importDownloadAddress, importUnitAddress),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(importDownloadAddress, "file_sha256", testCase.wantFileHash),
-					resource.TestMatchResourceAttr(importDownloadAddress, "write_id", testCase.wantWriteID),
-					checkGuest(guest.expectFileHash(testImportConfPath, testCase.wantFileHash)),
-					guest.expectImportFileIdentity(identity, !testCase.wantRewrite),
-					guest.expectImportUnitInvocation(&invocationID, !testCase.wantRewrite),
-				),
-			},
-			{
-				Config:   testCase.config,
-				PlanOnly: true,
+				Config:        config,
+				ResourceName:  importDownloadAddress,
+				ImportState:   true,
+				ImportStateId: fmt.Sprintf("%s/%d/%s/%s", guest.guest.Node, guest.guest.VMID, guest.guest.Kind, path),
+				ExpectError:   regexp.MustCompile(regexp.QuoteMeta(path)),
 			},
 		},
 	})
+}
+
+func makeImportLink(guest *testGuest) {
+	guest.writeFile(importLinkTargetPath, adoptedConfContent)
+	guest.mustRun("ln", "-s", "--", importLinkTargetPath, importLinkPath)
+}
+
+func makeImportDirectory(guest *testGuest) {
+	guest.mustRun("mkdir", "--", importDirectoryPath)
 }
 
 func testDownloadImportMissingFile(t *testing.T) {
