@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -75,6 +76,7 @@ type hostArtifactModel struct {
 	BundleAsset    types.String `tfsdk:"bundle_asset"`
 	BundleSHA256   types.String `tfsdk:"bundle_sha256"`
 	SourceRevision types.String `tfsdk:"source_revision"`
+	ProgramBundles types.Map    `tfsdk:"program_bundles"`
 
 	Target                  types.String `tfsdk:"target"`
 	State                   types.String `tfsdk:"state"`
@@ -170,6 +172,29 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 				stringvalidator.RegexMatches(hostArtifactRevisionPattern, "must be 40 lowercase hexadecimal characters"),
 			},
 		},
+		"program_bundles": schema.MapNestedAttribute{
+			Description: "program_bundles maps each manifest program name to its attestation bundle asset and SHA-256 " +
+				"in the release selected by repository and release_tag. Plan and apply require the keys to match " +
+				"the manifest program names exactly. Archives without programs do not require this argument.",
+			Optional: true,
+			Validators: []validator.Map{
+				mapvalidator.KeysAre(stringvalidator.RegexMatches(hostArtifactNamePattern, "each program_bundles key must begin with a letter or digit and use only letters, digits, '.', '_', and '-'")),
+			},
+			NestedObject: schema.NestedAttributeObject{
+				Attributes: map[string]schema.Attribute{
+					"asset": schema.StringAttribute{
+						Description: "asset selects the release asset that contains the program's attestation bundle.",
+						Required:    true,
+						Validators:  nameValidators,
+					},
+					"sha256": schema.StringAttribute{
+						Description: "sha256 specifies the attestation bundle's SHA-256 hash as 64 lowercase hexadecimal characters.",
+						Required:    true,
+						Validators:  sha256Validators,
+					},
+				},
+			},
+		},
 	}
 }
 
@@ -260,13 +285,18 @@ func (r *hostArtifactResource) ModifyPlan(ctx context.Context, req resource.Modi
 		target := types.StringValue(transport.HostArtifactTarget(plan.Workspace.ValueString()))
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("target"), target)...)
 	}
-	pin, known := pinOf(plan)
-	if !known {
+	pin, known, pinDiagnostics := pinOf(ctx, plan)
+	resp.Diagnostics.Append(pinDiagnostics...)
+	if resp.Diagnostics.HasError() || !known {
 		return
 	}
 	manifest, _, err := loadPinnedManifest(ctx, r.data.controllerCAFile, pin)
 	if err != nil {
 		resp.Diagnostics.AddError("Read host artifact manifest", err.Error())
+		return
+	}
+	if err := manifest.checkProgramBundles(pin.ProgramBundles); err != nil {
+		resp.Diagnostics.AddError("Validate host artifact program bundles", err.Error())
 		return
 	}
 	desiredFiles := manifest.desiredFiles()
@@ -508,12 +538,20 @@ func (r *hostArtifactResource) Delete(ctx context.Context, req resource.DeleteRe
 // response after any install.
 func (r *hostArtifactResource) apply(ctx context.Context, plan hostArtifactModel) (transport.HostArtifactState, diag.Diagnostics) {
 	var diagnostics diag.Diagnostics
-	pin, _ := pinOf(plan)
+	pin, _, pinDiagnostics := pinOf(ctx, plan)
+	diagnostics.Append(pinDiagnostics...)
+	if diagnostics.HasError() {
+		return transport.HostArtifactState{}, diagnostics
+	}
 	node := plan.Node.ValueString()
 	target := transport.HostArtifactTarget(pin.Workspace)
 	manifest, archivePath, err := loadPinnedManifest(ctx, r.data.controllerCAFile, pin)
 	if err != nil {
 		diagnostics.AddError("Read host artifact manifest", err.Error())
+		return transport.HostArtifactState{}, diagnostics
+	}
+	if err := manifest.checkProgramBundles(pin.ProgramBundles); err != nil {
+		diagnostics.AddError("Validate host artifact program bundles", err.Error())
 		return transport.HostArtifactState{}, diagnostics
 	}
 	current, err := r.data.client.GetHostArtifact(ctx, node, target)
@@ -525,7 +563,7 @@ func (r *hostArtifactResource) apply(ctx context.Context, plan hostArtifactModel
 		return current, diagnostics
 	}
 
-	diagnostics.Append(r.install(ctx, node, target, pin, archivePath)...)
+	diagnostics.Append(r.install(ctx, node, target, pin, manifest, archivePath)...)
 	if diagnostics.HasError() {
 		return transport.HostArtifactState{}, diagnostics
 	}
@@ -549,6 +587,7 @@ func (r *hostArtifactResource) install(
 	node string,
 	target string,
 	pin hostArtifactPin,
+	manifest hostArtifactManifest,
 	archivePath string,
 ) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
@@ -558,12 +597,22 @@ func (r *hostArtifactResource) install(
 		diagnostics.AddError("Download host artifact bundle", err.Error())
 		return diagnostics
 	}
-	archiveStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindArchive, archivePath)
+	programFiles, downloadDiagnostics := r.downloadPrograms(ctx, pin, manifest)
+	diagnostics.Append(downloadDiagnostics...)
+	if diagnostics.HasError() {
+		return diagnostics
+	}
+	archiveStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindArchive, "", archivePath)
 	diagnostics.Append(stageDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
-	bundleStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindBundle, bundlePath)
+	bundleStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindBundle, "", bundlePath)
+	diagnostics.Append(stageDiagnostics...)
+	if diagnostics.HasError() {
+		return diagnostics
+	}
+	programStages, stageDiagnostics := r.stagePrograms(ctx, node, target, programFiles)
 	diagnostics.Append(stageDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
@@ -575,6 +624,7 @@ func (r *hostArtifactResource) install(
 		SourceRevision: pin.SourceRevision,
 		ArchiveStage:   archiveStage,
 		BundleStage:    bundleStage,
+		ProgramStages:  programStages,
 	})
 	if err != nil {
 		diagnostics.AddError("Install host artifact", err.Error())
@@ -586,11 +636,79 @@ func (r *hostArtifactResource) install(
 	return diagnostics
 }
 
+// hostArtifactProgramFiles stores a program name and the paths to its cached
+// archive and attestation bundle.
+type hostArtifactProgramFiles struct {
+	Name        string
+	ArchivePath string
+	BundlePath  string
+}
+
+// downloadPrograms caches each program archive from its own release and each
+// bundle from the configured release. It checks archive SHA-256 values against
+// the manifest and bundle SHA-256 values against program_bundles.
+func (r *hostArtifactResource) downloadPrograms(
+	ctx context.Context,
+	pin hostArtifactPin,
+	manifest hostArtifactManifest,
+) ([]hostArtifactProgramFiles, diag.Diagnostics) {
+	var diagnostics diag.Diagnostics
+	files := make([]hostArtifactProgramFiles, 0, len(manifest.Programs))
+	for _, program := range manifest.Programs {
+		archiveURL := releaseAssetURL(program.Repository, program.ReleaseTag, program.Asset)
+		archivePath, err := cachedArchive(ctx, r.data.controllerCAFile, archiveURL, program.SHA256, requestHeaders{})
+		if err != nil {
+			diagnostics.AddError("Download host artifact program archive", fmt.Sprintf("archive download failed for program %s: %s", program.Name, err))
+			return nil, diagnostics
+		}
+		bundle := pin.ProgramBundles[program.Name]
+		bundleURL := releaseAssetURL(pin.Repository, pin.ReleaseTag, bundle.Asset)
+		bundlePath, err := cachedArchive(ctx, r.data.controllerCAFile, bundleURL, bundle.SHA256, requestHeaders{})
+		if err != nil {
+			diagnostics.AddError("Download program attestation bundle", fmt.Sprintf("bundle download failed for program %s: %s", program.Name, err))
+			return nil, diagnostics
+		}
+		files = append(files, hostArtifactProgramFiles{Name: program.Name, ArchivePath: archivePath, BundlePath: bundlePath})
+	}
+	return files, diagnostics
+}
+
+// stagePrograms uploads program archives and bundles to host stages and formats
+// program-stages. It returns an empty string when programFiles is empty.
+func (r *hostArtifactResource) stagePrograms(
+	ctx context.Context,
+	node string,
+	target string,
+	programFiles []hostArtifactProgramFiles,
+) (string, diag.Diagnostics) {
+	var diagnostics diag.Diagnostics
+	stages := make([]transport.HostProgramStage, 0, len(programFiles))
+	for _, program := range programFiles {
+		archiveStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindProgram, program.Name, program.ArchivePath)
+		diagnostics.Append(stageDiagnostics...)
+		if diagnostics.HasError() {
+			return "", diagnostics
+		}
+		bundleStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindProgramBundle, program.Name, program.BundlePath)
+		diagnostics.Append(stageDiagnostics...)
+		if diagnostics.HasError() {
+			return "", diagnostics
+		}
+		stages = append(stages, transport.HostProgramStage{Name: program.Name, ArchiveStage: archiveStage, BundleStage: bundleStage})
+	}
+	programStages, err := transport.FormatProgramStages(stages)
+	if err != nil {
+		diagnostics.AddError("Format host artifact program stages", err.Error())
+	}
+	return programStages, diagnostics
+}
+
 func (r *hostArtifactResource) stageFile(
 	ctx context.Context,
 	node string,
 	target string,
 	kind string,
+	program string,
 	filePath string,
 ) (string, diag.Diagnostics) {
 	var diagnostics diag.Diagnostics
@@ -605,7 +723,7 @@ func (r *hostArtifactResource) stageFile(
 		diagnostics.AddError("Stage host artifact", fmt.Sprintf("read the size of the cached %s: %s", kind, err))
 		return "", diagnostics
 	}
-	stage, err := r.data.client.StageHostArtifact(ctx, node, target, kind, file, info.Size())
+	stage, err := r.data.client.StageHostArtifactProgram(ctx, node, target, kind, program, file, info.Size())
 	if err != nil {
 		diagnostics.AddError("Stage host artifact", err.Error())
 	}
@@ -613,15 +731,20 @@ func (r *hostArtifactResource) stageFile(
 }
 
 // pinOf returns the pin of the model and whether every pin attribute is known.
-func pinOf(model hostArtifactModel) (hostArtifactPin, bool) {
+// pinOf converts a null program_bundles attribute to an empty map.
+func pinOf(ctx context.Context, model hostArtifactModel) (hostArtifactPin, bool, diag.Diagnostics) {
 	values := []types.String{
 		model.Node, model.Workspace, model.Repository, model.ReleaseTag, model.Asset,
 		model.SHA256, model.BundleAsset, model.BundleSHA256, model.SourceRevision,
 	}
 	for _, value := range values {
 		if value.IsUnknown() || value.IsNull() {
-			return hostArtifactPin{}, false
+			return hostArtifactPin{}, false, nil
 		}
+	}
+	bundles, known, diagnostics := programBundlesOf(ctx, model)
+	if diagnostics.HasError() || !known {
+		return hostArtifactPin{}, false, diagnostics
 	}
 	return hostArtifactPin{
 		Workspace:      model.Workspace.ValueString(),
@@ -632,7 +755,32 @@ func pinOf(model hostArtifactModel) (hostArtifactPin, bool) {
 		BundleAsset:    model.BundleAsset.ValueString(),
 		BundleSHA256:   model.BundleSHA256.ValueString(),
 		SourceRevision: model.SourceRevision.ValueString(),
-	}, true
+		ProgramBundles: bundles,
+	}, true, diagnostics
+}
+
+// programBundlesOf reads program_bundles and reports whether the map and every
+// asset and sha256 value are known and non-null.
+func programBundlesOf(ctx context.Context, model hostArtifactModel) (map[string]hostArtifactProgramBundle, bool, diag.Diagnostics) {
+	bundles := map[string]hostArtifactProgramBundle{}
+	if model.ProgramBundles.IsNull() {
+		return bundles, true, nil
+	}
+	if model.ProgramBundles.IsUnknown() {
+		return nil, false, nil
+	}
+	var values map[string]hostArtifactProgramBundleValue
+	diagnostics := model.ProgramBundles.ElementsAs(ctx, &values, false)
+	if diagnostics.HasError() {
+		return nil, false, diagnostics
+	}
+	for name, value := range values {
+		if value.Asset.IsUnknown() || value.Asset.IsNull() || value.SHA256.IsUnknown() || value.SHA256.IsNull() {
+			return nil, false, diagnostics
+		}
+		bundles[name] = hostArtifactProgramBundle{Asset: value.Asset.ValueString(), SHA256: value.SHA256.ValueString()}
+	}
+	return bundles, true, diagnostics
 }
 
 // setObservedState copies the GET response into the computed attributes.

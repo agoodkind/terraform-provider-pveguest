@@ -11,12 +11,15 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework/types"
+
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (
 	hostArtifactManifestMember = "manifest.json"
-	hostArtifactSchemaVersion  = 1
+	hostArtifactSchemaFiles    = 1
+	hostArtifactSchemaPrograms = 2
 	githubReleaseBase          = "https://github.com"
 )
 
@@ -31,10 +34,26 @@ type hostArtifactPin struct {
 	BundleAsset    string
 	BundleSHA256   string
 	SourceRevision string
+	// ProgramBundles maps program names to attestation bundle assets and hashes
+	// in the release selected by Repository and ReleaseTag.
+	ProgramBundles map[string]hostArtifactProgramBundle
+}
+
+// hostArtifactProgramBundle stores a program's attestation bundle asset and SHA-256.
+type hostArtifactProgramBundle struct {
+	Asset  string
+	SHA256 string
+}
+
+// hostArtifactProgramBundleValue stores the Terraform values for one
+// program_bundles entry.
+type hostArtifactProgramBundleValue struct {
+	Asset  types.String `tfsdk:"asset"`
+	SHA256 types.String `tfsdk:"sha256"`
 }
 
 // hostArtifactManifest contains a host artifact archive manifest with schema
-// version 1.
+// version 1 or 2. Schema version 2 adds support for programs.
 type hostArtifactManifest struct {
 	SchemaVersion  int                             `json:"schema_version"`
 	Repository     string                          `json:"repository"`
@@ -44,6 +63,26 @@ type hostArtifactManifest struct {
 	Environment    string                          `json:"environment"`
 	Directories    []hostArtifactManifestDirectory `json:"directories"`
 	Files          []hostArtifactManifestFile      `json:"files"`
+	Programs       []hostArtifactManifestProgram   `json:"programs"`
+}
+
+// hostArtifactManifestProgram defines a program from a separate release archive.
+// Repository and ReleaseTag select that release. Member selects the file that
+// the host reads from the archive.
+type hostArtifactManifestProgram struct {
+	Name           string `json:"name"`
+	Repository     string `json:"repository"`
+	ReleaseTag     string `json:"release_tag"`
+	Asset          string `json:"asset"`
+	SHA256         string `json:"sha256"`
+	SourceRevision string `json:"source_revision"`
+	SignerRevision string `json:"signer_revision"`
+	Member         string `json:"member"`
+	MemberSHA256   string `json:"member_sha256"`
+	Path           string `json:"path"`
+	Mode           string `json:"mode"`
+	Owner          string `json:"owner"`
+	Group          string `json:"group"`
 }
 
 type hostArtifactManifestDirectory struct {
@@ -112,8 +151,12 @@ func loadPinnedManifest(ctx context.Context, caFile string, pin hostArtifactPin)
 }
 
 func (manifest hostArtifactManifest) check(pin hostArtifactPin) error {
-	if manifest.SchemaVersion != hostArtifactSchemaVersion {
-		return fmt.Errorf("schema_version is %d, want %d", manifest.SchemaVersion, hostArtifactSchemaVersion)
+	if manifest.SchemaVersion != hostArtifactSchemaFiles && manifest.SchemaVersion != hostArtifactSchemaPrograms {
+		return fmt.Errorf("schema_version %d must equal %d or %d",
+			manifest.SchemaVersion, hostArtifactSchemaFiles, hostArtifactSchemaPrograms)
+	}
+	if manifest.SchemaVersion == hostArtifactSchemaFiles && len(manifest.Programs) > 0 {
+		return fmt.Errorf("schema_version %d requires an empty programs list", hostArtifactSchemaFiles)
 	}
 	identity := []struct {
 		field string
@@ -142,13 +185,85 @@ func (manifest hostArtifactManifest) check(pin hostArtifactPin) error {
 		}
 		paths[file.Path] = true
 	}
+	names := map[string]bool{}
+	for _, program := range manifest.Programs {
+		if err := program.check(); err != nil {
+			return err
+		}
+		if names[program.Name] {
+			return fmt.Errorf("program name %s appears more than once in the manifest", program.Name)
+		}
+		names[program.Name] = true
+		if paths[program.Path] {
+			return fmt.Errorf("path %s appears more than once among manifest directories, files, and programs", program.Path)
+		}
+		paths[program.Path] = true
+	}
 	return nil
+}
+
+func (program hostArtifactManifestProgram) check() error {
+	if !hostArtifactNamePattern.MatchString(program.Name) {
+		return fmt.Errorf("program name %q must begin with a letter or digit and use only letters, digits, '.', '_', and '-'", program.Name)
+	}
+	if !hostArtifactRepositoryPattern.MatchString(program.Repository) {
+		return fmt.Errorf("repository %q for program %s must use the owner/repository format", program.Repository, program.Name)
+	}
+	for _, field := range []struct{ name, value string }{
+		{name: "release_tag", value: program.ReleaseTag},
+		{name: "asset", value: program.Asset},
+	} {
+		if !hostArtifactNamePattern.MatchString(field.value) {
+			return fmt.Errorf("field %s value %q for program %s must begin with a letter or digit and use only letters, digits, '.', '_', and '-'", field.name, field.value, program.Name)
+		}
+	}
+	for _, field := range []struct{ name, value string }{
+		{name: "sha256", value: program.SHA256},
+		{name: "member_sha256", value: program.MemberSHA256},
+	} {
+		if !sha256Pattern.MatchString(field.value) {
+			return fmt.Errorf("field %s value %q for program %s must contain exactly 64 lowercase hexadecimal characters", field.name, field.value, program.Name)
+		}
+	}
+	return nil
+}
+
+// checkProgramBundles checks that program_bundles has exactly one key for each
+// manifest program name.
+func (manifest hostArtifactManifest) checkProgramBundles(bundles map[string]hostArtifactProgramBundle) error {
+	programNames := map[string]bool{}
+	var missing []string
+	for _, program := range manifest.Programs {
+		programNames[program.Name] = true
+		if _, found := bundles[program.Name]; !found {
+			missing = append(missing, program.Name)
+		}
+	}
+	var extra []string
+	for _, name := range slices.Sorted(maps.Keys(bundles)) {
+		if !programNames[name] {
+			extra = append(extra, name)
+		}
+	}
+	if len(missing) == 0 && len(extra) == 0 {
+		return nil
+	}
+	slices.Sort(missing)
+	return fmt.Errorf(
+		"program_bundles omits manifest program names [%s] and includes names outside the manifest [%s]",
+		strings.Join(missing, ", "), strings.Join(extra, ", "),
+	)
 }
 
 func (manifest hostArtifactManifest) desiredFiles() map[string]hostArtifactFileValue {
 	files := make(map[string]hostArtifactFileValue, len(manifest.Files))
 	for _, file := range manifest.Files {
 		files[file.Path] = hostArtifactFileValue{SHA256: file.SHA256, Mode: file.Mode, Owner: file.Owner, Group: file.Group}
+	}
+	for _, program := range manifest.Programs {
+		files[program.Path] = hostArtifactFileValue{
+			SHA256: program.MemberSHA256, Mode: program.Mode, Owner: program.Owner, Group: program.Group,
+		}
 	}
 	return files
 }
