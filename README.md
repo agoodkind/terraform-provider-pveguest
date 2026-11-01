@@ -307,12 +307,15 @@ Apply installs the exact package versions in `versions`, including downgrades. R
 
 When package removal is enabled, the provider runs `apt-mark unhold` before `apt-get remove` for installed packages selected for removal. When remove_on_delete is true, the plan for pveguest_apt_packages shows a warning that lists the declared packages that the provider removes during apply or destroy.
 
+`start_services` defaults to `true`; with `start_services = false`, the provider creates `/usr/sbin/policy-rc.d` to prevent service starts only while its `apt-get` runs `dpkg`. Another `apt-get` that starts during this period exits immediately with a lock error unless it sets `DPkg::Lock::Timeout`. A `dpkg` process that already runs finishes before the provider creates its policy file. `pveguest` installs wait for each other through a shared install lock. The provider refuses to replace a policy file without its marker. The next install deletes stale policy files, staged files, and apt configuration files only when they contain the marker and processes do not use them. An `apt-get` process that survives a dead script keeps its files until it ends. A later `pveguest_systemd_unit` resource starts the service.
+
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `packages` | set of string | yes | Specify Debian package names without version or architecture suffixes. |
 | `versions` | map of string | no | Map package names to exact Debian versions. Every key must also appear in `packages`. |
 | `locked` | set of string | no | Select packages to lock with `apt-mark hold`. Every name must also appear in `packages`. |
 | `remove_on_delete` | bool | no | Set to `true` to remove packages dropped from `packages` during apply and all listed packages during destroy. When `false` or unset, these removal operations change only OpenTofu state. |
+| `start_services` | bool | no | Defaults to `true`, which permits packages to start services normally. Set to `false` to prevent package scripts from starting or restarting services during installation. |
 
 ## pveguest_deb_packages
 
@@ -328,9 +331,12 @@ The install excludes recommended packages and rejects dependencies that
 require a download. The provider serializes apt operations per guest.
 Destroy removes the resource from state and retains the installed packages.
 
+`start_services` uses the same behavior as `pveguest_apt_packages`. Both resources share `/run/pveguest-package-install.lock`.
+
 | Argument | Type | Required | Meaning |
 | --- | --- | --- | --- |
 | `packages` | map of string | yes | Map from Debian package name to the absolute guest path of its `.deb` file. |
+| `start_services` | bool | no | Defaults to `true`, which permits packages to start services normally. Set to `false` to prevent package scripts from starting or restarting services during installation. |
 
 | Attribute | Meaning |
 | --- | --- |
@@ -756,6 +762,8 @@ items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
+- The acceptance tests install `at`, `pveguest-acc-svc`, `pveguest-acc-svc-two`, `pveguest-acc-svc-three`, `pveguest-acc-svc-four`, and any packages their installs add. The tests change `atd.service`, `pveguest-acc-svc.service`, `pveguest-acc-svc-two.service`, `pveguest-acc-svc-three.service`, and `pveguest-acc-svc-four.service`. Cleanup purges every package the tests added. Cleanup does not run `autoremove`.
+- The tests change `/usr/sbin/policy-rc.d`, the staged copy `/usr/sbin/policy-rc.d.pveguest-staged.<pid>`, the apt configuration `/run/pveguest-apt-policy.<pid>.conf`, `/usr/sbin/policy-rc.d.pveguest-staged.keep`, `/run/pveguest-apt-policy.4000001.conf`, and `/run/pveguest-package-install.lock`. The provider script deletes its own staged copy and apt configuration and deletes stale copies from a killed script. Test cleanup deletes the two unrelated files and the lock file.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
 - The unit `pveguest-acc-removal.service` under `/etc/systemd/system/`.

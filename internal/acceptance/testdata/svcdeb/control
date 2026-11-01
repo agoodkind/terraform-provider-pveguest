@@ -1,0 +1,5 @@
+Package: pveguest-acc-svc
+Version: 1.0
+Architecture: all
+Maintainer: pveguest acceptance <noreply@example.invalid>
+Description: The test package installs one service unit

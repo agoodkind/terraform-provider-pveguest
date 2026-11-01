@@ -34,6 +34,8 @@ type debPackagesModel struct {
 	Kind        types.String `tfsdk:"kind"`
 	Packages    types.Map    `tfsdk:"packages"`
 	DebVersions types.Map    `tfsdk:"deb_versions"`
+
+	StartServices types.Bool `tfsdk:"start_services"`
 }
 
 func newDebPackagesResource() resource.Resource {
@@ -66,6 +68,10 @@ func (r *debPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Computed:    true,
 				ElementType: types.StringType,
 				Description: "Installed version of each package in packages.",
+			},
+			"start_services": schema.BoolAttribute{
+				Optional:    true,
+				Description: startServicesDescription,
 			},
 		}),
 	}
@@ -174,7 +180,7 @@ func (r *debPackagesResource) apply(ctx context.Context, plan *debPackagesModel)
 	unlock := r.data.aptLocks.lock(guest)
 	defer unlock()
 
-	versions, err := r.installPending(ctx, guest, declared)
+	versions, err := r.installPending(ctx, guest, declared, startServicesEnabled(plan.StartServices))
 	if err != nil {
 		diagnostics.AddError("Install deb packages", err.Error())
 		return diagnostics
@@ -189,6 +195,7 @@ func (r *debPackagesResource) installPending(
 	ctx context.Context,
 	guest transport.Guest,
 	declared map[string]string,
+	startServices bool,
 ) (map[string]string, error) {
 	names := packageNames(declared)
 	fileVersions, err := readDebFileVersions(ctx, r.data.client, guest, declared)
@@ -227,7 +234,8 @@ func (r *debPackagesResource) installPending(
 		},
 		pendingPaths...,
 	)
-	if err := runChecked(ctx, r.data.client, guest, aptCommand(arguments...)); err != nil {
+	installCommand := aptCommand(arguments...)
+	if err := runInstallCommand(ctx, r.data.client, guest, installCommand, startServices); err != nil {
 		return nil, err
 	}
 

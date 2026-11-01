@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+sleep_file=/root/pveguest-acc/postinst-sleep
+times_file=/root/pveguest-acc/pveguest-acc-svc.times
+hold_file=/root/pveguest-acc/pveguest-acc-svc.hold
+
+sleep_seconds=0
+if [ -f "$sleep_file" ]; then
+	sleep_seconds=$(cat "$sleep_file")
+fi
+deb-systemd-helper enable pveguest-acc-svc.service
+date +%s%N >>"$times_file"
+while [ -e "$hold_file" ]; do
+	sleep 1
+done
+sleep "$sleep_seconds"
+date +%s%N >>"$times_file"
+deb-systemd-invoke start pveguest-acc-svc.service

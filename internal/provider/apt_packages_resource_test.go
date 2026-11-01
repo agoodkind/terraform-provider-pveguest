@@ -266,6 +266,7 @@ func aptValue(t *testing.T, resourceType tftypes.Type, spec aptSpec) *tfprotov6.
 		"versions":         versions,
 		"locked":           aptStringSet(spec.locked),
 		"remove_on_delete": removeOnDelete,
+		"start_services":   tftypes.NewValue(tftypes.Bool, nil),
 	}))
 	if err != nil {
 		t.Fatal(err)

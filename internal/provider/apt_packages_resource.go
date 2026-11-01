@@ -4,10 +4,12 @@ package provider
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
@@ -43,7 +45,27 @@ const (
 	aptMarkUnhold = "unhold"
 
 	architectureSeparator = ":"
+
+	// The script exit status constants must match the embedded script.
+	policyRCPath              = "/usr/sbin/policy-rc.d"
+	policyRCLockPath          = "/run/pveguest-package-install.lock"
+	policyRCMarker            = "# The pveguest provider created this file for a package install."
+	policyRCLockWaitSeconds   = 600
+	policyRCForeignStatus     = 73
+	policyRCLockTimeoutStatus = 75
+
+	startServicesDescription = "start_services defaults to true, which lets packages start services normally. " +
+		"When false, the provider prevents service starts and restarts during installs in this apply. " +
+		"The provider fails the apply without changing a policy-rc.d file that lacks its marker. " +
+		"Both package resources share a lock during these installs. " +
+		"A later pveguest_systemd_unit resource can start the service."
 )
+
+// policyRCInstallScript runs with its arguments through bash -c.
+// The command can still read standard input.
+//
+//go:embed scripts/policy_rc_install.sh
+var policyRCInstallScript string
 
 // The pattern is the Debian policy pattern for package names. The pattern
 // also rejects a name that starts with a dash. apt-get reads such a name as
@@ -67,15 +89,17 @@ type aptPackagesModel struct {
 	Versions       types.Map    `tfsdk:"versions"`
 	Locked         types.Set    `tfsdk:"locked"`
 	RemoveOnDelete types.Bool   `tfsdk:"remove_on_delete"`
+	StartServices  types.Bool   `tfsdk:"start_services"`
 }
 
-// aptDesired stores package names, exact versions, lock selections, and the
-// removal setting as Go values.
+// aptDesired stores package names, exact versions, lock selections, the removal
+// setting, and the service start setting.
 type aptDesired struct {
 	Packages       []string
 	Versions       map[string]string
 	Locked         []string
 	RemoveOnDelete bool
+	StartServices  bool
 }
 
 func newAptPackagesResource() resource.Resource {
@@ -126,6 +150,10 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 			"remove_on_delete": schema.BoolAttribute{
 				Optional:    true,
 				Description: "When remove_on_delete is true, the provider runs apt-get remove during apply for packages that the configuration removes from packages and removes all listed packages during destroy. When remove_on_delete is false or unset, the provider keeps the packages installed and changes only OpenTofu state.",
+			},
+			"start_services": schema.BoolAttribute{
+				Optional:    true,
+				Description: startServicesDescription,
 			},
 		}),
 	}
@@ -411,7 +439,7 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 
 	changesVersions := versioned || len(desired.Locked) > 0
 	installCommand := aptInstallCommand(installSpecs(pending, desired.Versions), changesVersions)
-	if err := runChecked(ctx, r.data.client, guest, installCommand); err != nil {
+	if err := runInstallCommand(ctx, r.data.client, guest, installCommand, desired.StartServices); err != nil {
 		diagnostics.AddError("apt-get install failed", err.Error())
 		return diagnostics
 	}
@@ -498,6 +526,61 @@ func aptInstallCommand(specs []string, changesVersions bool) transport.Command {
 	return aptCommand(append(arguments, specs...)...)
 }
 
+// startServicesEnabled returns true when start_services is unset.
+func startServicesEnabled(value types.Bool) bool {
+	if value.IsNull() {
+		return true
+	}
+	return value.ValueBool()
+}
+
+// runInstallCommand runs the command as is when startServices is true.
+// When startServices is false, it runs the command inside the embedded script.
+// It converts script exit statuses 73 and 75 into the corresponding errors.
+func runInstallCommand(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	command transport.Command,
+	startServices bool,
+) error {
+	if startServices {
+		return runChecked(ctx, client, guest, command)
+	}
+
+	argv := []string{
+		"bash", "-c", policyRCInstallScript, "bash",
+		policyRCPath, policyRCLockPath, strconv.Itoa(policyRCLockWaitSeconds), policyRCMarker,
+	}
+	argv = append(argv, command.Argv...)
+	wrapped := transport.Command{
+		Argv:           argv,
+		Stdin:          command.Stdin,
+		TimeoutSeconds: command.TimeoutSeconds + policyRCLockWaitSeconds,
+	}
+	result, err := runGuest(ctx, client, guest, wrapped)
+	if err != nil {
+		return err
+	}
+	switch result.ExitCode {
+	case 0:
+		return nil
+	case policyRCForeignStatus:
+		return fmt.Errorf(
+			"%s: %s exists without the pveguest marker; the provider will not change it; "+
+				"delete the file or set start_services to true",
+			guest, policyRCPath,
+		)
+	case policyRCLockTimeoutStatus:
+		return fmt.Errorf(
+			"%s: the wait for lock %s timed out after %d seconds; another package install may still be running",
+			guest, policyRCLockPath, policyRCLockWaitSeconds,
+		)
+	default:
+		return commandFailure(guest, command, result)
+	}
+}
+
 func aptRemoveCommand(names []string) transport.Command {
 	return aptCommand(append([]string{"remove", "-y", "--"}, names...)...)
 }
@@ -536,6 +619,7 @@ func desiredFrom(ctx context.Context, model aptPackagesModel) (aptDesired, diag.
 	desired := aptDesired{
 		Versions:       map[string]string{},
 		RemoveOnDelete: model.RemoveOnDelete.ValueBool(),
+		StartServices:  startServicesEnabled(model.StartServices),
 	}
 	diagnostics.Append(model.Packages.ElementsAs(ctx, &desired.Packages, false)...)
 	if !model.Versions.IsNull() {
