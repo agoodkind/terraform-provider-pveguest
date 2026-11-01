@@ -317,9 +317,10 @@ func (s *hostSecretTest) expectImportWithoutWrite(marker string, stable map[stri
 func (s *hostSecretTest) acquireTargetLock(target string) func() {
 	s.t.Helper()
 	lockPath := hostLockPrefix + target + hostLockSuffix
+	arguments := append(hostSSHOptions(s.sshControlPath), s.ssh, "--",
+		"flock", "--nonblock", "--exclusive", transport.Quote(lockPath), "cat")
 	command := exec.CommandContext(
-		context.Background(), "ssh", "-o", "BatchMode=yes", s.ssh, "--",
-		"flock", "--nonblock", "--exclusive", transport.Quote(lockPath), "cat",
+		context.Background(), "ssh", arguments...,
 	)
 	input, err := command.StdinPipe()
 	if err != nil {

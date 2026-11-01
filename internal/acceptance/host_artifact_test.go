@@ -28,7 +28,8 @@ const (
 	// hostSSHVariable selects an ssh destination with a root shell on the
 	// acceptance node. The test edits, inspects, and deletes the files of
 	// the two fixture targets through it.
-	hostSSHVariable = "PVEGUEST_ACC_HOST_SSH"
+	hostSSHVariable            = "PVEGUEST_ACC_HOST_SSH"
+	hostSSHControlPathVariable = "PVEGUEST_ACC_HOST_SSH_CONTROL_PATH"
 	// hostArtifactPinsVariable selects a JSON file that maps each fixture
 	// case to the pin that the host-artifact job wrote for its release.
 	hostArtifactPinsVariable = "PVEGUEST_ACC_HOST_ARTIFACT_PINS"
@@ -126,6 +127,7 @@ type hostArtifactTest struct {
 	node                  string
 	nodeConfig            transport.NodeConfig
 	ssh                   string
+	sshControlPath        string
 	pins                  map[string]hostArtifactPinEntry
 	workspace             *tofuWorkspace
 }
@@ -136,6 +138,7 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 		t.Skipf("%s is not set", acceptanceVariable)
 	}
 	ssh := requireVariable(t, hostSSHVariable)
+	controlPath := hostSSHControlPath(t, ssh)
 	pinFile := requireVariable(t, hostArtifactPinsVariable)
 	node := requireVariable(t, nodeVariable)
 	nodeConfig := nodeConfigFromEnvironment(t)
@@ -152,12 +155,42 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 		node:           node,
 		nodeConfig:     nodeConfig,
 		ssh:            ssh,
+		sshControlPath: controlPath,
 		pins:           readFixturePins(t, pinFile),
 	}
 	test.workspace = test.newWorkspace()
 	// The provider and the test download release assets into this cache.
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	return test
+}
+
+func hostSSHOptions(controlPath string) []string {
+	options := []string{"-o", "BatchMode=yes"}
+	if controlPath != "" {
+		options = append(options, "-S", controlPath, "-o", "ControlMaster=no", "-o", "ProxyCommand=false")
+	}
+	return options
+}
+
+func hostSSHControlPath(t *testing.T, destination string) string {
+	t.Helper()
+	controlPath := os.Getenv(hostSSHControlPathVariable)
+	if controlPath == "" {
+		return controlPath
+	}
+	info, err := os.Stat(controlPath)
+	if err != nil {
+		t.Fatalf("%s: %v; start a private OpenSSH master at this socket before the test", hostSSHControlPathVariable, err)
+	}
+	if info.Mode()&os.ModeSocket == 0 {
+		t.Fatalf("%s: %s is not a Unix socket; start a private OpenSSH master at this socket before the test", hostSSHControlPathVariable, controlPath)
+	}
+	arguments := append(hostSSHOptions(controlPath), "-O", "check", destination)
+	output, err := exec.CommandContext(context.Background(), "ssh", arguments...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s: ssh -O check failed: %v: %s; start a private OpenSSH master at this socket before the test", hostSSHControlPathVariable, err, strings.TrimSpace(string(output)))
+	}
+	return controlPath
 }
 
 // readFixturePins reads the pin file and checks that each case pins the
@@ -807,7 +840,8 @@ func (h *hostArtifactTest) hostRun(stdin []byte, argv ...string) (string, string
 	for _, argument := range argv {
 		quoted = append(quoted, transport.Quote(argument))
 	}
-	arguments := append([]string{"-o", "BatchMode=yes", h.ssh, "--"}, quoted...)
+	arguments := append(hostSSHOptions(h.sshControlPath), h.ssh, "--")
+	arguments = append(arguments, quoted...)
 	command := exec.CommandContext(context.Background(), "ssh", arguments...)
 	command.Stdin = bytes.NewReader(stdin)
 	var stdout bytes.Buffer
