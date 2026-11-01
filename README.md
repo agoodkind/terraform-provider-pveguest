@@ -89,7 +89,7 @@ resource "pveguest_systemd_unit" "ssh" {
 | `nodes.<name>.insecure` | bool | no | `false` | Skips TLS certificate verification. |
 | `nodes.<name>.max_exec_requests` | number | no | `4` | This setting limits concurrent guest commands for this node configuration and requires a value of at least 1. |
 | `max_requests` | number | no | `4` | Concurrent API requests per hypervisor. |
-| `controller_ca_file` | string | no | | Path of a PEM file with certificate authorities that the controller trusts in addition to the system roots when `pveguest_download` uses `fetch = "controller"`. |
+| `controller_ca_file` | string | no | | The controller trusts certificate authorities from this PEM file in addition to the system roots when `pveguest_download` uses `fetch = "controller"` or `pveguest_host_artifact` downloads release assets. |
 | `smtp2go_api_key` | string, sensitive | no | | The key authenticates SMTP2GO requests for `pveguest_mail_relay`. The provider uses `PVEGUEST_SMTP2GO_API_KEY` when the argument is empty. |
 | `smtp2go_api_url` | string | no | `https://api.smtp2go.com/v3` | The URL selects the SMTP2GO endpoint. The provider accepts HTTPS, or HTTP for localhost and loopback addresses. |
 
@@ -111,6 +111,23 @@ The token needs these privileges on `/nodes/<node>` for
 | --- | --- |
 | `GET /nodes/{node}/kernel-modules` | `Sys.KernelModules.Audit` |
 | `PUT /nodes/{node}/kernel-modules` | `Sys.KernelModules.Modify` |
+
+The token needs these privileges on `/nodes/<node>` for
+`pveguest_host_artifact`.
+
+| API method | Privilege |
+| --- | --- |
+| `GET /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Audit` |
+| `POST /nodes/{node}/host-artifacts/{target}/stage` | `Sys.HostArtifacts.Modify` |
+| `POST /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Modify` |
+
+The token needs these privileges on `/nodes/<node>` for
+`pveguest_host_secret`.
+
+| API method | Privilege |
+| --- | --- |
+| `GET /nodes/{node}/host-artifacts/{target}` | `Sys.HostArtifacts.Audit` |
+| `PUT /nodes/{node}/host-artifacts/{target}/secrets/{field}` | `Sys.HostSecrets.Modify` |
 
 The token needs these privileges on `/vms/<vmid>` for
 `pveguest_container_power`.
@@ -598,6 +615,168 @@ value is false.
 | `modules` | set of string | The set contains every module in the persistent list. |
 | `loaded` | map of bool | Each value reports whether the listed module is loaded. |
 
+## pveguest_host_artifact
+
+This resource installs a signed host artifact archive for one workspace
+selector on a node. The node must provide the overlay host artifact methods
+under `/nodes/{node}/host-artifacts/{target}`, a policy file for the target,
+and the trusted root. Stock Proxmox VE does not provide these methods. The
+`{target}` value is the lowercase hexadecimal SHA-256 of the exact `workspace`
+value. The resource calls only the methods of that target.
+
+The controller downloads release assets from
+`https://github.com/<repository>/releases/download/<release_tag>/<asset>` into
+the cache that `pveguest_download` uses with `fetch = "controller"`. A download
+fails when its SHA-256 does not match the configured value. The archive must
+contain `manifest.json` with schema version 1. The manifest values for
+`repository`, `source_revision`, and `workspace` must equal the arguments.
+
+Read calls only `GET`. Read stores the installed archive SHA-256 and source
+revision, the target state, `observed_sha256`, and the live values of each
+present file and owned directory.
+
+A plan downloads the pinned archive into the controller cache, reads
+`manifest.json`, and compares the manifest with the refreshed state. The plan
+proposes an update in these cases:
+
+- The installed archive differs from `sha256` or `source_revision`.
+- The target state is not `committed`.
+- A file is missing, or its SHA-256, mode, owner, or group differs from the
+  manifest.
+- An owned directory is missing, or its mode, owner, or group differs from the
+  manifest.
+- `GET` reports `matches` false for a file or an owned directory.
+- `observed_sha256` differs from the value after the last apply.
+
+An apply calls `GET` before deciding whether to install. When the node already
+has the pinned archive installed and every file and owned directory matches
+the manifest, the apply does not install. Otherwise the apply downloads the
+attestation bundle, stages the archive and bundle in 96 KiB chunks, starts the
+`hostartifact` task, waits up to 10 minutes with `WaitTaskWithin`, and calls
+`GET` again. The apply fails when the node still reports a difference.
+
+The node runs `gh attestation verify` to verify the archive. The provider does
+not verify attestations. The node restores an interrupted transaction and
+repairs file and owned directory metadata. The node does not repair an
+inspect-only parent directory.
+
+Destroy calls only `GET`. Destroy fails while the installed record lists
+files. To remove the files of a target, install an archive with an empty file
+list before destroying the resource.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | yes | Select a key in the provider's `nodes` map. A change replaces the resource. |
+| `workspace` | string | yes | Exact workspace selector of the target, such as `suburban/mwan`. A change replaces the resource. |
+| `repository` | string | yes | GitHub repository of the release, such as `agoodkind/configs`. |
+| `release_tag` | string | yes | Release tag of the archive and the bundle. |
+| `asset` | string | yes | Release asset name of the archive. |
+| `sha256` | string | yes | SHA-256 of the archive. |
+| `bundle_asset` | string | yes | Release asset name of the attestation bundle. |
+| `bundle_sha256` | string | yes | SHA-256 of the attestation bundle. |
+| `source_revision` | string | yes | 40-character commit that built the archive. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `target` | SHA-256 of `workspace`. |
+| `state` | `none`, `committed`, or `interrupted`. |
+| `installed_sha256` | SHA-256 of the installed archive, or an empty string without an installed record. |
+| `installed_source_revision` | Source revision of the installed archive, or an empty string without an installed record. |
+| `observed_sha256` | Digest of the live files and owned directories that `GET` reports. |
+| `files` | Map from path to the live `sha256`, `mode`, `owner`, and `group` of each present file. |
+| `directories` | Map from path to the live `mode`, `owner`, and `group` of each present owned directory. |
+| `write_ids` | Map from path to the UPID of the task that last wrote the file. A file that an install does not change keeps its `write_id`. Use these values in `restart_on` of the units that read the files. |
+
+Import IDs use the format `<node>:<workspace>`, such as
+`suburban:suburban/mwan`. Import calls only `GET` and does not write to the
+node. The first apply after import installs the archive unless the node
+already has it installed with matching files.
+
+## pveguest_host_secret
+
+`pveguest_host_secret` sets one secret field of one workspace selector on one
+Proxmox node through
+`PUT /nodes/{node}/host-artifacts/{target}/secrets/{field}`. The request body
+contains only `value` and `version`. The response contains a task identifier
+(UPID).
+
+`{target}` is the lowercase hexadecimal SHA-256 of the exact workspace selector.
+The resource reads and writes only the selected target and field.
+
+The target policy lists each field, its storage file, its value rules, and its
+consumer units. The node validates the value and writes `NAME=value` followed by
+a newline to the storage file. The node restarts the consumer units when the
+storage file content changes. The provider does not run a service action.
+
+`value_wo` is write-only, and OpenTofu does not store it in plans or state.
+Read calls only `GET /nodes/{node}/host-artifacts/{target}`. The response does
+not contain a secret value. Each entry in `secrets[]` reports these fields:
+
+- `field` identifies the secret field.
+- `configured` reports whether the storage file matches the policy.
+- `version` reports the recorded version.
+- `sha256` reports the storage file SHA-256.
+- `restart_pending` is `1` when the secret record has a pending consumer restart for a unit that the policy lists.
+
+The provider rejects a `GET` response when a `secrets[]` entry omits
+`restart_pending`. The error states that the node overlay is too old.
+The provider does not treat an absent field as false.
+
+After each apply, the provider stores the storage file SHA-256 from `GET` as
+the applied SHA-256 in private state. Read sets the private Boolean
+`content_drift` to true when the current SHA-256 differs from the applied
+SHA-256 or `GET` reports `restart_pending` as `1`. The resource does not expose
+either SHA-256 as an attribute.
+
+A plan proposes a write when the resource needs replacement or when any of
+these conditions apply:
+
+- `value_wo_version` changes.
+- `GET` reports `configured` false for the field.
+- The storage file SHA-256 differs from the applied SHA-256.
+- `GET` reports `restart_pending` as `1` for the field.
+
+Changing `value_wo` alone does not plan a write. A write plan requires the
+configured value of `value_wo`.
+
+An apply sends `value_wo` as `value` and `value_wo_version` as `version`, waits
+up to 10 minutes for the `hostsecret` task to succeed, and calls `GET`. The
+apply fails if `GET` reports `configured` as false, a different version, or
+`restart_pending` as `1`. The node rejects a lower version and another value
+at the same version. The diagnostic reports the rejection.
+
+A request with the recorded version and value repairs the storage file and runs
+a pending consumer restart. A metadata repair does not restart a consumer.
+
+The API does not provide a method to delete a secret field. Destroy calls
+only `GET` and fails while the node stores the field. Destroy succeeds when
+the node does not record a version and does not store a storage file for the
+field. A change to `node`, `workspace`, or `field` replaces the resource and
+requires the same destroy check. `tofu state rm` stops managing a stored field.
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `node` | string | yes | Select a key in the provider's `nodes` map. A change replaces the resource. |
+| `workspace` | string | yes | The argument selects the exact target workspace, such as `suburban/mwan`. A change replaces the resource. |
+| `field` | string | yes | The argument selects a secret field in the target policy. A change replaces the resource. |
+| `value_wo` | string, write-only | when a write is planned | The argument supplies the secret value. |
+| `value_wo_version` | number | yes | The argument sets the secret version and requires a value of at least 1. A change sends `value_wo` to the node. |
+
+| Attribute | Meaning |
+| --- | --- |
+| `configured` | The node reports true when the storage file is a regular file and its mode, owner, and group match the policy. |
+| `version` | The attribute reports the version that the node recorded for the field. |
+
+Import IDs use the format `<node>:<workspace>:<field>`, such as
+`suburban:suburban/mwan:SMTP2GO_API_KEY`. Import calls only `GET`, sets
+`value_wo_version` to the recorded version, and stores the current storage file
+SHA-256 as the applied SHA-256. It also sets the private Boolean
+`content_drift` to the `restart_pending` value. A matching configuration does
+not plan a write when `GET` reports `configured` as true and `restart_pending`
+as false, and the storage file SHA-256 matches the applied SHA-256. Import
+does not write when the field has a pending restart. The next plan proposes
+a write and fails with `Missing value_wo` if the configuration omits `value_wo`.
+
 ## pveguest_container_options
 
 The resource configures eBPF token delegation with `bpfdelegate` and passes host network interfaces into the container as LXC physical devices with `hostnic0` through `hostnic9`.
@@ -815,10 +994,25 @@ make testacc \
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 | `PVEGUEST_ACC_SMTP2GO_API_KEY_FILE` | File containing the SMTP2GO API key for `TestAccMailRelayImport`. The test fails if `TF_ACC` is set and this variable is missing. |
+| `PVEGUEST_ACC_HOST_SSH` | Every host acceptance test requires this ssh destination for a root shell on `PVEGUEST_ACC_NODE`. A selected host test fails when `TF_ACC` is set and this variable is unset. |
+| `PVEGUEST_ACC_HOST_SSH_CONTROL_PATH` | Optional path to an existing private OpenSSH ControlMaster socket. Start the master before the test and close it afterward. Connection loss fails the test. |
+| `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | Every host acceptance test requires this JSON file with release pins from `agoodkind/configs` for every case in the host fixture table below. A selected host test fails when `TF_ACC` is set and this variable is unset. |
+| `PVEGUEST_ACC_HOST_AUDIT_TOKEN_FILE` | Every host acceptance test requires a private file containing a separate API token with `Sys.HostArtifacts.Audit` and without `Sys.HostArtifacts.Modify` or `Sys.HostSecrets.Modify`. A selected host test fails when `TF_ACC` is set and this variable is unset. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the
 provider address.
+
+Run each host group in a separate Make invocation after configuring the host
+variables above. Each invocation retains the existing 30-minute Go timeout.
+The positive artifact command excludes the separate rejection test with
+Go's `-skip` flag:
+
+```sh
+make testacc "TESTARGS=-failfast -run TestAccHostArtifactRejections"
+make testacc "TESTARGS=-failfast -run TestAccHostArtifact -skip TestAccHostArtifactRejections"
+make testacc "TESTARGS=-failfast -run TestAccHostSecret"
+```
 
 The tests change only these items in the guest, and each test removes its
 items at the end:
@@ -842,6 +1036,107 @@ items at the end:
 - The controller needs HTTPS access to `api.smtp2go.com`.
 - The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
+`TestAccHostArtifact` and `TestAccHostArtifactRejections` change files on the
+node. The node needs policies for the disposable fixture targets
+`suburban/hostartifact-acceptance` and
+`suburban/hostartifact-acceptance-b`. The token needs `Sys.HostArtifacts.Audit`
+and `Sys.HostArtifacts.Modify` on `/nodes/<node>`. The test uses the root shell
+at `PVEGUEST_ACC_HOST_SSH` to run `stat`, `sha256sum`, `tee`, `chmod`, and `rm`.
+The test deletes `suburban/hostartifact-acceptance` at the start and both
+fixture targets at the end. It changes only these items:
+
+- `/srv/hostartifact-acceptance` and `/srv/hostartifact-acceptance-b`.
+- The directories of both targets under `/var/lib/pve-overlay/host-artifacts/`.
+- The policy file for `suburban/hostartifact-acceptance` under
+  `/etc/pve-overlay/host-artifacts/targets/`. Each policy control restores the
+  original bytes, inode, mode, owner, group, and modification time before the
+  next control. Test cleanup also restores the policy after a failure.
+- The per-target lock files under `/run/lock/` and task records under
+  `/var/log/pve/tasks/`. Cleanup preserves task records as evidence.
+
+The test uses fixed signed release assets for these checks.
+
+Host fixture cases:
+
+| Cases | Required result |
+| --- | --- |
+| `valid-v1`, `valid-v2` | The provider installs and repairs A. |
+| `other-target` | The API installs B and rejects the same archive when the request selects A. |
+| `recovery-v1`, `recovery-v2` | The provider checks stopped-install handling and recovery. |
+| `digest`, `size`, `symlink`, `hardlink`, `traversal`, `absolute`, `extra`, `missing`, `duplicate`, `member-mode` | Each real host task rejects its specific defect without changing A's installed files, metadata, record, journal, or GET response. |
+
+`TestAccHostArtifactRejections` installs valid-v1 for A and other-target for B
+through the existing API helpers. The rejection checks call the existing
+transport directly and compare both targets after each task. A rejected
+request may create its own stages and one failed task record. The test removes
+only its request-owned stages and checks
+that the other stages remain unchanged.
+
+Four controls submit the valid signed fixture unchanged. Each control
+independently changes one of these A policy inputs:
+
+- Workflow URI
+- Source ref
+- Environment
+- Destination allowlist
+
+A separate control changes the source revision in the install request to the
+revision of another retained fixture. All five controls must fail before
+installed state changes.
+
+Use a privilege-separated audit token. Grant the parent user
+`Sys.HostArtifacts.Audit`, `Sys.HostArtifacts.Modify`, and `Sys.HostSecrets.Modify`
+on `/nodes/<node>`. Grant the audit token only `Sys.HostArtifacts.Audit` on that
+same node through its separate nonpropagating ACL.
+The test requires audit `GET` to succeed. Otherwise valid stage `POST`, install
+`POST`, and secret `PUT` requests must each return actual HTTP 403 without
+creating a task, stage, or target mutation. The audit token and random synthetic
+secret stay in memory and private files; the test does not print either value.
+
+`TestAccHostArtifact` installs the unrelated target, then imports and installs
+the fixture target. It repairs a changed file, a missing file, and an owned
+directory mode separately. Each repair runs a plan, an apply, and an empty repeat plan.
+
+The test stops one install with `DELETE /nodes/{node}/tasks/{upid}` and checks
+the task result and target state. If SIGKILL leaves a journal, the next
+install restores the files before installing the requested archive.
+
+The test then installs `valid-v1` through the API, imports the target into
+fresh state, and applies the matching pin. It checks that the target snapshot
+stays unchanged after import and apply. The snapshot covers the installed
+record bytes, the UPID and write IDs in the `GET` response, file contents and
+metadata, the journal, and the stage directory.
+
+After each step, the test checks that the files, metadata, installed record,
+journal, stage directory, lock file, and `GET` response of the unrelated
+target remain unchanged. The controller needs HTTPS access to `github.com`.
+
+`TestAccHostSecret` uses the same variables and fixture targets. Each target
+policy lists the field `PVEGUEST_ACC_SECRET` with the storage file `secret.env`
+in the fixture directory and a pattern that accepts `pveguest-acc-` followed by
+32 lowercase hexadecimal characters. The consumer units
+`hostartifact-acceptance.service` and `hostartifact-acceptance-b.service` must
+run on the node. `hostartifact-acceptance.service` must fail to start when
+`/run/hostartifact-acceptance.fail` exists. The token also needs
+`Sys.HostSecrets.Modify` on `/nodes/<node>`. The node must provide the `flock`
+command.
+
+The test uses root ssh only for deliberate drift and protected observations,
+including `systemctl show`, `find`, and `cat` output. It acquires the unrelated
+target lock with `flock` during setup and releases it during cleanup. It owns
+the selected target lock during the plan with a changed value at the recorded
+version, the import, the matching plan, and the matching apply. The test
+compares the task log file names for each target. It passes random synthetic
+markers to OpenTofu only through `TF_VAR_secret` and does not print them.
+It checks for markers in these outputs:
+
+- The saved plan archive.
+- The JSON plan.
+- The state files.
+- The decoded provider private data.
+- The OpenTofu output.
+- The `hostsecret` task logs.
+
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
 access to `www.rfc-editor.org` over HTTPS.
@@ -862,6 +1157,7 @@ The last test, `TestAccGuestIsClean`, fails when one of these items is still
 in the guest. `TESTARGS` passes extra arguments to `go test`, for example
 `TESTARGS="-run TestAccLink"`.
 
-One test runs the `tofu` binary against the installed provider in a temporary
-directory and reads the raw state file and the saved plan. The other tests use
+Some tests, including `TestAccHostArtifact`, run the `tofu` binary against the
+installed provider in a temporary directory. `TestAccInstalledProviderWriteOnly`
+also reads the raw state file and the saved plan. The other tests use
 `terraform-plugin-testing` with the provider in the test process.

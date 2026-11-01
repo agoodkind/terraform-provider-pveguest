@@ -15,6 +15,9 @@ import (
 // ContainerRunning is the status that Proxmox reports for a running container.
 const ContainerRunning = "running"
 
+// TaskStopped is the status that Proxmox reports for a task that ended.
+const TaskStopped = "stopped"
+
 const (
 	statusCurrentOperation = "status/current"
 	startOperation         = "status/start"
@@ -25,7 +28,6 @@ const (
 	// down before the task fails.
 	ShutdownTimeoutSeconds = 60
 
-	taskStopped  = "stopped"
 	taskExitOK   = "OK"
 	taskLogLimit = 1000
 	taskLogTail  = 10
@@ -39,7 +41,9 @@ const (
 
 type containerShutdownBody map[string]int
 
-type taskStatus struct {
+// TaskStatus is the response of GET /nodes/{node}/tasks/{upid}/status.
+// ExitStatus stores exitstatus, which appears only after the task stops.
+type TaskStatus struct {
 	Status     string `json:"status"`
 	ExitStatus string `json:"exitstatus"`
 }
@@ -121,24 +125,24 @@ func (client *Client) runContainerTask(
 	return nil
 }
 
-// WaitTask polls the task status until the task is stopped and returns an
-// error that includes the log tail unless the exit status is OK. The delay
-// between polls starts at 200 ms and doubles up to 2 s.
+// WaitTask calls WaitTaskWithin with a three-minute limit.
 func (client *Client) WaitTask(ctx context.Context, node string, upid string) error {
-	waitCtx, cancel := context.WithTimeout(ctx, taskWaitTimeout)
+	return client.WaitTaskWithin(ctx, node, upid, taskWaitTimeout)
+}
+
+// WaitTaskWithin polls the task status until the task stops or timeout expires.
+// If the exit status is not OK, it returns an error with the log tail. The
+// delay between polls starts at 200 ms and doubles up to 2 s.
+func (client *Client) WaitTaskWithin(ctx context.Context, node string, upid string, timeout time.Duration) error {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	delay := pollInitialDelay
 	for {
-		data, err := client.taskCall(waitCtx, node, upid, "status", nil)
+		current, err := client.GetTaskStatus(waitCtx, node, upid)
 		if err != nil {
 			return err
 		}
-		var current taskStatus
-		if err := json.Unmarshal(data, &current); err != nil {
-			slog.ErrorContext(ctx, "task status response is malformed", "node", node, "upid", upid, "err", err)
-			return fmt.Errorf("node %q task %s: parse status response: %w", node, upid, err)
-		}
-		if current.Status == taskStopped {
+		if current.Status == TaskStopped {
 			if current.ExitStatus == taskExitOK {
 				return nil
 			}
@@ -152,6 +156,41 @@ func (client *Client) WaitTask(ctx context.Context, node string, upid string) er
 		}
 		delay = min(delay*2, pollMaximumDelay)
 	}
+}
+
+// GetTaskStatus returns the task status and, after the task stops, its exit
+// status.
+func (client *Client) GetTaskStatus(ctx context.Context, node string, upid string) (TaskStatus, error) {
+	data, err := client.taskCall(ctx, node, upid, "status", nil)
+	if err != nil {
+		return TaskStatus{}, err
+	}
+	var current TaskStatus
+	if err := json.Unmarshal(data, &current); err != nil {
+		slog.ErrorContext(ctx, "task status response is malformed", "node", node, "upid", upid, "err", err)
+		return TaskStatus{}, fmt.Errorf("node %q task %s: parse status response: %w", node, upid, err)
+	}
+	return current, nil
+}
+
+// StopTask calls DELETE /nodes/{node}/tasks/{upid}.
+// The node sends SIGTERM to the task process group and waits up to 5 seconds.
+// If the task still runs, the node sends SIGKILL.
+func (client *Client) StopTask(ctx context.Context, node string, upid string) error {
+	connection, found := client.nodes[node]
+	if !found {
+		return fmt.Errorf("node %q is not in the provider nodes map", node)
+	}
+	guest := Guest{Node: node, Kind: KindLXC}
+	_, err := connection.call(ctx, guest, apiRequest{
+		method: http.MethodDelete,
+		path:   taskPath(connection, upid),
+	})
+	return err
+}
+
+func taskPath(connection *nodeConnection, upid string) string {
+	return taskPathPrefix + url.PathEscape(connection.nodeName) + taskPathSep + url.PathEscape(upid)
 }
 
 func (client *Client) taskFailure(ctx context.Context, node string, upid string, exitStatus string) error {
@@ -189,10 +228,9 @@ func (client *Client) taskCall(
 		return nil, fmt.Errorf("node %q is not in the provider nodes map", node)
 	}
 	guest := Guest{Node: node, Kind: KindLXC}
-	apiPath := taskPathPrefix + url.PathEscape(connection.nodeName) + taskPathSep + url.PathEscape(upid) + "/" + operation
 	return connection.call(ctx, guest, apiRequest{
 		method: http.MethodGet,
-		path:   apiPath,
+		path:   taskPath(connection, upid) + "/" + operation,
 		query:  query,
 	})
 }
