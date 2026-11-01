@@ -218,8 +218,9 @@ func (r *hostSecretResource) ModifyPlan(ctx context.Context, req resource.Modify
 }
 
 // hostSecretWritePlanned returns true when the resource needs replacement,
-// value_wo_version changes, configured is false, or the storage file SHA-256
-// differs from the applied SHA-256.
+// value_wo_version changes, configured is false, or drift is true. The drift
+// argument records whether the storage file SHA-256 differs from the applied
+// SHA-256 or GET reports restart_pending.
 func hostSecretWritePlanned(plan hostSecretModel, state hostSecretModel, drift bool) bool {
 	replaced := !plan.Node.Equal(state.Node) || !plan.Workspace.Equal(state.Workspace) || !plan.Field.Equal(state.Field)
 	return replaced || !plan.ValueWOVersion.Equal(state.ValueWOVersion) || !state.Configured.ValueBool() || drift
@@ -257,9 +258,9 @@ func (r *hostSecretResource) Update(ctx context.Context, req resource.UpdateRequ
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-// Read calls only GET. It stores a boolean in private state that records whether
-// the storage file SHA-256 differs from the applied SHA-256.
-// It does not store either SHA-256 in an attribute.
+// Read calls only GET. It sets the private Boolean content_drift to true when
+// the storage file SHA-256 differs from the applied SHA-256 or GET reports
+// restart_pending. It does not store either SHA-256 in an attribute.
 func (r *hostSecretResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state hostSecretModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
