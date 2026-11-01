@@ -242,7 +242,7 @@ func (program hostArtifactManifestProgram) check() error {
 		}
 	}
 	if err := validateArchiveMember(program.Member); err != nil {
-		slog.Error("program archive member is invalid", "program", program.Name, "member", program.Member, "err", err)
+		slog.Error("manifest program has an invalid archive member name", "program", program.Name, "member", program.Member, "err", err)
 		return fmt.Errorf("archive member %q for program %s fails validation: %w", program.Member, program.Name, err)
 	}
 	if !strings.HasPrefix(program.Path, "/") || pathpkg.Clean(program.Path) != program.Path {
