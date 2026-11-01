@@ -941,12 +941,24 @@ make testacc \
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 | `PVEGUEST_ACC_SMTP2GO_API_KEY_FILE` | File containing the SMTP2GO API key for `TestAccMailRelayImport`. The test fails if `TF_ACC` is set and this variable is missing. |
-| `PVEGUEST_ACC_HOST_SSH` | `TestAccHostArtifact` uses this ssh destination to run a root shell on `PVEGUEST_ACC_NODE`. The test skips when unset. |
-| `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | This JSON file maps the fixture cases `valid-v1`, `valid-v2`, `other-target`, `recovery-v1`, `recovery-v2`, `program-valid`, `program-wrong-source`, `program-wrong-signer`, `program-wrong-archive`, `program-wrong-member`, and `program-collision` to the pin JSON of their releases in `agoodkind/configs`. Each case pin JSON may contain `program_bundles`, an object that maps program names to objects with `asset` and `sha256`. The test skips when unset. |
+| `PVEGUEST_ACC_HOST_SSH` | Every host acceptance test requires this ssh destination for a root shell on `PVEGUEST_ACC_NODE`. A selected host test fails when `TF_ACC` is set and this variable is unset. |
+| `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | Every host acceptance test requires this JSON file with release pins from `agoodkind/configs` for every case in the host fixture table below. A selected host test fails when `TF_ACC` is set and this variable is unset. |
+| `PVEGUEST_ACC_HOST_AUDIT_TOKEN_FILE` | Every host acceptance test requires a private file containing a separate API token with `Sys.HostArtifacts.Audit` and without `Sys.HostArtifacts.Modify` or `Sys.HostSecrets.Modify`. A selected host test fails when `TF_ACC` is set and this variable is unset. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the
 provider address.
+
+Run each host group in a separate Make invocation after configuring the host
+variables above. Each invocation retains the existing 30-minute Go timeout.
+The positive artifact command excludes the separate rejection test with
+Go's `-skip` flag:
+
+```sh
+make testacc "TESTARGS=-failfast -run TestAccHostArtifactRejections"
+make testacc "TESTARGS=-failfast -run TestAccHostArtifact -skip TestAccHostArtifactRejections"
+make testacc "TESTARGS=-failfast -run TestAccHostSecret"
+```
 
 The tests change only these items in the guest, and each test removes its
 items at the end:
@@ -968,8 +980,9 @@ items at the end:
 - The controller needs HTTPS access to `api.smtp2go.com`.
 - The controller needs TCP access to `mail.smtp2go.com` on port 587.
 
-`TestAccHostArtifact` changes files on the node. The node needs policies for
-the disposable fixture targets `suburban/hostartifact-acceptance` and
+`TestAccHostArtifact` and `TestAccHostArtifactRejections` change files on the
+node. The node needs policies for the disposable fixture targets
+`suburban/hostartifact-acceptance` and
 `suburban/hostartifact-acceptance-b`. The token needs `Sys.HostArtifacts.Audit`
 and `Sys.HostArtifacts.Modify` on `/nodes/<node>`. The test uses the root shell
 at `PVEGUEST_ACC_HOST_SSH` to run `stat`, `sha256sum`, `tee`, `chmod`, and `rm`.
@@ -978,10 +991,45 @@ fixture targets at the end. It changes only these items:
 
 - `/srv/hostartifact-acceptance` and `/srv/hostartifact-acceptance-b`.
 - The directories of both targets under `/var/lib/pve-overlay/host-artifacts/`.
+- The policy file for `suburban/hostartifact-acceptance` under
+  `/etc/pve-overlay/host-artifacts/targets/`. Each policy control restores the
+  original bytes, inode, mode, owner, group, and modification time before the
+  next control. Test cleanup also restores the policy after a failure.
+- The per-target lock files under `/run/lock/` and task records under
+  `/var/log/pve/tasks/`. Cleanup preserves task records as evidence.
 
-The test installs the unrelated target, then imports and installs the fixture
-target. It repairs a changed file, a missing file, and an owned directory mode
-separately. Each repair runs a plan, an apply, and an empty repeat plan.
+The test uses fixed signed release assets for these checks.
+
+Host fixture cases:
+
+| Cases | Required result |
+| --- | --- |
+| `valid-v1`, `valid-v2` | The provider installs and repairs A. |
+| `other-target` | The API installs B and rejects the same archive when the request selects A. |
+| `recovery-v1`, `recovery-v2` | The provider checks stopped-install handling and recovery. |
+| `digest`, `size`, `symlink`, `hardlink`, `traversal`, `absolute`, `extra`, `missing`, `duplicate`, `member-mode` | Each real host task rejects its specific defect without changing A's installed files, metadata, record, journal, or GET response. |
+
+`TestAccHostArtifactRejections` installs valid-v1 for A and other-target for B
+through the existing API helpers. The rejection checks call the existing
+transport directly and compare both targets after each task. A rejected
+request may create its own stages and one failed task record. The test removes
+only its request-owned stages and checks
+that the other stages remain unchanged. It also submits the valid archive
+under A policies with a different permitted workflow, source ref, environment,
+or an omitted destination, and with a different retained source revision in
+the install request. These controls must fail before installed state changes.
+
+Use a privilege-separated audit token. Grant the parent user the required
+user ACL and grant the audit token only `Sys.HostArtifacts.Audit` through its
+separate token ACL.
+The test requires audit `GET` to succeed. Otherwise valid stage `POST`, install
+`POST`, and secret `PUT` requests must each return actual HTTP 403 without
+creating a task, stage, or target mutation. The audit token and random synthetic
+secret stay in memory and private files; the test does not print either value.
+
+`TestAccHostArtifact` installs the unrelated target, then imports and installs
+the fixture target. It repairs a changed file, a missing file, and an owned
+directory mode separately. Each repair runs a plan, an apply, and an empty repeat plan.
 
 The test stops one install with `DELETE /nodes/{node}/tasks/{upid}` and checks
 the task result and target state. If SIGKILL leaves a journal, the next

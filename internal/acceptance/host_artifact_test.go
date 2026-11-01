@@ -114,13 +114,16 @@ type fixtureProgram struct {
 }
 
 type hostArtifactTest struct {
-	t          *testing.T
-	client     *transport.Client
-	node       string
-	nodeConfig transport.NodeConfig
-	ssh        string
-	pins       map[string]hostArtifactPinEntry
-	workspace  *tofuWorkspace
+	t                     *testing.T
+	client                *transport.Client
+	audit                 *transport.Client
+	auditPrincipal        string
+	unrelatedInvocationID string
+	node                  string
+	nodeConfig            transport.NodeConfig
+	ssh                   string
+	pins                  map[string]hostArtifactPinEntry
+	workspace             *tofuWorkspace
 }
 
 func newHostArtifactTest(t *testing.T) *hostArtifactTest {
@@ -128,27 +131,24 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 	if os.Getenv(acceptanceVariable) == "" {
 		t.Skipf("%s is not set", acceptanceVariable)
 	}
-	ssh := os.Getenv(hostSSHVariable)
-	if ssh == "" {
-		t.Skipf("%s is not set", hostSSHVariable)
-	}
-	pinFile := os.Getenv(hostArtifactPinsVariable)
-	if pinFile == "" {
-		t.Skipf("%s is not set", hostArtifactPinsVariable)
-	}
+	ssh := requireVariable(t, hostSSHVariable)
+	pinFile := requireVariable(t, hostArtifactPinsVariable)
 	node := requireVariable(t, nodeVariable)
 	nodeConfig := nodeConfigFromEnvironment(t)
 	client, err := transport.NewClient(map[string]transport.NodeConfig{node: nodeConfig}, transport.DefaultMaxRequests)
 	if err != nil {
 		t.Fatal(err)
 	}
+	audit, auditPrincipal := newHostAuditClient(t, node, nodeConfig)
 	test := &hostArtifactTest{
-		t:          t,
-		client:     client,
-		node:       node,
-		nodeConfig: nodeConfig,
-		ssh:        ssh,
-		pins:       readFixturePins(t, pinFile),
+		t:              t,
+		client:         client,
+		audit:          audit,
+		auditPrincipal: auditPrincipal,
+		node:           node,
+		nodeConfig:     nodeConfig,
+		ssh:            ssh,
+		pins:           readFixturePins(t, pinFile),
 	}
 	test.workspace = test.newWorkspace()
 	// The provider and the test download release assets into this cache.
@@ -182,6 +182,9 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 		caseProgramWrongMember:  fixtureWorkspace,
 		caseProgramCollision:    fixtureWorkspace,
 	}
+	for _, rejection := range hostArtifactDefects {
+		workspaces[rejection.fixtureCase] = fixtureWorkspace
+	}
 	for fixtureCase, workspace := range workspaces {
 		pin, found := pins[fixtureCase]
 		if !found {
@@ -191,14 +194,24 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 		if pin.Asset != want {
 			t.Fatalf("%s pins asset %s for the case %s, want %s", pinFile, pin.Asset, fixtureCase, want)
 		}
+		if pin.ReleaseTag == "" || pin.BundleAsset != pin.Asset+".sigstore.json" {
+			t.Fatalf("%s: set the release tag and matching bundle asset for %s", pinFile, fixtureCase)
+		}
+		for label, value := range map[string]string{"sha256": pin.SHA256, "bundle_sha256": pin.BundleSHA256, "source_revision": pin.SourceRevision} {
+			length := sha256.Size * 2
+			if label == "source_revision" {
+				length = 40
+			}
+			if len(value) != length || strings.Trim(value, "0123456789abcdef") != "" {
+				t.Fatalf("%s: set a complete lowercase hexadecimal %s for %s", pinFile, label, fixtureCase)
+			}
+		}
 	}
 	return pins
 }
 
-// TestAccHostArtifact runs every step against the fixture target and checks
-// after each step that the files, metadata, installed record, journal, and
-// lock of the unrelated fixture target are unchanged.
-func TestAccHostArtifact(t *testing.T) {
+func prepareHostArtifactFixtures(t *testing.T) (*hostArtifactTest, map[string]string) {
+	t.Helper()
 	test := newHostArtifactTest(t)
 	target := transport.HostArtifactTarget(fixtureWorkspace)
 	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
@@ -210,6 +223,26 @@ func TestAccHostArtifact(t *testing.T) {
 
 	test.installDirectly(unrelatedFixtureWorkspace, caseOtherTarget)
 	unrelated := test.snapshot(unrelatedTarget, unrelatedFixtureDirectory)
+	test.unrelatedInvocationID = (&hostSecretTest{hostArtifactTest: test}).invocationID(unrelatedHostSecretConsumer)
+	return test, unrelated
+}
+
+func TestAccHostArtifactRejections(t *testing.T) {
+	test, unrelated := prepareHostArtifactFixtures(t)
+	test.installDirectly(fixtureWorkspace, caseValidV1)
+	test.expectSnapshot(unrelated, transport.HostArtifactTarget(unrelatedFixtureWorkspace), unrelatedFixtureDirectory)
+	test.expectUnrelatedInvocation()
+	test.expectHostRejections(unrelated)
+	test.expectAuditRejections(unrelated)
+}
+
+// TestAccHostArtifact runs every step against the fixture target and checks
+// after each step that the files, metadata, installed record, journal, and
+// lock of the unrelated fixture target are unchanged.
+func TestAccHostArtifact(t *testing.T) {
+	test, unrelated := prepareHostArtifactFixtures(t)
+	target := transport.HostArtifactTarget(fixtureWorkspace)
+	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
 
 	test.workspace.writeConfig(test.config(caseValidV1))
 	test.workspace.mustRun("init", "-no-color")
@@ -546,6 +579,16 @@ func (h *hostArtifactTest) installDirectly(workspace string, fixtureCase string)
 
 func (h *hostArtifactTest) startInstall(target string, fixtureCase string) string {
 	h.t.Helper()
+	request, _ := h.stageInstall(target, fixtureCase)
+	upid, err := h.client.InstallHostArtifact(context.Background(), h.node, target, request)
+	if err != nil {
+		h.t.Fatalf("install %s: %v", fixtureCase, err)
+	}
+	return upid
+}
+
+func (h *hostArtifactTest) stageInstall(target string, fixtureCase string) (transport.HostArtifactInstall, func()) {
+	h.t.Helper()
 	pin := h.pins[fixtureCase]
 	archive := h.download(pin.ReleaseTag, pin.Asset, pin.SHA256)
 	bundle := h.download(pin.ReleaseTag, pin.BundleAsset, pin.BundleSHA256)
@@ -556,14 +599,16 @@ func (h *hostArtifactTest) startInstall(target string, fixtureCase string) strin
 	if err != nil {
 		h.t.Fatalf("stage the archive of %s: %v", fixtureCase, err)
 	}
+	removeArchive := h.stageCleanup(target, archiveStage)
 	bundleStage, err := h.client.StageHostArtifact(
 		ctx, h.node, target, transport.HostArtifactKindBundle, bytes.NewReader(bundle), int64(len(bundle)),
 	)
 	if err != nil {
 		h.t.Fatalf("stage the bundle of %s: %v", fixtureCase, err)
 	}
-	programStages := h.stagePrograms(target, pin)
-	upid, err := h.client.InstallHostArtifact(ctx, h.node, target, transport.HostArtifactInstall{
+	removeBundle := h.stageCleanup(target, bundleStage)
+	programStages, removePrograms := h.stagePrograms(target, pin)
+	return transport.HostArtifactInstall{
 		ReleaseTag:     pin.ReleaseTag,
 		Asset:          pin.Asset,
 		SHA256:         pin.SHA256,
@@ -571,23 +616,24 @@ func (h *hostArtifactTest) startInstall(target string, fixtureCase string) strin
 		ArchiveStage:   archiveStage,
 		BundleStage:    bundleStage,
 		ProgramStages:  programStages,
-	})
-	if err != nil {
-		h.t.Fatalf("install %s: %v", fixtureCase, err)
+	}, func() {
+		removeArchive()
+		removeBundle()
+		removePrograms()
 	}
-	return upid
 }
 
 // stagePrograms uploads each pinned program archive and bundle to host stages.
 // It returns the program-stages value, or an empty string when the pin does
 // not include programs.
-func (h *hostArtifactTest) stagePrograms(target string, pin hostArtifactPinEntry) string {
+func (h *hostArtifactTest) stagePrograms(target string, pin hostArtifactPinEntry) (string, func()) {
 	h.t.Helper()
 	if len(pin.ProgramBundles) == 0 {
-		return ""
+		return "", func() {}
 	}
 	ctx := context.Background()
 	var stages []transport.HostProgramStage
+	var cleanups []func()
 	for _, program := range h.manifestPrograms(pin) {
 		bundle, found := pin.ProgramBundles[program.Name]
 		if !found {
@@ -601,19 +647,25 @@ func (h *hostArtifactTest) stagePrograms(target string, pin hostArtifactPinEntry
 		if err != nil {
 			h.t.Fatalf("archive staging failed for program %s: %v", program.Name, err)
 		}
+		cleanups = append(cleanups, h.stageCleanup(target, archiveStage))
 		bundleStage, err := h.client.StageHostArtifactProgram(
 			ctx, h.node, target, transport.HostArtifactKindProgramBundle, program.Name, bytes.NewReader(bundleContent), int64(len(bundleContent)),
 		)
 		if err != nil {
 			h.t.Fatalf("bundle staging failed for program %s: %v", program.Name, err)
 		}
+		cleanups = append(cleanups, h.stageCleanup(target, bundleStage))
 		stages = append(stages, transport.HostProgramStage{Name: program.Name, ArchiveStage: archiveStage, BundleStage: bundleStage})
 	}
 	programStages, err := transport.FormatProgramStages(stages)
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	return programStages
+	return programStages, func() {
+		for _, cleanup := range cleanups {
+			cleanup()
+		}
+	}
 }
 
 // stopInstall starts an install of fixtureCase over the installed priorCase.
@@ -647,7 +699,12 @@ func (h *hostArtifactTest) stopInstall(target string, priorCase string, fixtureC
 // if a status read fails or the task does not stop before the deadline.
 func (h *hostArtifactTest) waitTaskStopped(upid string) transport.TaskStatus {
 	h.t.Helper()
-	deadline := time.Now().Add(taskStopDeadline)
+	return h.waitTaskStoppedWithin(upid, taskStopDeadline)
+}
+
+func (h *hostArtifactTest) waitTaskStoppedWithin(upid string, timeout time.Duration) transport.TaskStatus {
+	h.t.Helper()
+	deadline := time.Now().Add(timeout)
 	for {
 		status, err := h.client.GetTaskStatus(context.Background(), h.node, upid)
 		if err != nil {
@@ -657,7 +714,7 @@ func (h *hostArtifactTest) waitTaskStopped(upid string) transport.TaskStatus {
 			return status
 		}
 		if time.Now().After(deadline) {
-			h.t.Fatalf("task %s did not stop within %s", upid, taskStopDeadline)
+			h.t.Fatalf("task %s did not stop within %s", upid, timeout)
 		}
 		time.Sleep(taskStopPollPeriod)
 	}
@@ -737,11 +794,27 @@ func (h *hostArtifactTest) snapshot(target string, directory string) map[string]
 		stateDirectory + "/" + installedRecord,
 		stateDirectory + "/" + journalRecord,
 		stateDirectory + "/" + stageDirectory,
+		stateDirectory + "/" + hostSecretRecord,
+		directory + "/" + hostSecretFile,
 		hostLockPrefix + target + hostLockSuffix,
 	}
 	snapshot := make(map[string]string, len(paths)+1)
 	for _, path := range paths {
 		snapshot[path] = h.hostPathState(path)
+	}
+	for _, root := range []string{directory, stateDirectory + "/" + stageDirectory} {
+		if snapshot[root] == absentSnapshotValue {
+			continue
+		}
+		entries := strings.Fields(h.hostMustRun("find", root, "-mindepth", "1", "-print"))
+		slices.Sort(entries)
+		snapshot["contents "+root] = strings.Join(entries, "\n")
+		if root == directory {
+			continue
+		}
+		for _, path := range entries {
+			snapshot[path] = h.hostPathState(path)
+		}
 	}
 	response, err := json.Marshal(h.get(target))
 	if err != nil {
@@ -763,7 +836,7 @@ func (h *hostArtifactTest) expectSnapshot(want map[string]string, target string,
 
 func (h *hostArtifactTest) hostPathState(path string) string {
 	h.t.Helper()
-	status, stderr, exitCode := h.hostRun(nil, "stat", "--format=%F %a %u %g %i %s %Y", "--", path)
+	status, stderr, exitCode := h.hostRun(nil, "stat", "--format=%F %a %u %g %i %s %y", "--", path)
 	if exitCode != 0 {
 		if strings.Contains(stderr, missingPathMessage) {
 			return absentSnapshotValue
