@@ -173,10 +173,8 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 	return pins
 }
 
-// TestAccHostArtifact runs every step against the fixture target and checks
-// after each step that the files, metadata, installed record, journal, and
-// lock of the unrelated fixture target are unchanged.
-func TestAccHostArtifact(t *testing.T) {
+func prepareHostArtifactFixtures(t *testing.T) (*hostArtifactTest, map[string]string) {
+	t.Helper()
 	test := newHostArtifactTest(t)
 	target := transport.HostArtifactTarget(fixtureWorkspace)
 	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
@@ -189,6 +187,25 @@ func TestAccHostArtifact(t *testing.T) {
 	test.installDirectly(unrelatedFixtureWorkspace, caseOtherTarget)
 	unrelated := test.snapshot(unrelatedTarget, unrelatedFixtureDirectory)
 	test.unrelatedInvocationID = (&hostSecretTest{hostArtifactTest: test}).invocationID(unrelatedHostSecretConsumer)
+	return test, unrelated
+}
+
+func TestAccHostArtifactRejections(t *testing.T) {
+	test, unrelated := prepareHostArtifactFixtures(t)
+	test.installDirectly(fixtureWorkspace, caseValidV1)
+	test.expectSnapshot(unrelated, transport.HostArtifactTarget(unrelatedFixtureWorkspace), unrelatedFixtureDirectory)
+	test.expectUnrelatedInvocation()
+	test.expectHostRejections(unrelated)
+	test.expectAuditRejections(unrelated)
+}
+
+// TestAccHostArtifact runs every step against the fixture target and checks
+// after each step that the files, metadata, installed record, journal, and
+// lock of the unrelated fixture target are unchanged.
+func TestAccHostArtifact(t *testing.T) {
+	test, unrelated := prepareHostArtifactFixtures(t)
+	target := transport.HostArtifactTarget(fixtureWorkspace)
+	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
 
 	test.workspace.writeConfig(test.config(caseValidV1))
 	test.workspace.mustRun("init", "-no-color")
@@ -204,8 +221,6 @@ func TestAccHostArtifact(t *testing.T) {
 
 	test.applyClean(caseValidV1)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
-	test.expectHostRejections(unrelated)
-	test.expectAuditRejections(unrelated)
 
 	test.hostWrite(fixtureDirectory+"/"+firstFixtureFile, editedFixtureContent)
 	test.expectRepair(caseValidV1)
