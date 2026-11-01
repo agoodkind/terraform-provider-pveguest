@@ -361,8 +361,7 @@ resource "pveguest_host_artifact" "test" {
 		pin.BundleAsset, pin.BundleSHA256, pin.SourceRevision, programBundlesBlock(pin))
 }
 
-// programBundlesBlock formats the pin's program_bundles argument.
-// It returns an empty string when the pin does not include programs.
+// Omit the argument for archives without programs.
 func programBundlesBlock(pin hostArtifactPinEntry) string {
 	if len(pin.ProgramBundles) == 0 {
 		return ""

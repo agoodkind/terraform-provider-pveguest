@@ -38,8 +38,6 @@ type hostArtifactPin struct {
 	BundleAsset    string
 	BundleSHA256   string
 	SourceRevision string
-	// ProgramBundles maps program names to attestation bundle assets and hashes
-	// in the release selected by Repository and ReleaseTag.
 	ProgramBundles map[string]hostArtifactProgramBundle
 }
 

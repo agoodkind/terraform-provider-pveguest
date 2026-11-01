@@ -173,9 +173,8 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 			},
 		},
 		"program_bundles": schema.MapNestedAttribute{
-			Description: "program_bundles maps each manifest program name to its attestation bundle asset and SHA-256 " +
-				"in the release selected by repository and release_tag. Plan and apply require the keys to match " +
-				"the manifest program names exactly. Archives without programs do not require this argument.",
+			Description: "Each entry selects a program's attestation bundle from the configured release and pins its filename and SHA-256 digest. " +
+				"The entries must match all programs in the manifest. Archives without programs do not require this argument.",
 			Optional: true,
 			Validators: []validator.Map{
 				mapvalidator.KeysAre(stringvalidator.RegexMatches(hostArtifactNamePattern, "each program_bundles key must begin with a letter or digit and use only letters, digits, '.', '_', and '-'")),
@@ -636,8 +635,6 @@ func (r *hostArtifactResource) install(
 	return diagnostics
 }
 
-// hostArtifactProgramFiles stores a program name and the paths to its cached
-// archive and attestation bundle.
 type hostArtifactProgramFiles struct {
 	Name        string
 	ArchivePath string
