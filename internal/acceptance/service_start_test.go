@@ -44,6 +44,7 @@ const (
 	serviceUnit       = "pveguest-acc-svc.service"
 	serviceDebPath    = testDirectory + "/pveguest-acc-svc.deb"
 	postinstSleepPath = testDirectory + "/postinst-sleep"
+	postinstHoldPath  = testDirectory + "/pveguest-acc-svc.hold"
 
 	secondServicePackage = "pveguest-acc-svc-two"
 	secondServiceUnit    = "pveguest-acc-svc-two.service"
@@ -70,6 +71,7 @@ const (
 	packageHalfConfiguredState = "half-configured"
 	packageMissingExitCode     = 1
 	packageMissingMessage      = "no packages found matching "
+	processAbsentExitCode      = 1
 )
 
 type serviceDebFile struct {
@@ -569,12 +571,37 @@ func (g *testGuest) requireBackgroundSuccess(done <-chan backgroundResult, descr
 	g.t.Helper()
 	outcome := <-done
 	if outcome.err != nil {
-		g.t.Fatalf("background guest command %s failed: %v", description, outcome.err)
+		g.t.Fatal(g.redactAPIOutput(fmt.Sprintf("background guest command %s failed: %v", description, outcome.err)))
 	}
 	if outcome.result.ExitCode != 0 {
-		g.t.Fatalf("background guest command %s exited with status %d; stderr: %s",
-			description, outcome.result.ExitCode, outcome.result.Stderr)
+		g.t.Fatal(g.redactAPIOutput(fmt.Sprintf("background guest command %s exited with status %d; stderr: %s",
+			description, outcome.result.ExitCode, outcome.result.Stderr)))
 	}
+}
+
+func (g *testGuest) redactAPIOutput(output string) string {
+	if g.node.APIToken != "" {
+		output = strings.ReplaceAll(output, g.node.APIToken, "[redacted]")
+	}
+	if _, value, found := strings.Cut(g.node.APIToken, "="); found && value != "" {
+		output = strings.ReplaceAll(output, value, "[redacted]")
+	}
+	return output
+}
+
+// Read the output only after Wait has stopped the output-copy goroutines.
+func (g *testGuest) stopAndLogApply(label string, command *exec.Cmd, output *bytes.Buffer, wait func() error) {
+	g.t.Helper()
+	var stopError error
+	if command.ProcessState == nil {
+		stopError = command.Process.Kill()
+		if errors.Is(stopError, os.ErrProcessDone) {
+			stopError = nil
+		}
+	}
+	waitError := wait()
+	g.t.Log(g.redactAPIOutput(fmt.Sprintf("the %s apply stopped with stop error %v and wait error %v; output:\n%s",
+		label, stopError, waitError, output.String())))
 }
 
 // TestAccDebPackagesOtherInstallKeepsServiceStart starts a pveguest apply while
@@ -796,10 +823,11 @@ func (g *testGuest) countOwnedFiles() int {
 }
 
 // TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock kills a guest
-// script while its apt-get waits for the dpkg lock. It checks that a
-// later install retains the files, that the surviving apt-get installs
-// its package without starting services, and that another install
-// deletes the stale files.
+// script while its apt-get waits for the dpkg lock. A per-package hold file
+// keeps the plain postinst running until the later install creates its files.
+// The test checks that a later install retains the files, that the surviving
+// apt-get installs its package without starting services, and that another
+// install deletes the stale files.
 func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	guest := newTestGuest(t)
 	for _, name := range []string{servicePackage, secondServicePackage, thirdServicePackage, fourthServicePackage} {
@@ -808,7 +836,8 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	if guest.exists(policyFilePath) {
 		t.Fatalf("the policy file %s exists in the test guest; remove it before the test", policyFilePath)
 	}
-	guest.writeFile(postinstSleepPath, fmt.Sprintf("%d\n", killedApplySleepSeconds))
+	guest.writeFile(postinstSleepPath, "0\n")
+	guest.writeFile(postinstHoldPath, "")
 
 	binary := requireVariable(t, tofuPathVariable)
 	workspaces := make(map[string]*tofuWorkspace)
@@ -823,30 +852,71 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	plainInstall := guest.startBackground(
 		"apt-get", "install", "-y", "--no-install-recommends", "--", serviceDebPathFor(servicePackage),
 	)
+	var failedApplies []func()
+	released := false
+	releasePlain := func() {
+		if released {
+			return
+		}
+		released = true
+		guest.mustRun("rm", "-f", "--", postinstHoldPath)
+		if t.Failed() {
+			for _, diagnose := range failedApplies {
+				diagnose()
+			}
+		}
+		guest.waitFor("the guest package processes to stop before fixture cleanup", func() bool {
+			result := guest.runReadOnly("pgrep", "-x", "apt-get|dpkg")
+			if result.ExitCode != 0 && result.ExitCode != processAbsentExitCode {
+				t.Fatal(guest.redactAPIOutput(fmt.Sprintf("pgrep of package processes exited with status %d: %s", result.ExitCode, result.Stderr)))
+			}
+			return result.ExitCode == processAbsentExitCode
+		})
+		guest.requireBackgroundSuccess(plainInstall, "the plain apt-get install")
+	}
+	// Release the guest barrier before registered workspace and package cleanup.
+	defer releasePlain()
 	guest.waitFor("start of the plain install's postinst script", func() bool {
 		return guest.exists(testDirectory + "/" + servicePackage + ".times")
 	})
-	guest.writeFile(postinstSleepPath, "0\n")
 
-	_, _, waitSecond := startApply(t, workspaces[secondServicePackage])
+	secondCommand, secondOutput, waitSecond := startApply(t, workspaces[secondServicePackage])
+	failedApplies = append(failedApplies, func() { guest.stopAndLogApply("second", secondCommand, secondOutput, waitSecond) })
 	guest.waitFor("creation of the second install's files", func() bool { return guest.countOwnedFiles() == ownedFilePairCount })
 	secondFiles := guest.allOwnedFiles()
+	configFiles := guest.ownedFilesIn(ownedFilePatterns[1])
+	if len(configFiles) != 1 {
+		t.Fatalf("the second wrapper has %d apt configuration files; expected one", len(configFiles))
+	}
+	scriptPID := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(configFiles[0]), "pveguest-apt-policy."), ".conf")
+	if pid, err := strconv.Atoi(scriptPID); err != nil || pid <= 0 {
+		t.Fatalf("the apt configuration path %s does not contain a valid wrapper process ID", configFiles[0])
+	}
+	guest.waitFor("the second wrapper's apt-get child while the plain postinst is blocked", func() bool {
+		return guest.runReadOnly("pgrep", "-P", scriptPID, "-x", "apt-get").ExitCode == 0
+	})
+	t.Logf("The second wrapper %s has an apt-get child while the plain postinst is blocked.", scriptPID)
 	// Kill the guest script while its apt-get waits for the dpkg lock.
 	// The apt-get process continues running.
 	guest.mustRun("pkill", "-KILL", "-f", "--", killedScriptPattern)
 	_ = waitSecond()
 
-	_, thirdOutput, waitThird := startApply(t, workspaces[thirdServicePackage])
+	thirdCommand, thirdOutput, waitThird := startApply(t, workspaces[thirdServicePackage])
+	failedApplies = append(failedApplies, func() { guest.stopAndLogApply("third", thirdCommand, thirdOutput, waitThird) })
 	guest.waitFor("creation of the third install's files", func() bool { return guest.countOwnedFiles() == 2*ownedFilePairCount })
+	if timestamps := strings.Fields(guest.readFile(testDirectory + "/" + servicePackage + ".times")); len(timestamps) != 1 || !guest.exists(postinstHoldPath) {
+		t.Fatal("the plain postinst did not remain blocked while the third install created its files")
+	}
+	t.Log("The third install created its files while the plain postinst remained blocked.")
 	for _, path := range secondFiles {
 		if !guest.exists(path) {
 			t.Fatalf("file %s is missing while the surviving apt-get waits for the dpkg lock", path)
 		}
 	}
 
-	guest.requireBackgroundSuccess(plainInstall, "the plain apt-get install")
+	releasePlain()
 	if err := waitThird(); err != nil {
-		t.Fatalf("the %s apply failed: %v; output: %s", "third", err, thirdOutput.String())
+		t.Fatal(guest.redactAPIOutput(fmt.Sprintf("the third apply failed: %v; output: %s", err, thirdOutput.String())))
 	}
 	guest.waitFor("installation of the second package and exit of the surviving apt-get", func() bool {
 		return guest.packageInstalled(secondServicePackage) && guest.run(nil, "pgrep", "-x", "apt-get").ExitCode != 0
