@@ -52,6 +52,7 @@ const (
 	unitFileIndirect       unitFileState = "indirect"
 	unitFileGenerated      unitFileState = "generated"
 	unitFileTransient      unitFileState = "transient"
+	unitFileMasked         unitFileState = "masked"
 
 	// systemd 253 and later print this state when the unit file does not
 	// exist. Earlier versions print an error message.
@@ -98,6 +99,9 @@ type systemdUnitModel struct {
 	Active         types.Bool   `tfsdk:"active"`
 	RestartOn      types.Map    `tfsdk:"restart_on"`
 	RemoveOnDelete types.Bool   `tfsdk:"remove_on_delete"`
+	AllowMissing   types.Bool   `tfsdk:"allow_missing"`
+	Masked         types.Bool   `tfsdk:"masked"`
+	ResetFailed    types.Bool   `tfsdk:"reset_failed"`
 }
 
 func newSystemdUnitResource() resource.Resource {
@@ -110,8 +114,8 @@ func (r *systemdUnitResource) Metadata(_ context.Context, req resource.MetadataR
 
 func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "The enabled state and the active state of a systemd unit inside a guest. " +
-			"The unit file must exist.",
+		Description: "pveguest_systemd_unit sets the enabled state and the active state of a systemd unit inside a guest. " +
+			"The unit file must exist unless allow_missing or masked is true.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			"name": schema.StringAttribute{
 				Required:    true,
@@ -141,8 +145,63 @@ func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Default:     booldefault.StaticBool(false),
 				Description: "When true, Destroy stops the unit if active and disables it if enabled. Defaults to false, which removes only the resource from OpenTofu state.",
 			},
+			"allow_missing": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				Description: "allow_missing defaults to false. When allow_missing is true, an absent unit satisfies the resource. " +
+					"allow_missing requires enabled = false and active = false.",
+			},
+			"masked": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				Description: "masked defaults to false. When masked is true, an apply stops an active unit, " +
+					"runs systemctl mask, and verifies that systemctl is-enabled prints masked. " +
+					"An apply can mask an absent unit. Changing masked to false runs systemctl unmask. " +
+					"masked requires enabled = false and active = false.",
+			},
+			"reset_failed": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				Description: "reset_failed defaults to false. When reset_failed is true and the unit reports failed, " +
+					"an apply runs systemctl reset-failed and verifies that the unit no longer reports failed.",
+			},
 		}),
 	}
+}
+
+// ValidateConfig requires enabled = false and active = false when
+// allow_missing or masked is true.
+func (r *systemdUnitResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+	var config systemdUnitModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	controls := []struct {
+		name  string
+		value types.Bool
+	}{
+		{name: "allow_missing", value: config.AllowMissing},
+		{name: "masked", value: config.Masked},
+	}
+	wantsRunningOrEnabled := isDeclaredTrue(config.Enabled) || isDeclaredTrue(config.Active)
+	for _, control := range controls {
+		if isDeclaredTrue(control.value) && wantsRunningOrEnabled {
+			resp.Diagnostics.AddAttributeError(
+				path.Root(control.name),
+				"Invalid systemd unit attribute combination",
+				control.name+" requires enabled = false and active = false.",
+			)
+		}
+	}
+}
+
+func isDeclaredTrue(value types.Bool) bool {
+	return !value.IsNull() && !value.IsUnknown() && value.ValueBool()
 }
 
 func (r *systemdUnitResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
@@ -174,6 +233,9 @@ func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.Impo
 		Active:         types.BoolNull(),
 		RestartOn:      types.MapNull(types.StringType),
 		RemoveOnDelete: types.BoolValue(false),
+		AllowMissing:   types.BoolValue(false),
+		Masked:         types.BoolValue(false),
+		ResetFailed:    types.BoolValue(false),
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &imported)...)
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, importedMarker)...)
@@ -253,7 +315,7 @@ func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateReq
 	// A new restart_on map can reference files created before resource adoption.
 	// The first restart applies those file dependencies to an active unit.
 	restart := len(plan.RestartOn.Elements()) > 0
-	if err := r.apply(ctx, plan, restart); err != nil {
+	if err := r.apply(ctx, plan, restart, false); err != nil {
 		resp.Diagnostics.AddError("Create systemd unit state", err.Error())
 		return
 	}
@@ -274,6 +336,15 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 	if !status.Found {
+		if state.AllowMissing.ValueBool() {
+			// When allow_missing is true and the unit is absent, Read keeps the
+			// resource in state and clears masked.
+			state.Enabled = types.BoolValue(false)
+			state.Active = types.BoolValue(false)
+			state.Masked = types.BoolValue(false)
+			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+			return
+		}
 		resp.State.RemoveResource(ctx)
 		return
 	}
@@ -290,6 +361,23 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 	state.Active = types.BoolValue(isActiveState(status.Active))
 	if state.RemoveOnDelete.IsNull() {
 		state.RemoveOnDelete = types.BoolValue(false)
+	}
+	// Read compares masked and reset_failed with the guest only for
+	// attributes that are true in state.
+	if state.Masked.ValueBool() && status.FileState != unitFileMasked {
+		state.Masked = types.BoolValue(false)
+	}
+	if state.ResetFailed.ValueBool() && status.Active == unitFailed {
+		state.ResetFailed = types.BoolValue(false)
+	}
+	if state.AllowMissing.IsNull() {
+		state.AllowMissing = types.BoolValue(false)
+	}
+	if state.Masked.IsNull() {
+		state.Masked = types.BoolValue(false)
+	}
+	if state.ResetFailed.IsNull() {
+		state.ResetFailed = types.BoolValue(false)
 	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
@@ -315,7 +403,10 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if imported != nil && state.RestartOn.IsNull() && hasOnlyImportedWriteIDs(plan.RestartOn) {
 		restart = false
 	}
-	if err := r.apply(ctx, plan, restart); err != nil {
+	// Unmask the unit only when masked changes from true in the prior state
+	// to false in the plan.
+	unmask := state.Masked.ValueBool() && !plan.Masked.ValueBool()
+	if err := r.apply(ctx, plan, restart, unmask); err != nil {
 		resp.Diagnostics.AddError("Update systemd unit state", err.Error())
 		return
 	}
@@ -376,7 +467,7 @@ func (r *systemdUnitResource) remove(ctx context.Context, state systemdUnitModel
 	return nil
 }
 
-func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, restart bool) error {
+func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, restart bool, unmask bool) error {
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
 	name := plan.Name.ValueString()
 
@@ -389,10 +480,45 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	if err != nil {
 		return err
 	}
+
+	if unmask {
+		status, err = r.unmaskUnit(ctx, guest, name, status)
+		if err != nil {
+			return err
+		}
+	}
+
+	if plan.Masked.ValueBool() {
+		status, err = r.mask(ctx, guest, name, status)
+		if err != nil {
+			return err
+		}
+		_, err = r.clearFailed(ctx, plan, guest, name, status)
+		return err
+	}
+
 	if !status.Found {
+		if plan.AllowMissing.ValueBool() {
+			return nil
+		}
 		return fmt.Errorf("%s: the unit file of %s does not exist", guest, name)
 	}
 
+	status, err = r.clearFailed(ctx, plan, guest, name, status)
+	if err != nil {
+		return err
+	}
+	return r.reconcile(ctx, plan, guest, name, status, restart)
+}
+
+func (r *systemdUnitResource) reconcile(
+	ctx context.Context,
+	plan systemdUnitModel,
+	guest transport.Guest,
+	name string,
+	status unitStatus,
+	restart bool,
+) error {
 	current := classifyEnabledState(status.FileState)
 	wantEnabled := plan.Enabled.ValueBool()
 	if current == enablementDisabled && wantEnabled {
@@ -426,6 +552,111 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 		return nil
 	}
 	return runChecked(ctx, r.data.client, guest, systemctlCommand(action, "--", name))
+}
+
+// mask disables and stops the unit when necessary, masks it, verifies that
+// is-enabled prints masked, and returns the unit status.
+func (r *systemdUnitResource) mask(
+	ctx context.Context,
+	guest transport.Guest,
+	name string,
+	status unitStatus,
+) (unitStatus, error) {
+	if err := r.disableAndStop(ctx, guest, name, status); err != nil {
+		return unitStatus{}, err
+	}
+	if status.FileState != unitFileMasked {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("mask", "--", name)); err != nil {
+			return unitStatus{}, err
+		}
+	}
+
+	after, err := readUnitStatus(ctx, r.data.client, guest, name)
+	if err != nil {
+		return unitStatus{}, err
+	}
+	if !after.Found || after.FileState != unitFileMasked {
+		return unitStatus{}, fmt.Errorf(
+			"on guest %s, unit %s reports unit file state %q instead of masked after systemctl mask",
+			guest, name, after.FileState,
+		)
+	}
+	return after, nil
+}
+
+func (r *systemdUnitResource) disableAndStop(
+	ctx context.Context,
+	guest transport.Guest,
+	name string,
+	status unitStatus,
+) error {
+	if !status.Found {
+		return nil
+	}
+	if classifyEnabledState(status.FileState) == enablementEnabled {
+		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
+			return err
+		}
+	}
+	if !isStoppedState(status.Active) {
+		return runChecked(ctx, r.data.client, guest, systemctlCommand("stop", "--", name))
+	}
+	return nil
+}
+
+func (r *systemdUnitResource) unmaskUnit(
+	ctx context.Context,
+	guest transport.Guest,
+	name string,
+	status unitStatus,
+) (unitStatus, error) {
+	if !status.Found || status.FileState != unitFileMasked {
+		return status, nil
+	}
+	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("unmask", "--", name)); err != nil {
+		return unitStatus{}, err
+	}
+
+	after, err := readUnitStatus(ctx, r.data.client, guest, name)
+	if err != nil {
+		return unitStatus{}, err
+	}
+	if after.Found && after.FileState == unitFileMasked {
+		return unitStatus{}, fmt.Errorf(
+			"on guest %s, unit %s still reports unit file state masked after systemctl unmask",
+			guest, name,
+		)
+	}
+	return after, nil
+}
+
+// clearFailed runs systemctl reset-failed for a failed unit, verifies that it
+// no longer reports failed, and returns the unit status.
+func (r *systemdUnitResource) clearFailed(
+	ctx context.Context,
+	plan systemdUnitModel,
+	guest transport.Guest,
+	name string,
+	status unitStatus,
+) (unitStatus, error) {
+	if !plan.ResetFailed.ValueBool() || status.Active != unitFailed {
+		return status, nil
+	}
+	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("reset-failed", "--", name)); err != nil {
+		return unitStatus{}, err
+	}
+
+	after, err := readUnitStatus(ctx, r.data.client, guest, name)
+	if err != nil {
+		return unitStatus{}, err
+	}
+	if after.Found && after.Active == unitFailed {
+		return unitStatus{}, fmt.Errorf(
+			"on guest %s, unit %s still reports active state failed after systemctl reset-failed",
+			guest, name,
+		)
+	}
+	return after, nil
 }
 
 func systemctlCommand(arguments ...string) transport.Command {
@@ -480,7 +711,7 @@ func classifyEnabledState(state unitFileState) enablement {
 		return enablementEnabled
 	case unitFileStatic, unitFileAlias, unitFileIndirect, unitFileGenerated, unitFileTransient:
 		return enablementFixed
-	case unitFileNotFound:
+	case unitFileNotFound, unitFileMasked:
 		return enablementDisabled
 	default:
 		return enablementDisabled
