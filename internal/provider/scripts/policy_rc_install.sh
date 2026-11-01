@@ -50,9 +50,6 @@ cleanup() {
 	rm -f -- "$staged_path" "$apt_config_path"
 }
 
-# wait_for_dpkg_locks waits for at most the lock wait seconds.
-# It returns success when processes do not own any dpkg locks.
-# It returns failure if a process still owns a lock when the wait limit passes.
 wait_for_dpkg_locks() {
 	local deadline=$((SECONDS + lock_wait_seconds))
 	while dpkg_lock_is_held; do
