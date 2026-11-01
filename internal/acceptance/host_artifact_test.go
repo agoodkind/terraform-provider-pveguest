@@ -84,14 +84,16 @@ type hostArtifactPinEntry struct {
 }
 
 type hostArtifactTest struct {
-	t          *testing.T
-	client     *transport.Client
-	audit      *transport.Client
-	node       string
-	nodeConfig transport.NodeConfig
-	ssh        string
-	pins       map[string]hostArtifactPinEntry
-	workspace  *tofuWorkspace
+	t                     *testing.T
+	client                *transport.Client
+	audit                 *transport.Client
+	auditPrincipal        string
+	unrelatedInvocationID string
+	node                  string
+	nodeConfig            transport.NodeConfig
+	ssh                   string
+	pins                  map[string]hostArtifactPinEntry
+	workspace             *tofuWorkspace
 }
 
 func newHostArtifactTest(t *testing.T) *hostArtifactTest {
@@ -107,14 +109,16 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 	if err != nil {
 		t.Fatal(err)
 	}
+	audit, auditPrincipal := newHostAuditClient(t, node, nodeConfig)
 	test := &hostArtifactTest{
-		t:          t,
-		client:     client,
-		audit:      newHostAuditClient(t, node, nodeConfig),
-		node:       node,
-		nodeConfig: nodeConfig,
-		ssh:        ssh,
-		pins:       readFixturePins(t, pinFile),
+		t:              t,
+		client:         client,
+		audit:          audit,
+		auditPrincipal: auditPrincipal,
+		node:           node,
+		nodeConfig:     nodeConfig,
+		ssh:            ssh,
+		pins:           readFixturePins(t, pinFile),
 	}
 	test.workspace = test.newWorkspace()
 	// The provider and the test download release assets into this cache.
@@ -184,6 +188,7 @@ func TestAccHostArtifact(t *testing.T) {
 
 	test.installDirectly(unrelatedFixtureWorkspace, caseOtherTarget)
 	unrelated := test.snapshot(unrelatedTarget, unrelatedFixtureDirectory)
+	test.unrelatedInvocationID = (&hostSecretTest{hostArtifactTest: test}).invocationID(unrelatedHostSecretConsumer)
 
 	test.workspace.writeConfig(test.config(caseValidV1))
 	test.workspace.mustRun("init", "-no-color")

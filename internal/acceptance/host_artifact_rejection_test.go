@@ -42,7 +42,7 @@ var hostArtifactDefects = []hostArtifactDefect{
 	{fixtureCase: "member-mode", failureText: "has mode bits outside 0777"},
 }
 
-func newHostAuditClient(t *testing.T, node string, config transport.NodeConfig) *transport.Client {
+func newHostAuditClient(t *testing.T, node string, config transport.NodeConfig) (*transport.Client, string) {
 	t.Helper()
 	tokenFile := requireVariable(t, hostAuditTokenVariable)
 	content, err := os.ReadFile(tokenFile)
@@ -58,7 +58,11 @@ func newHostAuditClient(t *testing.T, node string, config transport.NodeConfig) 
 	if err != nil {
 		t.Fatalf("%s: %v", hostAuditTokenVariable, err)
 	}
-	return client
+	principal, _, found := strings.Cut(auditToken, "=")
+	if !found {
+		t.Fatalf("%s must contain the complete token identity and value", hostAuditTokenVariable)
+	}
+	return client, principal
 }
 
 // stageCleanup removes only the data and record of a stage that this request created.
@@ -183,6 +187,7 @@ func (h *hostArtifactTest) expectRejectedInstall(label string, failureText strin
 		h.t.Fatalf("%s task %s did not verify the signed fixture before rejecting its manifest or archive", label, upid)
 	}
 	h.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	h.expectUnrelatedInvocation()
 	if h.taskRecords(unrelatedTarget) != unrelatedTasks {
 		h.t.Fatalf("%s changed the unrelated target task history", label)
 	}
@@ -204,6 +209,14 @@ func (h *hostArtifactTest) stopUnfinishedTask(upid string) {
 		return
 	}
 	h.waitTaskStopped(upid)
+}
+
+func (h *hostArtifactTest) expectUnrelatedInvocation() {
+	h.t.Helper()
+	current := (&hostSecretTest{hostArtifactTest: h}).invocationID(unrelatedHostSecretConsumer)
+	if h.unrelatedInvocationID == "" || current != h.unrelatedInvocationID {
+		h.t.Fatalf("%s changed its InvocationID during a selected-target control", unrelatedHostSecretConsumer)
+	}
 }
 
 func (h *hostArtifactTest) stageSnapshot(target string) map[string]string {
@@ -332,6 +345,7 @@ func (h *hostArtifactTest) expectAuditRejections(unrelated map[string]string) {
 	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
 	request, cleanup := h.stageInstall(target, caseValidV2)
 	defer cleanup()
+	h.assignAuditStages(request)
 	secret := &hostSecretTest{hostArtifactTest: h}
 	marker := secret.newMarker()
 	before := secret.secretSnapshot(target, fixtureDirectory, hostSecretConsumer)
@@ -342,6 +356,11 @@ func (h *hostArtifactTest) expectAuditRejections(unrelated map[string]string) {
 	}
 	h.expectInstalled(current, h.pins[caseValidV1])
 	h.expectSnapshotValues(before, secret.secretSnapshot(target, fixtureDirectory, hostSecretConsumer))
+	h.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	h.expectUnrelatedInvocation()
+	if h.taskRecords(unrelatedTarget) != unrelatedTasks {
+		h.t.Fatal("audit GET changed the unrelated target task history")
+	}
 	h.t.Log("audit GET succeeded without changing the target")
 	archive := h.download(h.pins[caseValidV2].ReleaseTag, h.pins[caseValidV2].Asset, h.pins[caseValidV2].SHA256)
 	checks := []struct {
@@ -376,9 +395,77 @@ func (h *hostArtifactTest) expectAuditRejections(unrelated map[string]string) {
 		}
 		h.expectSnapshotValues(before, secret.secretSnapshot(target, fixtureDirectory, hostSecretConsumer))
 		h.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+		h.expectUnrelatedInvocation()
 		if h.taskRecords(unrelatedTarget) != unrelatedTasks {
 			h.t.Fatalf("audit %s changed the unrelated target task history", check.label)
 		}
 		h.t.Logf("audit %s returned HTTP 403 without creating a task, stage, or target mutation", check.label)
+	}
+}
+
+// assignAuditStages models stages that remain after their caller loses Modify
+// permission. Only this request's two A stage records change their user field.
+func (h *hostArtifactTest) assignAuditStages(request transport.HostArtifactInstall) {
+	h.t.Helper()
+	target := transport.HostArtifactTarget(fixtureWorkspace)
+	deployPrincipal, _, found := strings.Cut(h.nodeConfig.APIToken, "=")
+	if !found {
+		h.t.Fatal("the deploy token must contain its complete token identity and value")
+	}
+	installed := h.get(target).Installed
+	if installed == nil || installed.User != deployPrincipal {
+		h.t.Fatal("the installed record must identify the deploy actor with its complete user@realm!tokenid principal")
+	}
+	for _, stage := range []struct {
+		identifier string
+		kind       string
+	}{
+		{identifier: request.ArchiveStage, kind: transport.HostArtifactKindArchive},
+		{identifier: request.BundleStage, kind: transport.HostArtifactKindBundle},
+	} {
+		path := hostStateDirectory + target + "/" + stageDirectory + "/" + stage.identifier
+		data := h.hostPathState(path)
+		recordPath := path + ".json"
+		metadata := strings.TrimSpace(h.hostMustRun("stat", "--format=%u %g %a %i", "--", recordPath))
+		if !strings.HasPrefix(metadata, "0 0 600 ") {
+			h.t.Fatal("the request stage record must have root owner, root group, and mode 0600")
+		}
+		var record map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(h.hostMustRun("cat", "--", recordPath)), &record); err != nil {
+			h.t.Fatalf("parse the request stage record: %v", err)
+		}
+		var user string
+		var kind string
+		if err := json.Unmarshal(record["user"], &user); err != nil {
+			h.t.Fatalf("parse the request stage user: %v", err)
+		}
+		if err := json.Unmarshal(record["kind"], &kind); err != nil {
+			h.t.Fatalf("parse the request stage kind: %v", err)
+		}
+		if user != deployPrincipal || kind != stage.kind || record["created"] == nil {
+			h.t.Fatal("the request stage record must identify its deploy actor, expected kind, and creation time")
+		}
+		encodedUser, err := json.Marshal(h.auditPrincipal)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		record["user"] = encodedUser
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		h.hostWrite(recordPath, string(encoded))
+		var stored map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(h.hostMustRun("cat", "--", recordPath)), &stored); err != nil {
+			h.t.Fatalf("parse the updated request stage record: %v", err)
+		}
+		if !maps.EqualFunc(record, stored, func(left json.RawMessage, right json.RawMessage) bool {
+			return bytes.Equal(left, right)
+		}) {
+			h.t.Fatal("the request stage record changed fields other than its user")
+		}
+		if h.hostPathState(path) != data || strings.TrimSpace(h.hostMustRun("stat", "--format=%u %g %a %i", "--", recordPath)) != metadata {
+			h.t.Fatal("preparing the audit actor changed stage data or stage record ownership, mode, or inode")
+		}
 	}
 }
