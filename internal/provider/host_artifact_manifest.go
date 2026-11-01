@@ -254,7 +254,6 @@ func (program hostArtifactManifestProgram) check() error {
 	return nil
 }
 
-// Require exactly one bundle for each manifest program.
 func (manifest hostArtifactManifest) checkProgramBundles(bundles map[string]hostArtifactProgramBundle) error {
 	programNames := map[string]bool{}
 	var missing []string
