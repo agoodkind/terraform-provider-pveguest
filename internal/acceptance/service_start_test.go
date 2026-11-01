@@ -65,6 +65,11 @@ const (
 	guestPollInterval = 2 * time.Second
 
 	lockHeldExitCode = 1
+
+	packageNotInstalledState   = "not-installed"
+	packageHalfConfiguredState = "half-configured"
+	packageMissingExitCode     = 1
+	packageMissingMessage      = "no packages found matching "
 )
 
 type serviceDebFile struct {
@@ -114,35 +119,35 @@ func buildServiceDeb(t *testing.T, name string, failingPostinst bool) []byte {
 }
 
 // The first test that records a package set stores it as the baseline.
-// TestAccGuestIsClean compares the guest's installed packages with the baseline.
+// TestAccGuestIsClean compares the guest's package records with the baseline.
 var (
 	baselineMutex    sync.Mutex
 	baselinePackages map[string]bool
 )
 
-func recordBaseline(installed map[string]bool) {
+func recordBaseline(present map[string]bool) {
 	baselineMutex.Lock()
 	defer baselineMutex.Unlock()
 	if baselinePackages == nil {
-		baselinePackages = installed
+		baselinePackages = present
 	}
 }
 
-// installedPackages returns a set of packages dpkg lists with the status installed.
-func (g *testGuest) installedPackages() map[string]bool {
+// presentPackages includes incomplete installs and remaining configuration files.
+func (g *testGuest) presentPackages() map[string]bool {
 	g.t.Helper()
-	installed := make(map[string]bool)
-	output := g.mustRun("dpkg-query", "-W", "-f=${db:Status-Abbrev}\t${Package}\n")
+	present := make(map[string]bool)
+	output := g.mustRun("dpkg-query", "-W", "-f=${db:Status-Status}\t${Package}\n")
 	for line := range strings.SplitSeq(output, "\n") {
 		status, name, found := strings.Cut(line, "\t")
 		if !found {
 			continue
 		}
-		if strings.HasPrefix(status, "ii") || strings.HasPrefix(status, "hi") {
-			installed[name] = true
+		if status != packageNotInstalledState {
+			present[name] = true
 		}
 	}
-	return installed
+	return present
 }
 
 // packagesAbsentFrom returns sorted package names in the current set but absent from the earlier set.
@@ -157,14 +162,14 @@ func packagesAbsentFrom(before map[string]bool, current map[string]bool) []strin
 	return added
 }
 
-// useAddedPackagePurge records the installed packages and registers cleanup
-// that purges packages the test added. Cleanup does not run autoremove.
+// Cleanup purges only packages absent from the initial dpkg inventory, including
+// incomplete installs and remaining configuration files. It does not run autoremove.
 func (g *testGuest) useAddedPackagePurge() {
 	g.t.Helper()
-	before := g.installedPackages()
+	before := g.presentPackages()
 	recordBaseline(before)
 	g.t.Cleanup(func() {
-		added := packagesAbsentFrom(before, g.installedPackages())
+		added := packagesAbsentFrom(before, g.presentPackages())
 		if len(added) == 0 {
 			return
 		}
@@ -185,11 +190,16 @@ func (g *testGuest) useNamedServicePackage(name string, failingPostinst bool) {
 	if _, err := exec.LookPath("dpkg-deb"); err != nil {
 		g.t.Skip("The controller lacks dpkg-deb, which the test requires to build its .deb file.")
 	}
-	if g.packageInstalled(name) {
-		g.t.Fatalf("%s is already installed in the test guest; purge it before the test", name)
+	if err := g.expectPackagePurged(name)(nil); err != nil {
+		g.t.Fatalf("%v; purge the package before the test", err)
 	}
 	g.useTestDirectory()
 	g.useInstallLockCleanup()
+	g.t.Cleanup(func() {
+		if err := g.expectPackagePurged(name)(nil); err != nil {
+			g.t.Error(err)
+		}
+	})
 	g.useAddedPackagePurge()
 	g.t.Cleanup(func() { g.run(nil, "systemctl", "stop", "--", name+".service") })
 	g.writeFile(serviceDebPathFor(name), string(buildServiceDeb(g.t, name, failingPostinst)))
@@ -231,6 +241,24 @@ func (g *testGuest) expectPackageInstalled(name string) resource.TestCheckFunc {
 			return fmt.Errorf("%s is not installed", name)
 		}
 		return nil
+	})
+}
+
+// A named dpkg query checks removal independently of the cleanup inventory.
+func (g *testGuest) expectPackagePurged(name string) resource.TestCheckFunc {
+	return checkGuest(func() error {
+		result := g.runReadOnly("dpkg-query", "--show", "--showformat", "${db:Status-Status}", "--", name)
+		if result.ExitCode == 0 {
+			status := strings.TrimSpace(string(result.Stdout))
+			if status == packageNotInstalledState {
+				return nil
+			}
+			return fmt.Errorf("package %s has dpkg state %q; expected the package to be purged", name, status)
+		}
+		if result.ExitCode == packageMissingExitCode && strings.Contains(string(result.Stderr), packageMissingMessage+name) {
+			return nil
+		}
+		return fmt.Errorf("dpkg-query for %s exited with status %d: %s", name, result.ExitCode, result.Stderr)
 	})
 }
 
@@ -354,6 +382,10 @@ func TestAccDebPackagesFailedInstallRemovesPolicyFile(t *testing.T) {
 					if guest.exists(policyFilePath) {
 						t.Fatalf("the policy file %s exists after the failed install", policyFilePath)
 					}
+					status := strings.TrimSpace(guest.mustRun("dpkg-query", "--show", "--showformat", "${db:Status-Status}", "--", servicePackage))
+					if status != packageHalfConfiguredState {
+						t.Fatalf("package %s has dpkg state %q after its postinst failed; expected %q", servicePackage, status, packageHalfConfiguredState)
+					}
 				},
 				Config:             config,
 				PlanOnly:           true,
@@ -455,7 +487,6 @@ func TestAccPackagesApplyTogetherWithoutServiceStart(t *testing.T) {
 			},
 			{
 				Config:           config,
-				PlanOnly:         true,
 				ConfigPlanChecks: resource.ConfigPlanChecks{PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()}},
 			},
 		},

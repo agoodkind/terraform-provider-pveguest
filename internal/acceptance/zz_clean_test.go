@@ -35,46 +35,33 @@ func TestAccGuestIsClean(t *testing.T) {
 			t.Errorf("%s exists after the tests", path)
 		}
 	}
-	if guest.packageInstalled(testPackage) {
-		t.Errorf("package %s is installed after the tests", testPackage)
-	}
-	if guest.packageInstalled(noStartPackage) {
-		t.Errorf("%s is installed after the tests", noStartPackage)
+	for _, name := range []string{testPackage, noStartPackage, servicePackage, secondServicePackage, thirdServicePackage, fourthServicePackage} {
+		if err := guest.expectPackagePurged(name)(nil); err != nil {
+			t.Error(err)
+		}
 	}
 	if state := guest.systemctlState("is-active", noStartUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", noStartUnit, state)
 	}
-	if guest.packageInstalled(servicePackage) {
-		t.Errorf("%s is installed after the tests", servicePackage)
-	}
 	if state := guest.systemctlState("is-active", serviceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", serviceUnit, state)
-	}
-	if guest.packageInstalled(secondServicePackage) {
-		t.Errorf("%s is installed after the tests", secondServicePackage)
 	}
 	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", secondServiceUnit, state)
 	}
-	if guest.packageInstalled(thirdServicePackage) {
-		t.Errorf("%s is installed after the tests", thirdServicePackage)
-	}
 	if state := guest.systemctlState("is-active", thirdServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", thirdServiceUnit, state)
-	}
-	if guest.packageInstalled(fourthServicePackage) {
-		t.Errorf("%s is installed after the tests", fourthServicePackage)
 	}
 	if state := guest.systemctlState("is-active", fourthServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", fourthServiceUnit, state)
 	}
-	installed := guest.installedPackages()
-	recordBaseline(installed)
+	present := guest.presentPackages()
+	recordBaseline(present)
 	baselineMutex.Lock()
 	baseline := baselinePackages
 	baselineMutex.Unlock()
-	if added := packagesAbsentFrom(baseline, installed); len(added) > 0 {
-		t.Errorf("Packages added by the tests remain installed: %s.", strings.Join(added, ", "))
+	if added := packagesAbsentFrom(baseline, present); len(added) > 0 {
+		t.Errorf("Package records added by the tests remain in dpkg: %s.", strings.Join(added, ", "))
 	}
 	for _, pattern := range ownedFilePatterns {
 		if remaining := guest.findFiles(pattern.directory, pattern.name); len(remaining) > 0 {
