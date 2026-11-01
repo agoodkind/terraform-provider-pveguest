@@ -647,11 +647,17 @@ not contain a secret value. Each entry in `secrets[]` reports these fields:
 - `configured` reports whether the storage file matches the policy.
 - `version` reports the recorded version.
 - `sha256` reports the storage file SHA-256.
+- `restart_pending` is `1` when the secret record has a pending consumer restart for a unit that the policy lists.
 
-After each apply, private state stores the storage file SHA-256 from `GET` as
-the applied SHA-256. Read compares the current SHA-256 with the applied SHA-256
-and stores only a boolean in a second private key. The resource does not expose
-either SHA-256 as an attribute.
+The provider rejects a `GET` response when a `secrets[]` entry omits
+`restart_pending`. The error states that the node overlay is too old.
+The provider does not treat an absent field as false.
+
+After each apply, the provider stores the storage file SHA-256 from `GET` as
+the applied SHA-256 in private state. Read calls only `GET` and sets the
+private Boolean `content_drift` to true when the current SHA-256 differs from
+the applied SHA-256 or `GET` reports `restart_pending` as `1`. The resource
+does not expose either SHA-256 as an attribute.
 
 A plan proposes a write when the resource needs replacement or when any of
 these conditions apply:
@@ -659,18 +665,19 @@ these conditions apply:
 - `value_wo_version` changes.
 - `GET` reports `configured` false for the field.
 - The storage file SHA-256 differs from the applied SHA-256.
+- `GET` reports `restart_pending` as `1` for the field.
 
 A changed `value_wo` at the same `value_wo_version` does not plan a write. A plan
 that needs a write fails when the configuration does not set `value_wo`.
 
 An apply sends `value_wo` as `value` and `value_wo_version` as `version`, waits
-up to 10 minutes for the `hostsecret` task, and calls `GET`. The apply fails
-unless `GET` reports `configured` true and the requested version. The node
-rejects a lower version and another value at the same version. The diagnostic
-reports the rejection.
+up to 10 minutes for the `hostsecret` task to succeed, and calls `GET`. The
+apply fails if `GET` reports `configured` as false, a different version, or
+`restart_pending` as `1`. The node rejects a lower version and another value
+at the same version. The diagnostic reports the rejection.
 
-A request with the recorded version and value repairs the storage file.
-A metadata repair does not restart a consumer.
+A request with the recorded version and value repairs the storage file and runs
+a pending consumer restart. A metadata repair does not restart a consumer.
 
 The API does not provide a method that deletes a secret field. Destroy calls
 only `GET` and fails while the node stores the field. Destroy succeeds when
@@ -694,9 +701,12 @@ requires the same destroy check. `tofu state rm` stops managing a stored field.
 Import IDs use the format `<node>:<workspace>:<field>`, such as
 `suburban:suburban/mwan:SMTP2GO_API_KEY`. Import calls only `GET`, sets
 `value_wo_version` to the recorded version, and stores the current storage file
-SHA-256 as the applied SHA-256. A matching configuration does not plan a write
-while `GET` reports `configured` true and the storage file SHA-256 matches the
-applied SHA-256.
+SHA-256 as the applied SHA-256. It also sets the private Boolean
+`content_drift` to the `restart_pending` value. A matching configuration does
+not plan a write when `GET` reports `configured` as true and `restart_pending`
+as false, and the storage file SHA-256 matches the applied SHA-256. Import
+does not write when the field has a pending restart. The next plan proposes
+a write and fails with `Missing value_wo` if the configuration omits `value_wo`.
 
 ## pveguest_container_options
 
@@ -976,11 +986,17 @@ policy lists the field `PVEGUEST_ACC_SECRET` with the storage file `secret.env`
 in the fixture directory and a pattern that accepts `pveguest-acc-` followed by
 32 lowercase hexadecimal characters. The consumer units
 `hostartifact-acceptance.service` and `hostartifact-acceptance-b.service` must
-run on the node. The token also needs `Sys.HostSecrets.Modify` on
-`/nodes/<node>`.
+run on the node. `hostartifact-acceptance.service` must fail to start when
+`/run/hostartifact-acceptance.fail` exists. The token also needs
+`Sys.HostSecrets.Modify` on `/nodes/<node>`. The node must provide the `flock`
+command.
 
 The test uses root ssh only for deliberate drift and protected observations,
-including `systemctl show`, `find`, and `cat` output. It passes random synthetic
+including `systemctl show`, `find`, and `cat` output. It acquires the unrelated
+target lock with `flock` during setup and releases it during cleanup. It owns
+the selected target lock during the plan with a changed value at the recorded
+version, the import, the matching plan, and the matching apply. The test
+compares the task log file names for each target. It passes random synthetic
 markers to OpenTofu only through `TF_VAR_secret` and does not print them.
 It checks for markers in these outputs:
 
