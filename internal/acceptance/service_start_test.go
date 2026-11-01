@@ -892,14 +892,40 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	if pid, err := strconv.Atoi(scriptPID); err != nil || pid <= 0 {
 		t.Fatalf("the apt configuration path %s does not contain a valid wrapper process ID", configFiles[0])
 	}
+	var secondAptPID string
 	guest.waitFor("the second wrapper's apt-get child while the plain postinst is blocked", func() bool {
-		return guest.runReadOnly("pgrep", "-P", scriptPID, "-x", "apt-get").ExitCode == 0
+		result := guest.runReadOnly("pgrep", "-P", scriptPID, "-x", "apt-get")
+		if result.ExitCode != 0 {
+			return false
+		}
+		children := strings.Fields(string(result.Stdout))
+		if len(children) != 1 {
+			t.Fatalf("the second wrapper has %d apt-get children; expected one", len(children))
+		}
+		secondAptPID = children[0]
+		return true
 	})
 	t.Logf("The second wrapper %s has an apt-get child while the plain postinst is blocked.", scriptPID)
 	// Kill the guest script while its apt-get waits for the dpkg lock.
 	// The apt-get process continues running.
 	guest.mustRun("pkill", "-KILL", "-f", "--", killedScriptPattern)
-	_ = waitSecond()
+	guest.waitFor("the second guest wrapper to exit", func() bool {
+		result := guest.runReadOnly("ps", "-o", "stat=", "-p", scriptPID)
+		if result.ExitCode == processAbsentExitCode {
+			return true
+		}
+		if result.ExitCode != 0 {
+			t.Fatal(guest.redactAPIOutput(fmt.Sprintf("ps for the second wrapper exited with status %d: %s", result.ExitCode, result.Stderr)))
+		}
+		// A zombie has exited even while its parent has not reaped it.
+		return strings.HasPrefix(strings.TrimSpace(string(result.Stdout)), "Z")
+	})
+	aptState := guest.runReadOnly("ps", "-o", "stat=", "-p", secondAptPID)
+	if aptState.ExitCode != 0 || strings.HasPrefix(strings.TrimSpace(string(aptState.Stdout)), "Z") {
+		t.Fatal(guest.redactAPIOutput(fmt.Sprintf("the second apt-get process %s must remain running before the third apply; ps exited with status %d; output: %s; stderr: %s",
+			secondAptPID, aptState.ExitCode, aptState.Stdout, aptState.Stderr)))
+	}
+	t.Logf("The second wrapper has exited while apt-get process %s remains running.", secondAptPID)
 
 	thirdCommand, thirdOutput, waitThird := startApply(t, workspaces[thirdServicePackage])
 	failedApplies = append(failedApplies, func() { guest.stopAndLogApply("third", thirdCommand, thirdOutput, waitThird) })
@@ -915,6 +941,10 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	}
 
 	releasePlain()
+	var secondExitError *exec.ExitError
+	if err := waitSecond(); !errors.As(err, &secondExitError) {
+		t.Fatal(guest.redactAPIOutput(fmt.Sprintf("the second apply returned %v after its guest wrapper was killed; expected a process exit error; output: %s", err, secondOutput.String())))
+	}
 	if err := waitThird(); err != nil {
 		t.Fatal(guest.redactAPIOutput(fmt.Sprintf("the third apply failed: %v; output: %s", err, thirdOutput.String())))
 	}
