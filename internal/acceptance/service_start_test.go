@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	// The Debian package at ships an enabled atd.service and does not affect other services.
-	// The test purges at after it finishes.
+	// The Debian package "at" ships an enabled atd.service and does not affect other services.
+	// The test purges "at" after it finishes.
 	noStartPackage = "at"
 	noStartUnit    = "atd.service"
 

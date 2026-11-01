@@ -41,7 +41,7 @@ cleanup() {
 	local exit_status=$?
 	if [[ $policy_path -ef $staged_path ]]; then
 		if ((exit_status > SIGNAL_STATUS_BASE)) && ! wait_for_dpkg_locks; then
-			printf 'A process still owns a dpkg lock after %s seconds. The script leaves the policy file %s, the staged copy, and the apt configuration in place.\n' \
+			printf 'A process still owns a dpkg lock after %s seconds. The script preserves the policy file %s, the staged copy, and the apt configuration in place.\n' \
 				"$lock_wait_seconds" "$policy_path" >&2
 			return 0
 		fi
