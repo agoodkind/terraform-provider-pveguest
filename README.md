@@ -762,7 +762,7 @@ items at the end:
 
 - Files and links under `/root/pveguest-acc/`.
 - The tests install `hello` and `sl`. Cleanup removes the hold on `hello` and purges both packages.
-- The acceptance tests install `at`, `pveguest-acc-svc`, `pveguest-acc-svc-two`, `pveguest-acc-svc-three`, `pveguest-acc-svc-four`, and any packages their installs add. The tests change `atd.service`, `pveguest-acc-svc.service`, `pveguest-acc-svc-two.service`, `pveguest-acc-svc-three.service`, and `pveguest-acc-svc-four.service`. The tests create files under `/root/pveguest-acc/`, including generated `.deb` files, `postinst-sleep`, and `.times` files. Cleanup purges every package the tests added and deletes the directory. Cleanup does not run `autoremove`.
+- The acceptance tests install `at`, `pveguest-acc-svc`, `pveguest-acc-svc-two`, `pveguest-acc-svc-three`, `pveguest-acc-svc-four`, and any packages their installs add. The tests change `atd.service`, `pveguest-acc-svc.service`, `pveguest-acc-svc-two.service`, `pveguest-acc-svc-three.service`, and `pveguest-acc-svc-four.service`. Cleanup purges every package the tests added. Cleanup does not run `autoremove`.
 - The tests change `/usr/sbin/policy-rc.d`, the staged copy `/usr/sbin/policy-rc.d.pveguest-staged.<pid>`, the apt configuration `/run/pveguest-apt-policy.<pid>.conf`, `/usr/sbin/policy-rc.d.pveguest-staged.keep`, `/run/pveguest-apt-policy.4000001.conf`, and `/run/pveguest-package-install.lock`. The provider script deletes its own staged copy and apt configuration and deletes stale copies from a killed script. Test cleanup deletes the two unrelated files and the lock file.
 - The units `pveguest-acc.timer` and `pveguest-acc.service` under
   `/etc/systemd/system/`.
