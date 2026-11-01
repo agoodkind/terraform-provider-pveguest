@@ -3,6 +3,7 @@ package acceptance_test
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -477,12 +478,7 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	workspace.mustRun("init", "-no-color")
 	t.Cleanup(func() { workspace.run("destroy", "-no-color", "-auto-approve") })
 
-	command := exec.CommandContext(t.Context(), workspace.binary, "apply", "-no-color", "-auto-approve")
-	command.Dir = workspace.directory
-	command.Env = append(os.Environ(), "TF_IN_AUTOMATION=1", "TF_INPUT=0", reattachVariableName+"=")
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
+	command, _, wait := startApply(t, workspace)
 	// The postinst script enables the unit before it sleeps. An enabled unit
 	// shows that the install is running in that slow step.
 	guest.waitFor(fmt.Sprintf("the slow installation to enable %s", serviceUnit), func() bool {
@@ -491,7 +487,10 @@ func TestAccDebPackagesRecoverAfterKilledApply(t *testing.T) {
 	if err := command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
-	_ = command.Wait()
+	var exitError *exec.ExitError
+	if err := wait(); !errors.As(err, &exitError) {
+		t.Fatalf("the killed apply returned %v; expected a process exit error", err)
+	}
 
 	if got := guest.readFile(policyFilePath); !strings.Contains(got, policyMarker) {
 		t.Fatalf("after the kill, the policy file %s contains %q; expected marker line %q", policyFilePath, got, policyMarker)
@@ -571,7 +570,7 @@ func TestAccDebPackagesOtherInstallKeepsServiceStart(t *testing.T) {
 		return guest.exists(testDirectory + "/" + servicePackage + ".times")
 	})
 	guest.writeFile(postinstSleepPath, "0\n")
-	command, output := startApply(t, workspace)
+	_, output, wait := startApply(t, workspace)
 	guest.waitFor("creation of the second install's files", func() bool { return guest.countOwnedFiles() == ownedFilePairCount })
 	// The plain install's timestamp file contains one line while its postinst script
 	// sleeps. This check verifies that the two installs overlap.
@@ -579,7 +578,7 @@ func TestAccDebPackagesOtherInstallKeepsServiceStart(t *testing.T) {
 		t.Fatalf("the plain install's postinst script ended before the second install created its files (%d timestamps); "+
 			"the test did not overlap the two installs", len(timestamps))
 	}
-	if err := command.Wait(); err != nil {
+	if err := wait(); err != nil {
 		t.Fatalf("the %s apply failed: %v; output: %s", "second", err, output.String())
 	}
 	guest.requireBackgroundSuccess(done, "the plain apt-get install")
@@ -614,7 +613,7 @@ func TestAccDebPackagesWaitsForInstallLock(t *testing.T) {
 	guest.waitFor("the lock holder command's ownership of the install lock", func() bool {
 		return guest.run(nil, "flock", "-n", installLockPath, "true").ExitCode == lockHeldExitCode
 	})
-	command, output := startApply(t, workspace)
+	_, output, wait := startApply(t, workspace)
 	guest.waitFor("the start of the install script and its wait for the install lock", func() bool {
 		return guest.run(nil, "pgrep", "-f", "--", killedScriptPattern).ExitCode == 0
 	})
@@ -627,7 +626,7 @@ func TestAccDebPackagesWaitsForInstallLock(t *testing.T) {
 	if count := guest.countOwnedFiles(); count != 0 {
 		t.Fatalf("the install script created %d files while the lock holder owned the install lock", count)
 	}
-	if err := command.Wait(); err != nil {
+	if err := wait(); err != nil {
 		t.Fatalf("the %s apply failed: %v; output: %s", "only", err, output.String())
 	}
 	guest.requireBackgroundSuccess(holder, "the lock holder command")
@@ -694,7 +693,7 @@ func TestAccDebPackagesRemovesFilesOfKilledScript(t *testing.T) {
 	t.Cleanup(func() { first.run("destroy", "-no-color", "-auto-approve") })
 	t.Cleanup(func() { second.run("destroy", "-no-color", "-auto-approve") })
 
-	firstCommand, _ := startApply(t, first)
+	_, _, waitFirst := startApply(t, first)
 	guest.waitFor(fmt.Sprintf("the slow installation to enable %s", serviceUnit), func() bool {
 		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
 	})
@@ -708,7 +707,7 @@ func TestAccDebPackagesRemovesFilesOfKilledScript(t *testing.T) {
 	// Match the guest script by the lock path in its command line and kill it.
 	// The apt-get process that the script started continues to run.
 	guest.mustRun("pkill", "-KILL", "-f", "--", killedScriptPattern)
-	_ = firstCommand.Wait()
+	_ = waitFirst()
 	for _, path := range staleFiles {
 		if !guest.exists(path) {
 			t.Fatalf("The killed script should leave %s in place, but the file is missing.", path)
@@ -798,15 +797,15 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	})
 	guest.writeFile(postinstSleepPath, "0\n")
 
-	secondCommand, _ := startApply(t, workspaces[secondServicePackage])
+	_, _, waitSecond := startApply(t, workspaces[secondServicePackage])
 	guest.waitFor("creation of the second install's files", func() bool { return guest.countOwnedFiles() == ownedFilePairCount })
 	secondFiles := guest.allOwnedFiles()
 	// Kill the guest script while its apt-get waits for the dpkg lock.
 	// The apt-get process continues running.
 	guest.mustRun("pkill", "-KILL", "-f", "--", killedScriptPattern)
-	_ = secondCommand.Wait()
+	_ = waitSecond()
 
-	thirdCommand, thirdOutput := startApply(t, workspaces[thirdServicePackage])
+	_, thirdOutput, waitThird := startApply(t, workspaces[thirdServicePackage])
 	guest.waitFor("creation of the third install's files", func() bool { return guest.countOwnedFiles() == 2*ownedFilePairCount })
 	for _, path := range secondFiles {
 		if !guest.exists(path) {
@@ -815,7 +814,7 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	}
 
 	guest.requireBackgroundSuccess(plainInstall, "the plain apt-get install")
-	if err := thirdCommand.Wait(); err != nil {
+	if err := waitThird(); err != nil {
 		t.Fatalf("the %s apply failed: %v; output: %s", "third", err, thirdOutput.String())
 	}
 	guest.waitFor("installation of the second package and exit of the surviving apt-get", func() bool {
@@ -854,8 +853,9 @@ func TestAccDebPackagesKeepsFilesWhileAptWaitsForDpkgLock(t *testing.T) {
 	}
 }
 
-// startApply starts a tofu apply process and returns the process and its output buffer.
-func startApply(t *testing.T, workspace *tofuWorkspace) (*exec.Cmd, *bytes.Buffer) {
+// startApply registers process cleanup before returning. The wait function calls
+// Cmd.Wait once and returns its result on later calls.
+func startApply(t *testing.T, workspace *tofuWorkspace) (*exec.Cmd, *bytes.Buffer, func() error) {
 	t.Helper()
 	var output bytes.Buffer
 	command := exec.CommandContext(t.Context(), workspace.binary, "apply", "-no-color", "-auto-approve")
@@ -866,7 +866,24 @@ func startApply(t *testing.T, workspace *tofuWorkspace) (*exec.Cmd, *bytes.Buffe
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	return command, &output
+	waited := false
+	wait := sync.OnceValue(func() error {
+		waited = true
+		return command.Wait()
+	})
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			t.Errorf("stop the apply during cleanup: %v", err)
+		}
+		var exitError *exec.ExitError
+		if err := wait(); err != nil && !errors.As(err, &exitError) {
+			t.Errorf("wait for the apply during cleanup: %v", err)
+		}
+	})
+	return command, &output, wait
 }
 
 // postinstWindow returns the nanosecond timestamps that the postinst script
@@ -911,15 +928,15 @@ func TestAccDebPackagesTwoProcessesShareLock(t *testing.T) {
 	t.Cleanup(func() { first.run("destroy", "-no-color", "-auto-approve") })
 	t.Cleanup(func() { second.run("destroy", "-no-color", "-auto-approve") })
 
-	firstCommand, firstOutput := startApply(t, first)
+	_, firstOutput, waitFirst := startApply(t, first)
 	// The first postinst script enables its unit before sleeping.
 	// Start the second apply during that sleep.
 	guest.waitFor(fmt.Sprintf("the first installation to enable %s", serviceUnit), func() bool {
 		return guest.systemctlState("is-enabled", serviceUnit) == "enabled"
 	})
-	secondCommand, secondOutput := startApply(t, second)
-	firstErr := firstCommand.Wait()
-	secondErr := secondCommand.Wait()
+	_, secondOutput, waitSecond := startApply(t, second)
+	firstErr := waitFirst()
+	secondErr := waitSecond()
 	if firstErr != nil {
 		t.Fatalf("the %s apply failed: %v; output: %s", "first", firstErr, firstOutput.String())
 	}
