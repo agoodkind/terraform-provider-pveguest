@@ -637,6 +637,8 @@ Import IDs use the format `<node>:<workspace>`, such as
 node. The first apply after import installs the archive unless the node
 already has it installed with matching files.
 
+After a terraform import of a pveguest_host_artifact target, Terraform plans one in-place update to program_bundles if the configuration includes program_bundles. The apply does not write to the node, and the next plan is empty.
+
 ## pveguest_host_secret
 
 `pveguest_host_secret` sets one secret field of one workspace selector on one

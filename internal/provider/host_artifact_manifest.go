@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"maps"
 	"net/url"
+	pathpkg "path"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -22,6 +24,8 @@ const (
 	hostArtifactSchemaPrograms = 2
 	githubReleaseBase          = "https://github.com"
 )
+
+var hostArtifactModePattern = regexp.MustCompile(`^[0-7]{4}$`)
 
 // hostArtifactPin identifies the pinned archive and attestation bundle of one
 // target.
@@ -209,6 +213,10 @@ func (program hostArtifactManifestProgram) check() error {
 	if !hostArtifactRepositoryPattern.MatchString(program.Repository) {
 		return fmt.Errorf("repository %q for program %s must use the owner/repository format", program.Repository, program.Name)
 	}
+	_, repositoryName, _ := strings.Cut(program.Repository, "/")
+	if repositoryName == "." || repositoryName == ".." {
+		return fmt.Errorf("repository %q for program %s must not use '.' or '..' as the text after the slash", program.Repository, program.Name)
+	}
 	for _, field := range []struct{ name, value string }{
 		{name: "release_tag", value: program.ReleaseTag},
 		{name: "asset", value: program.Asset},
@@ -223,6 +231,32 @@ func (program hostArtifactManifestProgram) check() error {
 	} {
 		if !sha256Pattern.MatchString(field.value) {
 			return fmt.Errorf("field %s value %q for program %s must contain exactly 64 lowercase hexadecimal characters", field.name, field.value, program.Name)
+		}
+	}
+	for _, field := range []struct{ name, value string }{
+		{name: "source_revision", value: program.SourceRevision},
+		{name: "signer_revision", value: program.SignerRevision},
+	} {
+		if !hostArtifactRevisionPattern.MatchString(field.value) {
+			return fmt.Errorf("field %s with value %q for program %s must contain exactly 40 lowercase hexadecimal characters", field.name, field.value, program.Name)
+		}
+	}
+	if err := validateArchiveMember(program.Member); err != nil {
+		slog.Error("program archive member is invalid", "program", program.Name, "member", program.Member, "err", err)
+		return fmt.Errorf("archive member %q for program %s fails validation: %w", program.Member, program.Name, err)
+	}
+	if !strings.HasPrefix(program.Path, "/") || pathpkg.Clean(program.Path) != program.Path {
+		return fmt.Errorf("path %q for program %s must be a clean absolute path", program.Path, program.Name)
+	}
+	if !hostArtifactModePattern.MatchString(program.Mode) {
+		return fmt.Errorf("mode %q for program %s must contain exactly four octal digits", program.Mode, program.Name)
+	}
+	for _, field := range []struct{ name, value string }{
+		{name: "owner", value: program.Owner},
+		{name: "group", value: program.Group},
+	} {
+		if field.value == "" {
+			return fmt.Errorf("field %s for program %s must contain at least one character", field.name, program.Name)
 		}
 	}
 	return nil
