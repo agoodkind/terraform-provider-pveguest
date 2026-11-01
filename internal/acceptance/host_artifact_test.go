@@ -1,7 +1,9 @@
 package acceptance_test
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	pathutil "path"
 	"slices"
 	"strings"
 	"testing"
@@ -49,6 +52,15 @@ const (
 	caseRecoveryV1  = "recovery-v1"
 	caseRecoveryV2  = "recovery-v2"
 
+	caseProgramValid        = "program-valid"
+	caseProgramWrongSource  = "program-wrong-source"
+	caseProgramWrongSigner  = "program-wrong-signer"
+	caseProgramWrongArchive = "program-wrong-archive"
+	caseProgramWrongMember  = "program-wrong-member"
+	caseProgramCollision    = "program-collision"
+
+	manifestMember = "manifest.json"
+
 	fixtureAssetPrefix = "hostconfig_fixture-"
 	fixtureAssetSuffix = ".tar.gz"
 	releaseBaseURL     = "https://github.com/"
@@ -81,6 +93,24 @@ type hostArtifactPinEntry struct {
 	BundleAsset    string `json:"bundle_asset"`
 	BundleSHA256   string `json:"bundle_sha256"`
 	SourceRevision string `json:"source_revision"`
+	// ProgramBundles maps program names to bundles for this test case.
+	ProgramBundles map[string]hostArtifactBundleEntry `json:"program_bundles"`
+}
+
+// hostArtifactBundleEntry stores a program bundle asset and SHA-256 from pin JSON.
+type hostArtifactBundleEntry struct {
+	Asset  string `json:"asset"`
+	SHA256 string `json:"sha256"`
+}
+
+// fixtureProgram stores the manifest program fields that acceptance tests read.
+type fixtureProgram struct {
+	Name       string `json:"name"`
+	Repository string `json:"repository"`
+	ReleaseTag string `json:"release_tag"`
+	Asset      string `json:"asset"`
+	SHA256     string `json:"sha256"`
+	Path       string `json:"path"`
 }
 
 type hostArtifactTest struct {
@@ -144,6 +174,13 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 		caseRecoveryV1:  fixtureWorkspace,
 		caseRecoveryV2:  fixtureWorkspace,
 		caseOtherTarget: unrelatedFixtureWorkspace,
+
+		caseProgramValid:        fixtureWorkspace,
+		caseProgramWrongSource:  fixtureWorkspace,
+		caseProgramWrongSigner:  fixtureWorkspace,
+		caseProgramWrongArchive: fixtureWorkspace,
+		caseProgramWrongMember:  fixtureWorkspace,
+		caseProgramCollision:    fixtureWorkspace,
 	}
 	for fixtureCase, workspace := range workspaces {
 		pin, found := pins[fixtureCase]
@@ -241,6 +278,47 @@ func TestAccHostArtifact(t *testing.T) {
 	test.expectSnapshot(matching, target, fixtureDirectory)
 	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 	test.workspace.mustRun("state", "rm", hostArtifactAddress)
+
+	// Import reads host state with GET. The first apply installs the schema
+	// version 2 archive and its programs.
+	test.workspace.writeConfig(test.config(caseProgramValid))
+	beforeImport := test.snapshot(target, fixtureDirectory)
+	test.workspace.mustRun("import", "-no-color", hostArtifactAddress, test.node+":"+fixtureWorkspace)
+	test.expectSnapshot(beforeImport, target, fixtureDirectory)
+	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	test.applyClean(caseProgramValid)
+	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+
+	programPaths := test.programPaths(caseProgramValid)
+	for _, programPath := range programPaths {
+		test.hostWrite(programPath, editedFixtureContent)
+		test.expectRepair(caseProgramValid)
+		test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+
+		test.hostMustRun("rm", "-f", "--", programPath)
+		test.expectRepair(caseProgramValid)
+		test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	}
+
+	for _, rejected := range []string{
+		caseProgramWrongSource,
+		caseProgramWrongSigner,
+		caseProgramWrongArchive,
+		caseProgramWrongMember,
+		caseProgramCollision,
+	} {
+		test.expectRejected(rejected, caseProgramValid)
+		test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	}
+
+	// Apply repairs the target after an interrupted program install.
+	test.workspace.writeConfig(test.config(caseValidV1))
+	test.applyClean(caseValidV1)
+	test.stopInstall(target, caseValidV1, caseProgramValid)
+	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
+	test.workspace.writeConfig(test.config(caseProgramValid))
+	test.expectRepair(caseProgramValid)
+	test.expectSnapshot(unrelated, unrelatedTarget, unrelatedFixtureDirectory)
 }
 
 func (h *hostArtifactTest) newWorkspace() *tofuWorkspace {
@@ -280,10 +358,104 @@ resource "pveguest_host_artifact" "test" {
   bundle_asset    = %q
   bundle_sha256   = %q
   source_revision = %q
-}
+%s}
 `, providerSource, candidateInstalledVersion, h.node, h.nodeConfig.Endpoint, h.nodeConfig.APIToken, h.nodeConfig.Insecure,
 		h.node, fixtureWorkspace, hostArtifactRepository, pin.ReleaseTag, pin.Asset, pin.SHA256,
-		pin.BundleAsset, pin.BundleSHA256, pin.SourceRevision)
+		pin.BundleAsset, pin.BundleSHA256, pin.SourceRevision, programBundlesBlock(pin))
+}
+
+// programBundlesBlock formats the pin's program_bundles argument.
+// It returns an empty string when the pin does not include programs.
+func programBundlesBlock(pin hostArtifactPinEntry) string {
+	if len(pin.ProgramBundles) == 0 {
+		return ""
+	}
+	var block strings.Builder
+	block.WriteString("  program_bundles = {\n")
+	for _, name := range slices.Sorted(maps.Keys(pin.ProgramBundles)) {
+		bundle := pin.ProgramBundles[name]
+		fmt.Fprintf(&block, "    %q = {\n      asset  = %q\n      sha256 = %q\n    }\n", name, bundle.Asset, bundle.SHA256)
+	}
+	block.WriteString("  }\n")
+	return block.String()
+}
+
+// expectRejected checks that apply fails for fixtureCase and preserves the
+// installedCase archive and file hashes. It then checks that installedCase
+// produces a plan without changes.
+func (h *hostArtifactTest) expectRejected(fixtureCase string, installedCase string) {
+	h.t.Helper()
+	target := transport.HostArtifactTarget(fixtureWorkspace)
+	before := h.get(target)
+	h.workspace.writeConfig(h.config(fixtureCase))
+	output, exitCode := h.workspace.run("apply", "-no-color", "-auto-approve")
+	if exitCode == 0 {
+		h.t.Fatalf("apply for %s returned status 0 instead of failing:\n%s", fixtureCase, output)
+	}
+	after := h.get(target)
+	h.expectInstalled(after, h.pins[installedCase])
+	if got, want := fileHashes(after), fileHashes(before); !maps.Equal(got, want) {
+		h.t.Fatalf("file hashes after apply rejected %s are %v instead of %v", fixtureCase, got, want)
+	}
+	h.workspace.writeConfig(h.config(installedCase))
+	planOutput, planExitCode := h.workspace.run("plan", "-no-color", "-detailed-exitcode")
+	if planExitCode != 0 {
+		h.t.Fatalf("plan after apply rejected %s returned status %d instead of 0:\n%s", fixtureCase, planExitCode, planOutput)
+	}
+}
+
+func fileHashes(current transport.HostArtifactState) map[string]string {
+	hashes := make(map[string]string, len(current.Files))
+	for _, file := range current.Files {
+		hashes[file.Path] = file.SHA256
+	}
+	return hashes
+}
+
+// programPaths reads the manifest for fixtureCase and returns each program's
+// installation path.
+func (h *hostArtifactTest) programPaths(fixtureCase string) []string {
+	h.t.Helper()
+	programs := h.manifestPrograms(h.pins[fixtureCase])
+	if len(programs) == 0 {
+		h.t.Fatalf("manifest for test case %s does not list any programs", fixtureCase)
+	}
+	paths := make([]string, 0, len(programs))
+	for _, program := range programs {
+		paths = append(paths, program.Path)
+	}
+	return paths
+}
+
+// manifestPrograms downloads the pinned archive and reads its manifest's
+// programs list.
+func (h *hostArtifactTest) manifestPrograms(pin hostArtifactPinEntry) []fixtureProgram {
+	h.t.Helper()
+	archive := h.download(pin.ReleaseTag, pin.Asset, pin.SHA256)
+	decompressed, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		h.t.Fatalf("gzip reader could not open archive %s: %v", pin.Asset, err)
+	}
+	reader := tar.NewReader(decompressed)
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			h.t.Fatalf("archive %s does not contain member %s", pin.Asset, manifestMember)
+		}
+		if err != nil {
+			h.t.Fatalf("tar reader could not read the next member of archive %s: %v", pin.Asset, err)
+		}
+		if pathutil.Clean(header.Name) != manifestMember {
+			continue
+		}
+		var manifest struct {
+			Programs []fixtureProgram `json:"programs"`
+		}
+		if err := json.NewDecoder(reader).Decode(&manifest); err != nil {
+			h.t.Fatalf("JSON decoder could not parse member %s in archive %s: %v", manifestMember, pin.Asset, err)
+		}
+		return manifest.Programs
+	}
 }
 
 // applyClean applies the configuration, checks that the node reports the
@@ -390,6 +562,7 @@ func (h *hostArtifactTest) startInstall(target string, fixtureCase string) strin
 	if err != nil {
 		h.t.Fatalf("stage the bundle of %s: %v", fixtureCase, err)
 	}
+	programStages := h.stagePrograms(target, pin)
 	upid, err := h.client.InstallHostArtifact(ctx, h.node, target, transport.HostArtifactInstall{
 		ReleaseTag:     pin.ReleaseTag,
 		Asset:          pin.Asset,
@@ -397,11 +570,50 @@ func (h *hostArtifactTest) startInstall(target string, fixtureCase string) strin
 		SourceRevision: pin.SourceRevision,
 		ArchiveStage:   archiveStage,
 		BundleStage:    bundleStage,
+		ProgramStages:  programStages,
 	})
 	if err != nil {
 		h.t.Fatalf("install %s: %v", fixtureCase, err)
 	}
 	return upid
+}
+
+// stagePrograms uploads each pinned program archive and bundle to host stages.
+// It returns the program-stages value, or an empty string when the pin does
+// not include programs.
+func (h *hostArtifactTest) stagePrograms(target string, pin hostArtifactPinEntry) string {
+	h.t.Helper()
+	if len(pin.ProgramBundles) == 0 {
+		return ""
+	}
+	ctx := context.Background()
+	var stages []transport.HostProgramStage
+	for _, program := range h.manifestPrograms(pin) {
+		bundle, found := pin.ProgramBundles[program.Name]
+		if !found {
+			h.t.Fatalf("program_bundles does not include program %s", program.Name)
+		}
+		archive := h.downloadFrom(program.Repository, program.ReleaseTag, program.Asset, program.SHA256)
+		bundleContent := h.download(pin.ReleaseTag, bundle.Asset, bundle.SHA256)
+		archiveStage, err := h.client.StageHostArtifactProgram(
+			ctx, h.node, target, transport.HostArtifactKindProgram, program.Name, bytes.NewReader(archive), int64(len(archive)),
+		)
+		if err != nil {
+			h.t.Fatalf("archive staging failed for program %s: %v", program.Name, err)
+		}
+		bundleStage, err := h.client.StageHostArtifactProgram(
+			ctx, h.node, target, transport.HostArtifactKindProgramBundle, program.Name, bytes.NewReader(bundleContent), int64(len(bundleContent)),
+		)
+		if err != nil {
+			h.t.Fatalf("bundle staging failed for program %s: %v", program.Name, err)
+		}
+		stages = append(stages, transport.HostProgramStage{Name: program.Name, ArchiveStage: archiveStage, BundleStage: bundleStage})
+	}
+	programStages, err := transport.FormatProgramStages(stages)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return programStages
 }
 
 // stopInstall starts an install of fixtureCase over the installed priorCase.
@@ -483,7 +695,12 @@ func (h *hostArtifactTest) expectStopResult(target string, prior hostArtifactPin
 
 func (h *hostArtifactTest) download(releaseTag string, asset string, wantHash string) []byte {
 	h.t.Helper()
-	address := releaseBaseURL + hostArtifactRepository + "/releases/download/" + releaseTag + "/" + asset
+	return h.downloadFrom(hostArtifactRepository, releaseTag, asset, wantHash)
+}
+
+func (h *hostArtifactTest) downloadFrom(repository string, releaseTag string, asset string, wantHash string) []byte {
+	h.t.Helper()
+	address := releaseBaseURL + repository + "/releases/download/" + releaseTag + "/" + asset
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, address, nil)
 	if err != nil {
 		h.t.Fatal(err)

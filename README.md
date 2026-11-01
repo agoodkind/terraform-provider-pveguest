@@ -559,8 +559,16 @@ The controller downloads release assets from
 `https://github.com/<repository>/releases/download/<release_tag>/<asset>` into
 the cache that `pveguest_download` uses with `fetch = "controller"`. A download
 fails when its SHA-256 does not match the configured value. The archive must
-contain `manifest.json` with schema version 1. The manifest values for
+contain `manifest.json` with schema version 1 or 2. The manifest values for
 `repository`, `source_revision`, and `workspace` must equal the arguments.
+
+Schema version 2 accepts `programs`. Schema version 1 cannot list programs.
+Each program specifies a release archive from its own GitHub repository and
+release. Each program requires `name`, `repository`, `release_tag`, `asset`,
+`sha256`, `source_revision`, `signer_revision`, `member`, `member_sha256`,
+`path`, `mode`, `owner`, and `group`. The plan compares program files using
+`member_sha256`, `mode`, `owner`, and `group` under the same update conditions
+as other files.
 
 Read calls only `GET`. Read stores the installed archive SHA-256 and source
 revision, the target state, `observed_sha256`, and the live values of each
@@ -582,14 +590,19 @@ proposes an update in these cases:
 An apply calls `GET` before deciding whether to install. When the node already
 has the pinned archive installed and every file and owned directory matches
 the manifest, the apply does not install. Otherwise the apply downloads the
-attestation bundle, stages the archive and bundle in 96 KiB chunks, starts the
-`hostartifact` task, waits up to 10 minutes with `WaitTaskWithin`, and calls
-`GET` again. The apply fails when the node still reports a difference.
+attestation bundle, each program archive from its own release, and each
+program bundle from the configured release. The provider checks their
+SHA-256 values and stages the archive, bundle, program archives, and program
+bundles in 96 KiB chunks before starting the `hostartifact` task. The provider
+sends the stages with the install request, waits up to 10 minutes with
+`WaitTaskWithin`, and calls `GET` again. The apply fails when the node still
+reports a difference.
 
-The node runs `gh attestation verify` to verify the archive. The provider does
-not verify attestations. The node restores an interrupted transaction and
-repairs file and owned directory metadata. The node does not repair an
-inspect-only parent directory.
+The node runs `gh attestation verify` to verify the archive and each program
+archive. The node reads each program member. The provider does not verify
+attestations or read program members. The node restores an interrupted
+transaction and repairs file and owned directory metadata. The node does not
+repair an inspect-only parent directory.
 
 Destroy calls only `GET`. Destroy fails while the installed record lists
 files. To remove the files of a target, install an archive with an empty file
@@ -606,6 +619,7 @@ list before destroying the resource.
 | `bundle_asset` | string | yes | Release asset name of the attestation bundle. |
 | `bundle_sha256` | string | yes | SHA-256 of the attestation bundle. |
 | `source_revision` | string | yes | 40-character commit that built the archive. |
+| `program_bundles` | map of object | no | Each key selects a manifest program. Each object specifies `asset` and `sha256` for that program's attestation bundle in the release selected by the resource's `repository` and `release_tag`. A plan or apply fails when the keys differ from the manifest program names. |
 
 | Attribute | Meaning |
 | --- | --- |
@@ -926,7 +940,7 @@ make testacc \
 | `PVEGUEST_ACC_AUDIT_TOKEN_FILE` | Path of a file containing an API token with `Sys.KernelModules.Audit` and without `Sys.KernelModules.Modify`. The test skips when unset. |
 | `PVEGUEST_ACC_SMTP2GO_API_KEY_FILE` | File containing the SMTP2GO API key for `TestAccMailRelayImport`. The test fails if `TF_ACC` is set and this variable is missing. |
 | `PVEGUEST_ACC_HOST_SSH` | `TestAccHostArtifact` uses this ssh destination to run a root shell on `PVEGUEST_ACC_NODE`. The test skips when unset. |
-| `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | This JSON file maps the fixture cases `valid-v1`, `valid-v2`, `other-target`, `recovery-v1`, and `recovery-v2` to the pin JSON of their releases in `agoodkind/configs`. The test skips when unset. |
+| `PVEGUEST_ACC_HOST_ARTIFACT_PINS` | This JSON file maps the fixture cases `valid-v1`, `valid-v2`, `other-target`, `recovery-v1`, `recovery-v2`, `program-valid`, `program-wrong-source`, `program-wrong-signer`, `program-wrong-archive`, `program-wrong-member`, and `program-collision` to the pin JSON of their releases in `agoodkind/configs`. Each case pin JSON may contain `program_bundles`, an object that maps program names to objects with `asset` and `sha256`. The test skips when unset. |
 
 `make testacc` sets `TF_ACC=1`, sets `TF_ACC_TERRAFORM_PATH` to the `tofu`
 binary, and sets `TF_ACC_PROVIDER_HOST` and `TF_ACC_PROVIDER_NAMESPACE` to the
