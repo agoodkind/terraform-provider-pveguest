@@ -292,6 +292,31 @@ that is not a link, from state. Destroy deletes the link.
 | `path` | string | yes | Absolute path of the link. A change replaces the resource. |
 | `target` | string | yes | Specify the symbolic link's target path. The target does not need to exist. |
 
+## pveguest_file_absent
+
+Create and Update delete a regular file or symbolic link at `path`, then
+verify that the path does not exist. Create and Update return an error for
+directories and other file types, including sockets, FIFOs, and devices, and
+do not delete them.
+
+Read uses `stat` without following symbolic links. Read removes the resource
+from state when the path exists, including when the path is a dangling
+symbolic link or a directory. The next plan proposes creating the resource
+again. When the path does not exist, Read leaves the state entry unchanged.
+
+Destroy removes the resource from state and does not change the guest.
+
+The resource accepts this argument:
+
+| Argument | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `path` | string | yes | The clean absolute path identifies the file or symbolic link to delete. Changing `path` replaces the resource. |
+
+Import uses the same ID format as `pveguest_file`:
+`<node>/<vmid>/<kind>/<path>`. An example ID is
+`suburban/224/lxc//etc/ssh/sshd_config.d/old.conf`.
+Import succeeds only when the path does not exist.
+
 ## pveguest_apt_packages
 
 A set of installed apt packages. Read runs `dpkg-query --show` and stores the
@@ -345,7 +370,8 @@ state when its unit file does not exist.
 Create and Update run `systemctl daemon-reload` and reconcile the declared
 unit state. When `restart_on` changes and the unit remains enabled, the
 provider runs `systemctl reenable` to rebuild its installation links before
-reconciling its active state. Create fails when the unit file does not exist.
+reconciling its active state. Create fails when the unit file does not exist
+unless `allow_missing` or `masked` is `true`.
 When `remove_on_delete` is `true`, Destroy stops an active unit, disables an enabled unit, and reads its state again; a missing unit counts as removed. Destroy fails and keeps the resource in OpenTofu state if a guest command fails or the unit remains active or enabled; when `remove_on_delete` is `false` or unset, Destroy removes only the resource from state without running a guest command.
 
 | Argument | Type | Required | Meaning |
@@ -355,6 +381,40 @@ When `remove_on_delete` is `true`, Destroy stops an active unit, disables an ena
 | `active` | bool | yes | Whether the unit is active. |
 | `restart_on` | map of string | no | A changed map restarts an active unit during apply. |
 | `remove_on_delete` | bool | no | When `true`, Destroy stops the unit if active and disables it if enabled. Defaults to `false`, which removes only the resource from OpenTofu state. |
+| `allow_missing` | bool | no | Whether an absent unit satisfies the resource. Defaults to `false`. |
+| `masked` | bool | no | Whether the provider masks the unit. Defaults to `false`. |
+| `reset_failed` | bool | no | Whether apply clears the unit's failed state. Defaults to `false`. |
+
+When `allow_missing` is `true`, `enabled` and `active` must both be `false`.
+An absent unit satisfies the resource without a systemctl change during
+apply. Read keeps the resource in state when the unit does not exist.
+
+When `masked` is `true`, `enabled` and `active` must both be `false`.
+Apply stops an active unit, runs `systemctl mask --`, and verifies that
+`systemctl is-enabled` prints `masked`. Masking works when the unit file does
+not exist. Changing `masked` from `true` to `false` runs
+`systemctl unmask --`.
+
+When the resource declares `masked = true` and the unit is no longer masked,
+Read sets `masked` to `false` in state, which produces a planned change.
+Read does not report a masked unit when the resource leaves `masked` as
+`false`.
+
+`systemctl mask` fails when a regular unit file exists in
+`/etc/systemd/system`. Masking requires either an absent unit file or a unit
+file in another directory, such as `/usr/lib/systemd/system`.
+
+When `reset_failed` is `true` and the unit reports the active state `failed`,
+apply runs `systemctl reset-failed --` and verifies that the unit no longer
+reports `failed`. When the resource declares `reset_failed = true` and the
+unit reports `failed`, Read sets `reset_failed` to `false` in state, which
+produces a planned change. `reset_failed` does not restrict `enabled` or
+`active`.
+
+The provider validates argument combinations during planning. A diagnostic
+identifies the attribute when a combination is invalid. When
+`allow_missing`, `masked`, and `reset_failed` are unset, plans, state, and
+systemd commands remain unchanged.
 
 The intended `restart_on` value is the `write_id` of each file that the unit
 reads. The `sha256` of a file is the same before a hand edit and after the
@@ -370,7 +430,8 @@ Import IDs use the format `<node>/<vmid>/<kind>/<name>`, such as
 The provider rejects other ID shapes and shows the required format; it checks
 `kind` and `name` against the argument rules. Import fails if the unit file does
 not exist in the guest. Import sets `remove_on_delete` to `false`, and Read sets
-`enabled` and `active` from the guest. The first apply after import enables,
+`enabled` and `active` from the guest. Import sets `allow_missing`, `masked`,
+and `reset_failed` to `false`. The first apply after import enables,
 disables, starts, or stops the unit as the configuration requires. During that
 apply, the provider skips the restart and `systemctl reenable` only if the prior
 `restart_on` is null and every planned `restart_on` value is `import-` followed
