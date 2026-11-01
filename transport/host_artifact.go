@@ -152,11 +152,10 @@ type HostArtifactState struct {
 }
 
 type hostArtifactStageBody struct {
-	Kind   string `json:"kind"`
-	Offset int64  `json:"offset"`
-	Data   string `json:"data"`
-	Stage  string `json:"stage,omitempty"`
-	// Program must specify the program name for program and program-bundle stages.
+	Kind    string `json:"kind"`
+	Offset  int64  `json:"offset"`
+	Data    string `json:"data"`
+	Stage   string `json:"stage,omitempty"`
 	Program string `json:"program,omitempty"`
 }
 

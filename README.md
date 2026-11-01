@@ -634,10 +634,10 @@ list before destroying the resource.
 
 Import IDs use the format `<node>:<workspace>`, such as
 `suburban:suburban/mwan`. Import calls only `GET` and does not write to the
-node. The first apply after import installs the archive unless the node
-already has it installed with matching files.
-
-After `tofu import` of a `pveguest_host_artifact` target, OpenTofu plans an in-place update to `program_bundles` when the configuration includes that argument. If the installed target already matches the configuration, the apply updates only OpenTofu state and the next plan is empty.
+node. When the configuration includes `program_bundles`, OpenTofu plans an
+in-place state update after import. Apply installs the archive only when the
+target differs from the configuration; otherwise, it completes the planned
+state update without writing to the node, and the next plan is empty.
 
 ## pveguest_host_secret
 
