@@ -612,10 +612,13 @@ func (r *systemdUnitResource) unmaskUnit(
 	name string,
 	status unitStatus,
 ) (unitStatus, error) {
-	if !status.Found || status.FileState != unitFileMasked {
+	if !status.Found || (status.FileState != unitFileMasked && status.FileState != unitFileMaskedRuntime) {
 		return status, nil
 	}
 	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("unmask", "--", name)); err != nil {
+		return unitStatus{}, err
+	}
+	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("--runtime", "unmask", "--", name)); err != nil {
 		return unitStatus{}, err
 	}
 
@@ -623,10 +626,10 @@ func (r *systemdUnitResource) unmaskUnit(
 	if err != nil {
 		return unitStatus{}, err
 	}
-	if after.Found && after.FileState == unitFileMasked {
+	if after.Found && (after.FileState == unitFileMasked || after.FileState == unitFileMaskedRuntime) {
 		return unitStatus{}, fmt.Errorf(
-			"on guest %s, unit %s still reports unit file state masked after systemctl unmask",
-			guest, name,
+			"on guest %s, unit %s still reports unit file state %s after persistent and runtime unmask commands",
+			guest, name, after.FileState,
 		)
 	}
 	return after, nil

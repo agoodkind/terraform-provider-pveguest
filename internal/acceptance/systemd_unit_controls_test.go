@@ -54,6 +54,7 @@ func (g *testGuest) useAbsentControlsUnit() {
 func (g *testGuest) removeControlsUnit() {
 	g.t.Helper()
 	g.run(nil, "systemctl", "unmask", "--", controlsService)
+	g.run(nil, "systemctl", "--runtime", "unmask", "--", controlsService)
 	g.run(nil, "systemctl", "disable", "--", controlsService)
 	g.run(nil, "systemctl", "stop", "--", controlsService)
 	g.run(nil, "systemctl", "reset-failed", "--", controlsService)
@@ -200,6 +201,33 @@ func testControlsMasked(t *testing.T) {
 			{
 				Config:           guest.controlsConfig("masked = false"),
 				ConfigPlanChecks: expectAction(controlsUnitAddress, plancheck.ResourceActionUpdate),
+				Check:            guest.expectControlsUnit("disabled", "inactive"),
+			},
+			{
+				Config: declared,
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(controlsUnitAddress, "masked", "true"),
+					guest.expectControlsUnit("masked", "inactive"),
+				),
+			},
+			{
+				PreConfig: func() {
+					guest.mustRun("systemctl", "unmask", "--", controlsService)
+					guest.mustRun("systemctl", "--runtime", "mask", "--", controlsService)
+					if got := guest.systemctlState("is-enabled", controlsService); got != "masked-runtime" {
+						t.Fatalf("%s has unit file state %s after runtime masking; it should be masked-runtime", controlsService, got)
+					}
+				},
+				Config:           guest.controlsConfig("masked = false"),
+				ConfigPlanChecks: expectAction(controlsUnitAddress, plancheck.ResourceActionUpdate),
+				Check: resource.ComposeAggregateTestCheckFunc(
+					resource.TestCheckResourceAttr(controlsUnitAddress, "masked", "false"),
+					guest.expectControlsUnit("disabled", "inactive"),
+				),
+			},
+			{
+				Config:           guest.controlsConfig("masked = false"),
+				ConfigPlanChecks: expectAction(controlsUnitAddress, plancheck.ResourceActionNoop),
 				Check:            guest.expectControlsUnit("disabled", "inactive"),
 			},
 			{
