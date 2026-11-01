@@ -280,7 +280,9 @@ response fails the apply with an error that directs the operator to set
 | Attribute | Meaning |
 | --- | --- |
 | `file_sha256` | SHA-256 hash of the installed file in the guest. |
-| `write_id` | Random identifier that changes each time an apply writes the file, mode, owner, or group. |
+| `write_id` | Random identifier that changes each time an apply writes the file, mode, owner, or group. Import sets `write_id` to `import-` followed by the first 16 lowercase hexadecimal characters of the guest file SHA-256 hash. |
+
+Import IDs for `pveguest_download` use the format `<node>/<vmid>/<kind>/<absolute path>`, such as `suburban/224/lxc//usr/local/bin/example`. If the file does not exist, import fails with an error that includes the path. Import sets `write_id` to `import-` followed by the first 16 lowercase hexadecimal characters of the guest file SHA-256 hash. The first plan shows an in-place update of `url` and `sha256`. The first apply compares the guest file hash with `sha256` for a direct download. With `archive_member`, the provider verifies the archive hash and compares the guest file hash with the member hash. When the hashes and configured `mode`, `owner`, and `group` match, the apply retains `write_id` and does not rewrite the file or download a direct object. When the hashes match but `mode`, `owner`, or `group` differ, the apply updates those attributes and assigns a new random `write_id`. When the hashes differ, the apply downloads and rewrites the file and assigns a new random `write_id`. A `pveguest_systemd_unit` that uses this `write_id` in `restart_on` skips its restart when the apply retains the imported value and restarts when the value changes. The first successful apply deletes the private state key `imported`.
 
 ## pveguest_link
 
@@ -774,6 +776,8 @@ items at the end:
 `TestAccDownload` and `TestAccDownloadHashMismatch` download
 `https://www.rfc-editor.org/rfc/rfc1149.txt`. The test guest needs network
 access to `www.rfc-editor.org` over HTTPS.
+
+`TestAccDownloadImport` writes `/root/pveguest-acc/import.conf` and installs `pveguest-acc-import.service` in `/etc/systemd/system`. It starts the unit and serves its objects from a local HTTPS server in the test process. The provider block sets `controller_ca_file` to the server certificate, and the environment sets `XDG_CACHE_HOME` to a temporary directory. Each subtest removes every item it creates.
 
 `TestAccDownloadControllerTransfer`, `TestAccDownloadArchiveMember`, and
 `TestAccDebPackages` serve their objects from a local HTTPS server in the test

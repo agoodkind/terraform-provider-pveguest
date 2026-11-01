@@ -53,6 +53,12 @@ const (
 	headerDownloadFileMode = "0600"
 	nullDevicePath         = "/dev/null"
 	redirectWriteOut       = "%{redirect_url}"
+
+	downloadImportSummary       = "Cannot import pveguest_download"
+	downloadImportMissingFormat = "on guest %s, the file %s does not exist"
+
+	// ImportState sets this private state key; the first successful Update deletes it.
+	downloadImportedEntry = "imported"
 )
 
 var (
@@ -259,7 +265,10 @@ func (r *downloadResource) Schema(_ context.Context, _ resource.SchemaRequest, r
 			"write_id": schema.StringAttribute{
 				Computed: true,
 				Description: "Random identifier that changes each time an apply writes the file, mode, owner, or group. " +
-					"A rewrite after drift produces the same file_sha256 and a new write_id.",
+					"A rewrite after drift produces the same file_sha256 and a new write_id. " +
+					"Import sets write_id to import- followed by the first 16 lowercase hexadecimal characters of the guest file hash. " +
+					"When the guest file hash matches the desired file hash and mode, owner, and group match the configuration, " +
+					"the first apply retains this value.",
 			},
 		})),
 	}
@@ -298,6 +307,44 @@ func withRequestHeaderAttributes(attributes map[string]schema.Attribute) map[str
 
 func (r *downloadResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
 	r.data = providerDataFrom(req, resp)
+}
+
+// ImportState records the guest and path from the import ID and sets write_id from the guest file hash without changing the guest.
+func (r *downloadResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+	parsed, isValid := splitGuestImportID(req.ID)
+	if !isValid {
+		resp.Diagnostics.AddError(downloadImportSummary, importIDError(req.ID, fileImportFormat))
+		return
+	}
+	filePath := parsed.Rest
+
+	var schemaResp resource.SchemaResponse
+	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
+	attributes := schemaResp.Schema.Attributes
+	resp.Diagnostics.Append(validateImportedString(ctx, downloadImportSummary, attributes, "kind", parsed.Kind)...)
+	resp.Diagnostics.Append(validateImportedString(ctx, downloadImportSummary, attributes, "path", filePath)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	guest := transport.Guest{Node: parsed.Node, VMID: parsed.VMID, Kind: transport.Kind(parsed.Kind)}
+	fileHash, found, err := readGuestSHA256(ctx, r.data.client, guest, filePath)
+	if err != nil {
+		resp.Diagnostics.AddError(downloadImportSummary, err.Error())
+		return
+	}
+	if !found {
+		resp.Diagnostics.AddError(downloadImportSummary, fmt.Sprintf(downloadImportMissingFormat, guest, filePath))
+		return
+	}
+
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("node"), parsed.Node)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("vmid"), parsed.VMID)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("kind"), parsed.Kind)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("path"), filePath)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("file_sha256"), fileHash)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("write_id"), importedWriteID(fileHash))...)
+	resp.Diagnostics.Append(resp.Private.SetKey(ctx, downloadImportedEntry, importedMarker)...)
 }
 
 func (r *downloadResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
@@ -422,7 +469,14 @@ func (r *downloadResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 
+	imported, diagnostics := req.Private.GetKey(ctx, downloadImportedEntry)
+	resp.Diagnostics.Append(diagnostics...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
+	keepWriteID := false
 	switch {
 	case plan.FileSHA256.IsUnknown():
 		headers, diagnostics := requestHeadersFrom(ctx, req.Config)
@@ -430,12 +484,13 @@ func (r *downloadResource) Update(ctx context.Context, req resource.UpdateReques
 		if resp.Diagnostics.HasError() {
 			return
 		}
-		fileHash, err := r.install(ctx, guest, plan, headers)
+		outcome, err := r.applySource(ctx, guest, plan, state, headers, imported != nil)
 		if err != nil {
 			resp.Diagnostics.AddError("Download file", err.Error())
 			return
 		}
-		plan.FileSHA256 = types.StringValue(fileHash)
+		plan.FileSHA256 = types.StringValue(outcome.fileHash)
+		keepWriteID = outcome.keepWriteID
 	case downloadAttributesChanged(plan, state):
 		// Only mode, owner, or group differ. The file in the guest already has
 		// the expected hash.
@@ -449,12 +504,16 @@ func (r *downloadResource) Update(ctx context.Context, req resource.UpdateReques
 	}
 
 	if plan.WriteID.IsUnknown() {
-		writeID, err := newWriteID()
-		if err != nil {
-			resp.Diagnostics.AddError("Download file", err.Error())
-			return
+		if keepWriteID {
+			plan.WriteID = state.WriteID
+		} else {
+			writeID, err := newWriteID()
+			if err != nil {
+				resp.Diagnostics.AddError("Download file", err.Error())
+				return
+			}
+			plan.WriteID = types.StringValue(writeID)
 		}
-		plan.WriteID = types.StringValue(writeID)
 	}
 	appliedHash, err := encodeAppliedHash(plan.FileSHA256.ValueString())
 	if err != nil {
@@ -462,7 +521,135 @@ func (r *downloadResource) Update(ctx context.Context, req resource.UpdateReques
 		return
 	}
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, appliedHashEntry, appliedHash)...)
+	if imported != nil {
+		resp.Diagnostics.Append(resp.Private.SetKey(ctx, downloadImportedEntry, nil)...)
+	}
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
+}
+
+// sourceOutcome is the result of the source step of an Update.
+type sourceOutcome struct {
+	fileHash    string
+	keepWriteID bool
+}
+
+// applySource installs the file from the source, except for the first apply
+// after an import with a guest file that already matches.
+func (r *downloadResource) applySource(
+	ctx context.Context,
+	guest transport.Guest,
+	plan downloadModel,
+	state downloadModel,
+	headers requestHeaders,
+	isImported bool,
+) (sourceOutcome, error) {
+	if isImported {
+		// After import, compare the guest and desired file hashes. Keep the imported
+		// write_id only if the hashes and configured mode, owner, and group match.
+		guestHash, matches, err := r.guestMatchesConfiguration(ctx, guest, plan, headers)
+		if err != nil {
+			return sourceOutcome{}, err
+		}
+		if matches {
+			keepWriteID, err := r.adoptGuestFile(ctx, guest, plan, state)
+			if err != nil {
+				return sourceOutcome{}, err
+			}
+			return sourceOutcome{fileHash: guestHash, keepWriteID: keepWriteID}, nil
+		}
+	}
+	fileHash, err := r.install(ctx, guest, plan, headers)
+	if err != nil {
+		return sourceOutcome{}, err
+	}
+	return sourceOutcome{fileHash: fileHash}, nil
+}
+
+// guestMatchesConfiguration returns the guest file hash and whether it matches the
+// desired hash. A missing guest file does not match.
+func (r *downloadResource) guestMatchesConfiguration(
+	ctx context.Context,
+	guest transport.Guest,
+	plan downloadModel,
+	headers requestHeaders,
+) (string, bool, error) {
+	guestHash, found, err := readGuestSHA256(ctx, r.data.client, guest, plan.Path.ValueString())
+	if err != nil {
+		return "", false, err
+	}
+	if !found {
+		return "", false, nil
+	}
+	desiredHash, err := r.desiredFileHash(ctx, guest, plan, headers)
+	if err != nil {
+		return "", false, err
+	}
+	return guestHash, guestHash == desiredHash, nil
+}
+
+// desiredFileHash returns sha256 for a direct download. With archive_member, it
+// verifies the archive and returns the member hash.
+func (r *downloadResource) desiredFileHash(
+	ctx context.Context,
+	guest transport.Guest,
+	plan downloadModel,
+	headers requestHeaders,
+) (string, error) {
+	if plan.ArchiveMember.IsNull() {
+		return plan.SHA256.ValueString(), nil
+	}
+	if plan.Fetch.ValueString() != fetchController {
+		return r.guestMemberHash(ctx, guest, plan, headers)
+	}
+	payload, err := fetchControllerPayload(
+		ctx, r.data.controllerCAFile, plan.URL.ValueString(), plan.SHA256.ValueString(),
+		plan.ArchiveMember.ValueString(), headers,
+	)
+	if err != nil {
+		return "", headers.redact(err)
+	}
+	return payload.SHA256, nil
+}
+
+// guestMemberHash uses temporary files to compute the archive member hash and
+// deletes them without writing path.
+func (r *downloadResource) guestMemberHash(
+	ctx context.Context,
+	guest transport.Guest,
+	plan downloadModel,
+	headers requestHeaders,
+) (string, error) {
+	finalTemporaryPath, err := temporaryPathFor(plan.Path.ValueString())
+	if err != nil {
+		return "", err
+	}
+	intermediatePath, err := temporaryPathFor(plan.Path.ValueString())
+	if err != nil {
+		return "", err
+	}
+	defer r.removeTemporaryFile(ctx, guest, finalTemporaryPath)
+	defer r.removeTemporaryFile(ctx, guest, intermediatePath)
+
+	memberHash, err := r.stageFromGuest(ctx, guest, plan, headers, intermediatePath, finalTemporaryPath)
+	if err != nil {
+		return "", headers.redact(err)
+	}
+	return memberHash, nil
+}
+
+// adoptGuestFile applies mode, owner, and group changes and reports whether it
+// retained the imported write_id.
+func (r *downloadResource) adoptGuestFile(
+	ctx context.Context,
+	guest transport.Guest,
+	plan downloadModel,
+	state downloadModel,
+) (bool, error) {
+	if !downloadAttributesChanged(plan, state) {
+		return isImportedWriteID(state.WriteID.ValueString()), nil
+	}
+	err := setGuestAttributes(ctx, r.data.client, guest, plan.Mode, plan.Owner, plan.Group, plan.Path.ValueString())
+	return false, err
 }
 
 func (r *downloadResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
