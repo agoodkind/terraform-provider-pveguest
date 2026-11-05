@@ -85,6 +85,9 @@ func FormatProgramStages(stages []HostProgramStage) (string, error) {
 
 // HostArtifactInstalled is the installed record of a target.
 type HostArtifactInstalled struct {
+	Workspace      string                         `json:"workspace,omitempty"`
+	Node           string                         `json:"node,omitempty"`
+	Environment    string                         `json:"environment,omitempty"`
 	ReleaseTag     string                         `json:"release_tag"`
 	Asset          string                         `json:"asset"`
 	SHA256         string                         `json:"sha256"`
@@ -338,10 +341,45 @@ func (client *Client) GetHostArtifact(ctx context.Context, node string, target s
 	if err != nil {
 		return HostArtifactState{}, err
 	}
+	state, err := DecodeHostArtifactState(data)
+	if err != nil {
+		var decodeError *hostArtifactDecodeError
+		if errors.As(err, &decodeError) {
+			if decodeError.key == "" {
+				slog.ErrorContext(ctx, decodeError.message, "node", node, "target", target, "err", decodeError.cause)
+			} else {
+				slog.ErrorContext(ctx, decodeError.message, "node", node, "target", target, decodeError.key, decodeError.value, "err", decodeError.cause)
+			}
+		}
+		return HostArtifactState{}, fmt.Errorf("node %q target %s: %w", node, target, err)
+	}
+	return state, nil
+}
+
+type hostArtifactDecodeError struct {
+	prefix  string
+	message string
+	key     string
+	value   string
+	cause   error
+}
+
+func (err *hostArtifactDecodeError) Error() string {
+	return err.prefix + ": " + err.cause.Error()
+}
+
+func (err *hostArtifactDecodeError) Unwrap() error {
+	return err.cause
+}
+
+// DecodeHostArtifactState decodes the data object from a host artifact GET response.
+// Older responses may omit the installed workspace, node, and environment.
+func DecodeHostArtifactState(data []byte) (HostArtifactState, error) {
 	var parsed hostArtifactStateData
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		slog.ErrorContext(ctx, "host artifact response is malformed", "node", node, "target", target, "err", err)
-		return HostArtifactState{}, fmt.Errorf("node %q target %s: parse host artifact response: %w", node, target, err)
+		return HostArtifactState{}, &hostArtifactDecodeError{
+			prefix: "parse host artifact response", message: "host artifact response is malformed", cause: err,
+		}
 	}
 	state := HostArtifactState{
 		Workspace:      parsed.Workspace,
@@ -357,24 +395,30 @@ func (client *Client) GetHostArtifact(ctx context.Context, node string, target s
 	for _, entry := range parsed.Files {
 		file, err := entry.convert()
 		if err != nil {
-			slog.ErrorContext(ctx, "host artifact file entry is malformed", "node", node, "target", target, "path", entry.Path, "err", err)
-			return HostArtifactState{}, fmt.Errorf("node %q target %s: file %s: %w", node, target, entry.Path, err)
+			return HostArtifactState{}, &hostArtifactDecodeError{
+				prefix: "file " + entry.Path, message: "host artifact file entry is malformed",
+				key: "path", value: entry.Path, cause: err,
+			}
 		}
 		state.Files = append(state.Files, file)
 	}
 	for _, entry := range parsed.Directories {
 		directory, err := entry.convert()
 		if err != nil {
-			slog.ErrorContext(ctx, "host artifact directory entry is malformed", "node", node, "target", target, "path", entry.Path, "err", err)
-			return HostArtifactState{}, fmt.Errorf("node %q target %s: directory %s: %w", node, target, entry.Path, err)
+			return HostArtifactState{}, &hostArtifactDecodeError{
+				prefix: "directory " + entry.Path, message: "host artifact directory entry is malformed",
+				key: "path", value: entry.Path, cause: err,
+			}
 		}
 		state.Directories = append(state.Directories, directory)
 	}
 	for _, entry := range parsed.Secrets {
 		secret, err := entry.convert()
 		if err != nil {
-			slog.ErrorContext(ctx, "host secret entry is malformed", "node", node, "target", target, "field", entry.Field, "err", err)
-			return HostArtifactState{}, fmt.Errorf("node %q target %s: secret field %s: %w", node, target, entry.Field, err)
+			return HostArtifactState{}, &hostArtifactDecodeError{
+				prefix: "secret field " + entry.Field, message: "host secret entry is malformed",
+				key: "field", value: entry.Field, cause: err,
+			}
 		}
 		state.Secrets = append(state.Secrets, secret)
 	}
