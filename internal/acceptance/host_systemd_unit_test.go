@@ -33,7 +33,7 @@ type hostUnitTest struct {
 // it checks that the unrelated fixture target and its consumer unit stay
 // unchanged.
 func TestAccHostSystemdUnit(t *testing.T) {
-	artifact, unrelated := prepareHostArtifactFixtures(t, caseUnitV1, caseUnitV2)
+	artifact, unrelated := prepareSelectedFixtures(t, caseUnitV1, caseUnitV2)
 	test := &hostUnitTest{hostSecretTest: &hostSecretTest{hostArtifactTest: artifact}, unrelated: unrelated}
 	t.Cleanup(test.removeFixtureUnit)
 	test.removeFixtureUnit()
