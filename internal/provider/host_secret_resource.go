@@ -155,9 +155,17 @@ func (r *hostSecretResource) ImportState(ctx context.Context, req resource.Impor
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-// splitHostSecretImportID splits at the first and the last separator. A workspace
-// selector can contain the separator, and a node or a field cannot.
 func splitHostSecretImportID(id string) (string, string, string, bool) {
+	node, workspace, field, isValid := splitHostImportID(id)
+	if !isValid || !hostSecretFieldPattern.MatchString(field) {
+		return "", "", "", false
+	}
+	return node, workspace, field, true
+}
+
+// splitHostImportID splits at the first and the last separator. A workspace
+// selector can contain the separator, and a node or the last part cannot.
+func splitHostImportID(id string) (string, string, string, bool) {
 	node, rest, found := strings.Cut(id, hostSecretImportSep)
 	if !found {
 		return "", "", "", false
@@ -167,11 +175,11 @@ func splitHostSecretImportID(id string) (string, string, string, bool) {
 		return "", "", "", false
 	}
 	workspace := rest[:separator]
-	field := rest[separator+len(hostSecretImportSep):]
-	if node == "" || workspace == "" || !hostSecretFieldPattern.MatchString(field) {
+	last := rest[separator+len(hostSecretImportSep):]
+	if node == "" || workspace == "" || last == "" {
 		return "", "", "", false
 	}
-	return node, workspace, field, true
+	return node, workspace, last, true
 }
 
 func (r *hostSecretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
