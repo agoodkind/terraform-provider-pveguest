@@ -42,51 +42,6 @@ var (
 	importedMarker = []byte(`true`)
 )
 
-type unitFileState string
-
-const (
-	unitFileEnabled        unitFileState = "enabled"
-	unitFileEnabledRuntime unitFileState = "enabled-runtime"
-	unitFileStatic         unitFileState = "static"
-	unitFileAlias          unitFileState = "alias"
-	unitFileIndirect       unitFileState = "indirect"
-	unitFileGenerated      unitFileState = "generated"
-	unitFileTransient      unitFileState = "transient"
-	unitFileMasked         unitFileState = "masked"
-	unitFileMaskedRuntime  unitFileState = "masked-runtime"
-
-	// systemd 253 and later print this state when the unit file does not
-	// exist. Earlier versions print an error message.
-	unitFileNotFound unitFileState = "not-found"
-)
-
-type unitActiveState string
-
-const (
-	unitActive     unitActiveState = "active"
-	unitActivating unitActiveState = "activating"
-	unitReloading  unitActiveState = "reloading"
-	unitInactive   unitActiveState = "inactive"
-	unitFailed     unitActiveState = "failed"
-)
-
-// enablement classifies the output of systemctl is-enabled.
-type enablement int
-
-const (
-	enablementDisabled enablement = iota
-	enablementEnabled
-	// systemd reports a fixed unit as static, alias, indirect, generated, or
-	// transient. A fixed unit satisfies both values of enabled.
-	enablementFixed
-)
-
-type unitStatus struct {
-	Found     bool
-	FileState unitFileState
-	Active    unitActiveState
-}
-
 type systemdUnitResource struct {
 	data *providerData
 }
@@ -350,16 +305,7 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 		return
 	}
 
-	switch classifyEnabledState(status.FileState) {
-	case enablementEnabled:
-		state.Enabled = types.BoolValue(true)
-	case enablementDisabled:
-		state.Enabled = types.BoolValue(false)
-	case enablementFixed:
-		// A fixed unit satisfies the declared value, so Read writes the
-		// enabled value to state only for enabled and disabled units.
-	}
-	state.Active = types.BoolValue(isActiveState(status.Active))
+	state.Enabled, state.Active = observedUnitValues(status, state.Enabled)
 	if state.RemoveOnDelete.IsNull() {
 		state.RemoveOnDelete = types.BoolValue(false)
 	}
@@ -425,57 +371,24 @@ func (r *systemdUnitResource) Delete(ctx context.Context, req resource.DeleteReq
 	if !state.RemoveOnDelete.ValueBool() {
 		return
 	}
-	if err := r.remove(ctx, state); err != nil {
+	target := r.unitTarget(state)
+	if err := removeUnit(ctx, target, state.Name.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Delete systemd unit", err.Error())
 	}
 }
 
-func (r *systemdUnitResource) remove(ctx context.Context, state systemdUnitModel) error {
-	guest := guestOf(state.Node, state.VMID, state.Kind)
-	name := state.Name.ValueString()
-
-	status, err := readUnitStatus(ctx, r.data.client, guest, name)
-	if err != nil {
-		return err
-	}
-	if !status.Found {
-		return nil
-	}
-
-	if !isStoppedState(status.Active) {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("stop", "--", name)); err != nil {
-			return err
-		}
-	}
-	if classifyEnabledState(status.FileState) == enablementEnabled {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
-			return err
-		}
-	}
-
-	after, err := readUnitStatus(ctx, r.data.client, guest, name)
-	if err != nil {
-		return err
-	}
-	if !after.Found {
-		return nil
-	}
-	if !isStoppedState(after.Active) {
-		return fmt.Errorf("on guest %s, unit %s has active state %s after stop; the active state must be inactive or failed", guest, name, after.Active)
-	}
-	if classifyEnabledState(after.FileState) == enablementEnabled {
-		return fmt.Errorf("on guest %s, unit %s has unit file state %s after disable; the unit file state must not be enabled", guest, name, after.FileState)
-	}
-	return nil
+func (r *systemdUnitResource) unitTarget(model systemdUnitModel) guestUnitTarget {
+	return guestUnitTarget{client: r.data.client, guest: guestOf(model.Node, model.VMID, model.Kind)}
 }
 
 func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, restart bool, unmask bool) error {
-	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
+	target := r.unitTarget(plan)
+	guest := target.guest
 	name := plan.Name.ValueString()
 
 	// A unit file written earlier in the same apply is unknown to the
 	// manager until this reload.
-	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("daemon-reload")); err != nil {
+	if err := target.runUnitAction(ctx, unitActionDaemonReload, name); err != nil {
 		return err
 	}
 	status, err := readUnitStatus(ctx, r.data.client, guest, name)
@@ -510,50 +423,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	if err != nil {
 		return err
 	}
-	return r.reconcile(ctx, plan, guest, name, status, restart)
-}
-
-func (r *systemdUnitResource) reconcile(
-	ctx context.Context,
-	plan systemdUnitModel,
-	guest transport.Guest,
-	name string,
-	status unitStatus,
-	restart bool,
-) error {
-	current := classifyEnabledState(status.FileState)
-	wantEnabled := plan.Enabled.ValueBool()
-	if current == enablementDisabled && wantEnabled {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("enable", "--", name)); err != nil {
-			return err
-		}
-	}
-	// Rebuild installation links after dependency changes.
-	if current == enablementEnabled && wantEnabled && restart {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("reenable", "--", name)); err != nil {
-			return err
-		}
-	}
-	if current == enablementEnabled && !wantEnabled {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
-			return err
-		}
-	}
-
-	isActive := isActiveState(status.Active)
-	wantActive := plan.Active.ValueBool()
-	var action string
-	switch {
-	case wantActive && !isActive:
-		action = "start"
-	case wantActive && restart:
-		action = "restart"
-	case !wantActive && isActive:
-		action = "stop"
-	default:
-		return nil
-	}
-	return runChecked(ctx, r.data.client, guest, systemctlCommand(action, "--", name))
+	return reconcileUnit(ctx, target, name, status, plan.Enabled.ValueBool(), plan.Active.ValueBool(), restart)
 }
 
 // mask disables and stops the unit when necessary, masks it, verifies that
@@ -710,30 +580,25 @@ func reportsMissingUnit(stderr string) bool {
 	return false
 }
 
-func classifyEnabledState(state unitFileState) enablement {
-	switch state {
-	case unitFileEnabled, unitFileEnabledRuntime:
-		return enablementEnabled
-	case unitFileStatic, unitFileAlias, unitFileIndirect, unitFileGenerated, unitFileTransient:
-		return enablementFixed
-	case unitFileNotFound, unitFileMasked, unitFileMaskedRuntime:
-		return enablementDisabled
-	default:
-		return enablementDisabled
-	}
+// guestUnitTarget runs systemctl inside a guest through the guest agent or
+// the container exec API.
+type guestUnitTarget struct {
+	client *transport.Client
+	guest  transport.Guest
 }
 
-func isStoppedState(state unitActiveState) bool {
-	return state == unitInactive || state == unitFailed
+func (target guestUnitTarget) location() string {
+	return "guest " + target.guest.String()
 }
 
-func isActiveState(state unitActiveState) bool {
-	switch state {
-	case unitActive, unitActivating, unitReloading:
-		return true
-	case unitInactive, unitFailed:
-		return false
-	default:
-		return false
+func (target guestUnitTarget) readUnit(ctx context.Context, name string) (unitStatus, error) {
+	return readUnitStatus(ctx, target.client, target.guest, name)
+}
+
+func (target guestUnitTarget) runUnitAction(ctx context.Context, action unitAction, name string) error {
+	command := systemctlCommand(string(action), "--", name)
+	if action == unitActionDaemonReload {
+		command = systemctlCommand(string(action))
 	}
+	return runChecked(ctx, target.client, target.guest, command)
 }
