@@ -131,7 +131,9 @@ type hostArtifactTest struct {
 
 func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 	t.Helper()
-	return newHostArtifactTestFor(t, defaultFixtureWorkspaces())
+	test := newHostArtifactTestFor(t, defaultFixtureWorkspaces())
+	test.audit, test.auditPrincipal = newHostAuditClient(t, test.node, test.nodeConfig)
+	return test
 }
 
 // workspaces maps each fixture case to the workspace of its asset.
@@ -149,12 +151,9 @@ func newHostArtifactTestFor(t *testing.T, workspaces map[string]string) *hostArt
 	if err != nil {
 		t.Fatal(err)
 	}
-	audit, auditPrincipal := newHostAuditClient(t, node, nodeConfig)
 	test := &hostArtifactTest{
 		t:              t,
 		client:         client,
-		audit:          audit,
-		auditPrincipal: auditPrincipal,
 		node:           node,
 		nodeConfig:     nodeConfig,
 		ssh:            ssh,
