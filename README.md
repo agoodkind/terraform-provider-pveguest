@@ -708,6 +708,29 @@ in-place state update after import. Apply installs the archive only when the
 target differs from the configuration; otherwise, it completes the planned
 state update without writing to the node, and the next plan is empty.
 
+## pveguest_host_systemd_unit
+
+This resource manages the enabled and active states of a systemd service on a Proxmox node. The workspace target policy must list `/etc/systemd/system/<name>`. Unit actions require a committed installed record that lists the file and matches its current content and metadata.
+
+| Argument | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `node` | string | yes | | Key in the provider `nodes` map. Changing it replaces the resource. |
+| `workspace` | string | yes | | Workspace selector for the host artifact target. Changing it replaces the resource. |
+| `name` | string | yes | | Service unit name without a colon, such as `example.service`. Changing it replaces the resource. |
+| `enabled` | bool | yes | | Desired enabled state. A static unit satisfies either value. |
+| `active` | bool | yes | | Desired active state. |
+| `restart_on` | map of string | no | | A change restarts an active unit during apply when `active` is true. A nonempty map also does this on creation. |
+| `remove_on_delete` | bool | no | `false` | When true, destroy stops and disables the unit. Otherwise, destroy removes only the resource from state. |
+
+Import uses `<node>:<workspace>:<unit>`. Import sets `restart_on` to null. A configured `restart_on` map restarts an active unit on the first apply after import when `active` is true.
+
+The token needs these privileges on `/nodes/<node>`:
+
+| API method | Privilege |
+| --- | --- |
+| `GET /nodes/{node}/host-artifacts/{target}/units/{name}` | `Sys.HostArtifacts.Audit` |
+| `POST /nodes/{node}/host-artifacts/{target}/units/{name}` | `Sys.HostArtifacts.Modify` |
+
 ## pveguest_host_secret
 
 `pveguest_host_secret` sets one secret field of one workspace selector on one

@@ -131,6 +131,14 @@ type hostArtifactTest struct {
 
 func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 	t.Helper()
+	test := newHostArtifactTestFor(t, defaultFixtureWorkspaces())
+	test.audit, test.auditPrincipal = newHostAuditClient(t, test.node, test.nodeConfig)
+	return test
+}
+
+// workspaces maps each fixture case to the workspace of its asset.
+func newHostArtifactTestFor(t *testing.T, workspaces map[string]string) *hostArtifactTest {
+	t.Helper()
 	if os.Getenv(acceptanceVariable) == "" {
 		t.Skipf("%s is not set", acceptanceVariable)
 	}
@@ -143,17 +151,14 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	audit, auditPrincipal := newHostAuditClient(t, node, nodeConfig)
 	test := &hostArtifactTest{
 		t:              t,
 		client:         client,
-		audit:          audit,
-		auditPrincipal: auditPrincipal,
 		node:           node,
 		nodeConfig:     nodeConfig,
 		ssh:            ssh,
 		sshControlPath: controlPath,
-		pins:           readFixturePins(t, pinFile),
+		pins:           readFixturePins(t, pinFile, workspaces),
 	}
 	test.workspace = test.newWorkspace()
 	// The provider and the test download release assets into this cache.
@@ -190,18 +195,7 @@ func hostSSHControlPath(t *testing.T, destination string) string {
 	return controlPath
 }
 
-// readFixturePins reads the pin file and checks that each case pins the
-// fixture asset of its workspace.
-func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEntry {
-	t.Helper()
-	content, err := os.ReadFile(pinFile)
-	if err != nil {
-		t.Fatalf("%s: %v", hostArtifactPinsVariable, err)
-	}
-	var pins map[string]hostArtifactPinEntry
-	if err := json.Unmarshal(content, &pins); err != nil {
-		t.Fatalf("%s: parse %s: %v", hostArtifactPinsVariable, pinFile, err)
-	}
+func defaultFixtureWorkspaces() map[string]string {
 	workspaces := map[string]string{
 		caseValidV1:     fixtureWorkspace,
 		caseValidV2:     fixtureWorkspace,
@@ -211,6 +205,19 @@ func readFixturePins(t *testing.T, pinFile string) map[string]hostArtifactPinEnt
 	}
 	for _, rejection := range hostArtifactDefects {
 		workspaces[rejection.fixtureCase] = fixtureWorkspace
+	}
+	return workspaces
+}
+
+func readFixturePins(t *testing.T, pinFile string, workspaces map[string]string) map[string]hostArtifactPinEntry {
+	t.Helper()
+	content, err := os.ReadFile(pinFile)
+	if err != nil {
+		t.Fatalf("%s: %v", hostArtifactPinsVariable, err)
+	}
+	var pins map[string]hostArtifactPinEntry
+	if err := json.Unmarshal(content, &pins); err != nil {
+		t.Fatalf("%s: parse %s: %v", hostArtifactPinsVariable, pinFile, err)
 	}
 	for fixtureCase, workspace := range workspaces {
 		checkFixturePin(t, pinFile, pins, fixtureCase, workspace)
@@ -248,6 +255,21 @@ func prepareHostArtifactFixtures(t *testing.T, requiredCases ...string) (*hostAr
 	for _, fixtureCase := range requiredCases {
 		checkFixturePin(t, os.Getenv(hostArtifactPinsVariable), test.pins, fixtureCase, fixtureWorkspace)
 	}
+	return prepareTargets(test)
+}
+
+func prepareSelectedFixtures(t *testing.T, selectedCases ...string) (*hostArtifactTest, map[string]string) {
+	t.Helper()
+	workspaces := map[string]string{caseOtherTarget: unrelatedFixtureWorkspace}
+	for _, fixtureCase := range selectedCases {
+		workspaces[fixtureCase] = fixtureWorkspace
+	}
+	return prepareTargets(newHostArtifactTestFor(t, workspaces))
+}
+
+func prepareTargets(test *hostArtifactTest) (*hostArtifactTest, map[string]string) {
+	t := test.t
+	t.Helper()
 	target := transport.HostArtifactTarget(fixtureWorkspace)
 	unrelatedTarget := transport.HostArtifactTarget(unrelatedFixtureWorkspace)
 	t.Cleanup(func() {
