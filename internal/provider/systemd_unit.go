@@ -75,9 +75,9 @@ type unitTarget interface {
 	runUnitAction(ctx context.Context, action unitAction, name string) error
 }
 
-// reconcileUnit enables or disables the unit and starts, restarts, or stops
-// it to match the declared values. restart reenables an enabled unit and
-// restarts an active unit.
+// reconcileUnit matches the declared enabled and active values. When restart
+// is true, it reenables a unit that should remain enabled and restarts a unit
+// that should remain active.
 func reconcileUnit(
 	ctx context.Context,
 	target unitTarget,
@@ -120,8 +120,8 @@ func reconcileUnit(
 	return target.runUnitAction(ctx, action, name)
 }
 
-// removeUnit stops an active unit, disables an enabled unit, and verifies
-// both results. An absent unit satisfies removal.
+// removeUnit stops a unit unless it is inactive or failed, disables an enabled
+// unit, and verifies both results. An absent unit satisfies removal.
 func removeUnit(ctx context.Context, target unitTarget, name string) error {
 	status, err := target.readUnit(ctx, name)
 	if err != nil {

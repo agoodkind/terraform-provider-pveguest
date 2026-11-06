@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	// The unit-v1 and unit-v2 fixture archives install this unit file with
-	// different content. The fixture policy lists the unit file.
+	// The test requires fixture archives with different content for the same
+	// unit file and a policy that lists the file.
 	caseUnitV1 = "unit-v1"
 	caseUnitV2 = "unit-v2"
 
@@ -28,10 +28,6 @@ type hostUnitTest struct {
 	unrelated map[string]string
 }
 
-// TestAccHostSystemdUnit checks create, refresh, drift repair, restart_on,
-// import, a rejected unit, and deletion through the provider. After each step
-// it checks that the unrelated fixture target and its consumer unit stay
-// unchanged.
 func TestAccHostSystemdUnit(t *testing.T) {
 	artifact, unrelated := prepareSelectedFixtures(t, caseUnitV1, caseUnitV2)
 	test := &hostUnitTest{hostSecretTest: &hostSecretTest{hostArtifactTest: artifact}, unrelated: unrelated}
@@ -45,27 +41,23 @@ func TestAccHostSystemdUnit(t *testing.T) {
 	first := test.invocationID(hostUnitFixture)
 	test.expectUnchangedRepeat(first)
 
-	// Refresh reads the active state, and apply starts the stopped unit.
 	test.hostMustRun("systemctl", "stop", "--", hostUnitFixture)
 	test.expectPlannedChange()
 	test.applyUnit()
 	test.expectUnitState("enabled", "active")
 	started := test.expectNewInvocation(first)
 
-	// Refresh reads the enabled state, and apply enables the unit without a restart.
 	test.hostMustRun("systemctl", "disable", "--", hostUnitFixture)
 	test.expectPlannedChange()
 	test.applyUnit()
 	test.expectUnitState("enabled", "active")
 	test.expectInvocation(started)
 
-	// A new unit file write_id restarts the active unit once.
 	test.workspace.writeConfig(test.unitConfig(caseUnitV2, hostUnitFixture, hostUnitRestartOn))
 	test.applyUnit()
 	restarted := test.expectNewInvocation(started)
 	test.expectUnchangedRepeat(restarted)
 
-	// The import ID selects the unit, and refresh reads its state.
 	test.workspace.mustRun("state", "rm", hostUnitAddress)
 	test.workspace.mustRun("import", "-no-color", hostUnitAddress, test.node+":"+fixtureWorkspace+":"+hostUnitFixture)
 	test.expectInvocation(restarted)
@@ -73,8 +65,6 @@ func TestAccHostSystemdUnit(t *testing.T) {
 	test.workspace.writeConfig(test.unitConfig(caseUnitV2, hostUnitFixture, ""))
 	test.expectUnchangedRepeat(restarted)
 
-	// The node rejects a unit that the target policy does not list, and the
-	// apply reports the rejection.
 	test.workspace.writeConfig(test.unitConfig(caseUnitV2, hostUnitUnlisted, ""))
 	output, exitCode := test.workspace.run("apply", "-no-color", "-auto-approve")
 	if exitCode == 0 || !strings.Contains(collapseWhitespace(output), hostUnitUnlistedErr) {
@@ -83,7 +73,6 @@ func TestAccHostSystemdUnit(t *testing.T) {
 	test.expectInvocation(restarted)
 	test.expectUnrelated()
 
-	// Deleting a resource with remove_on_delete = false leaves the unit running.
 	test.workspace.writeConfig(test.config(caseUnitV2))
 	test.applyUnit()
 	test.expectUnitState("enabled", "active")
@@ -109,8 +98,6 @@ func (u *hostUnitTest) applyUnit() {
 	u.expectUnrelated()
 }
 
-// expectUnchangedRepeat checks that the next plan is empty and that a repeat
-// apply does not restart the unit.
 func (u *hostUnitTest) expectUnchangedRepeat(invocation string) {
 	u.t.Helper()
 	output, exitCode := u.workspace.run("plan", "-no-color", "-detailed-exitcode")

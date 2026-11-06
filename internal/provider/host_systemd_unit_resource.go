@@ -32,7 +32,7 @@ const (
 	hostUnitDeleteSummary = "Delete host systemd unit"
 )
 
-// The node accepts service units without a colon in the name.
+// The import format reserves the colon as a separator.
 var hostUnitNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._-]{0,246}\.service$`)
 
 type hostSystemdUnitResource struct {
@@ -93,14 +93,14 @@ func (r *hostSystemdUnitResource) Schema(_ context.Context, _ resource.SchemaReq
 			"restart_on": schema.MapAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
-				Description: "Arbitrary values, usually the write_id of each file that the unit reads. " +
-					"A changed map restarts an active unit during apply.",
+				Description: "Values to watch, such as the write_id of each file that the unit reads. " +
+					"A changed map restarts an active unit during apply when active is true. A nonempty map also does this on creation.",
 			},
 			"remove_on_delete": schema.BoolAttribute{
 				Optional:    true,
 				Computed:    true,
 				Default:     booldefault.StaticBool(false),
-				Description: "When true, Destroy stops the unit if active and disables it if enabled. Defaults to false, which removes only the resource from OpenTofu state.",
+				Description: "When true, destroy stops the unit unless it is inactive or failed and disables it if enabled. By default, destroy removes only the resource from OpenTofu state.",
 			},
 		},
 	}
@@ -134,8 +134,8 @@ func (r *hostSystemdUnitResource) Create(ctx context.Context, req resource.Creat
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	// A new restart_on map can reference files that the node installed before
-	// the resource existed. The first apply restarts an active unit once.
+	// A nonempty restart_on map can reference files installed before the
+	// resource existed. Restart an active unit if the plan keeps it active.
 	restart := len(plan.RestartOn.Elements()) > 0
 	if err := r.apply(ctx, plan, restart); err != nil {
 		resp.Diagnostics.AddError(hostUnitCreateSummary, err.Error())

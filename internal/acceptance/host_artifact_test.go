@@ -134,8 +134,7 @@ func newHostArtifactTest(t *testing.T) *hostArtifactTest {
 	return newHostArtifactTestFor(t, defaultFixtureWorkspaces())
 }
 
-// newHostArtifactTestFor checks only the pins of the given fixture cases.
-// workspaces maps each case to the workspace of its fixture asset.
+// workspaces maps each fixture case to the workspace of its asset.
 func newHostArtifactTestFor(t *testing.T, workspaces map[string]string) *hostArtifactTest {
 	t.Helper()
 	if os.Getenv(acceptanceVariable) == "" {
@@ -197,8 +196,6 @@ func hostSSHControlPath(t *testing.T, destination string) string {
 	return controlPath
 }
 
-// defaultFixtureWorkspaces returns the fixture cases that the host artifact
-// and host secret tests use, mapped to the workspace of each fixture asset.
 func defaultFixtureWorkspaces() map[string]string {
 	workspaces := map[string]string{
 		caseValidV1:     fixtureWorkspace,
@@ -213,8 +210,6 @@ func defaultFixtureWorkspaces() map[string]string {
 	return workspaces
 }
 
-// readFixturePins reads the pin file and checks that each case in workspaces
-// pins the fixture asset of its workspace.
 func readFixturePins(t *testing.T, pinFile string, workspaces map[string]string) map[string]hostArtifactPinEntry {
 	t.Helper()
 	content, err := os.ReadFile(pinFile)
@@ -264,8 +259,6 @@ func prepareHostArtifactFixtures(t *testing.T, requiredCases ...string) (*hostAr
 	return prepareTargets(test)
 }
 
-// prepareSelectedFixtures checks only the pins of selectedCases and the
-// other-target case that installs the unrelated target.
 func prepareSelectedFixtures(t *testing.T, selectedCases ...string) (*hostArtifactTest, map[string]string) {
 	t.Helper()
 	workspaces := map[string]string{caseOtherTarget: unrelatedFixtureWorkspace}
@@ -275,9 +268,6 @@ func prepareSelectedFixtures(t *testing.T, selectedCases ...string) (*hostArtifa
 	return prepareTargets(newHostArtifactTestFor(t, workspaces))
 }
 
-// prepareTargets removes the fixture target, installs the unrelated target,
-// and returns its snapshot. The unrelated consumer InvocationID is stored in
-// the test.
 func prepareTargets(test *hostArtifactTest) (*hostArtifactTest, map[string]string) {
 	t := test.t
 	t.Helper()
