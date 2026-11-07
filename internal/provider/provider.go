@@ -3,7 +3,11 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -42,9 +46,10 @@ type nodeModel struct {
 }
 
 type providerData struct {
-	client       *transport.Client
-	aptLocks     *guestLocks
-	sysrepoLocks *guestLocks
+	client          *transport.Client
+	aptLocks        *guestLocks
+	sysrepoLocks    *guestLocks
+	hostTargetLocks *hostTargetLocks
 
 	controllerCAFile string
 
@@ -69,6 +74,54 @@ func (locks *guestLocks) lock(guest transport.Guest) func() {
 
 	guestLock.Lock()
 	return guestLock.Unlock
+}
+
+const hostTargetLockSeparator = "\x00"
+
+// Serialize mutations for one API endpoint, node, and host artifact target
+// within this provider instance.
+type hostTargetLocks struct {
+	nodes map[string]string
+	locks *hashLocks
+}
+
+var defaultEndpointPorts = map[string]string{"http": "80", "https": "443"}
+
+func newHostTargetLocks(nodes map[string]transport.NodeConfig) (*hostTargetLocks, error) {
+	identities := make(map[string]string, len(nodes))
+	for name, node := range nodes {
+		nodeName := node.NodeName
+		if nodeName == "" {
+			nodeName = name
+		}
+		endpoint, err := url.Parse(node.Endpoint)
+		if err != nil {
+			slog.Error("parse node endpoint failed", "node", name, "err", err)
+			return nil, fmt.Errorf("node %q: parse endpoint: %w", name, err)
+		}
+		identities[name] = hostTargetNode(endpoint, nodeName)
+	}
+	return &hostTargetLocks{nodes: identities, locks: &hashLocks{locks: map[string]*sync.Mutex{}}}, nil
+}
+
+func hostTargetNode(parsed *url.URL, nodeName string) string {
+	scheme := strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if port == defaultEndpointPorts[scheme] {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	identity := scheme + "://" + host + strings.TrimRight(parsed.EscapedPath(), "/")
+	return identity + hostTargetLockSeparator + nodeName
+}
+
+func (locks *hostTargetLocks) lock(node string, target string) func() {
+	return locks.locks.lock(locks.nodes[node] + hostTargetLockSeparator + target)
 }
 
 // New returns the factory of the pveguest provider. OpenTofu receives version
@@ -211,6 +264,12 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		return
 	}
 
+	hostTargetLocks, err := newHostTargetLocks(nodes)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
+		return
+	}
+
 	smtp2goAPIKey := config.SMTP2GOAPIKey.ValueString()
 	if smtp2goAPIKey == "" {
 		smtp2goAPIKey = os.Getenv(smtp2goEnvironmentName)
@@ -225,9 +284,10 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		return
 	}
 	data := &providerData{
-		client:       client,
-		aptLocks:     &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
-		sysrepoLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		client:          client,
+		aptLocks:        &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		sysrepoLocks:    &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		hostTargetLocks: hostTargetLocks,
 
 		controllerCAFile: config.ControllerCAFile.ValueString(),
 

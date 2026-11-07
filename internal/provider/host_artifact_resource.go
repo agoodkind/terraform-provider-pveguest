@@ -553,6 +553,7 @@ func (r *hostArtifactResource) apply(ctx context.Context, plan hostArtifactModel
 		diagnostics.AddError("Validate host artifact program bundles", err.Error())
 		return transport.HostArtifactState{}, diagnostics
 	}
+	defer r.data.hostTargetLocks.lock(node, target)()
 	current, err := r.data.client.GetHostArtifact(ctx, node, target)
 	if err != nil {
 		diagnostics.AddError("Read host artifact", err.Error())

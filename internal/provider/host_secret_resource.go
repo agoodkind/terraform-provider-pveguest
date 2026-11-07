@@ -374,6 +374,7 @@ func (r *hostSecretResource) write(
 	field := plan.Field.ValueString()
 	version := plan.ValueWOVersion.ValueInt64()
 	target := transport.HostArtifactTarget(plan.Workspace.ValueString())
+	defer r.data.hostTargetLocks.lock(node, target)()
 	upid, err := r.data.client.SetHostSecret(ctx, node, target, field, value.ValueString(), version)
 	if err != nil {
 		diagnostics.AddError(hostSecretWriteSummary, err.Error())
