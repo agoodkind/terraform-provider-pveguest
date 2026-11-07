@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
@@ -42,9 +43,10 @@ type nodeModel struct {
 }
 
 type providerData struct {
-	client       *transport.Client
-	aptLocks     *guestLocks
-	sysrepoLocks *guestLocks
+	client          *transport.Client
+	aptLocks        *guestLocks
+	sysrepoLocks    *guestLocks
+	hostTargetLocks *hostTargetLocks
 
 	controllerCAFile string
 
@@ -69,6 +71,23 @@ func (locks *guestLocks) lock(guest transport.Guest) func() {
 
 	guestLock.Lock()
 	return guestLock.Unlock
+}
+
+const hostTargetLockSeparator = "\x00"
+
+// Serialize mutations for one API endpoint, node, and host artifact target
+// within this provider instance.
+type hostTargetLocks struct {
+	nodes map[string]string
+	locks *hashLocks
+}
+
+func hostTargetNode(endpoint string, nodeName string) string {
+	return strings.TrimRight(endpoint, "/") + hostTargetLockSeparator + nodeName
+}
+
+func (locks *hostTargetLocks) lock(node string, target string) func() {
+	return locks.locks.lock(locks.nodes[node] + hostTargetLockSeparator + target)
 }
 
 // New returns the factory of the pveguest provider. OpenTofu receives version
@@ -181,6 +200,7 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	}
 
 	nodes := make(map[string]transport.NodeConfig, len(nodeModels))
+	hostTargetNodes := make(map[string]string, len(nodeModels))
 	for name, model := range nodeModels {
 		if model.Endpoint.IsUnknown() || model.APIToken.IsUnknown() || model.Insecure.IsUnknown() ||
 			model.NodeName.IsUnknown() || model.MaxExecRequests.IsUnknown() {
@@ -198,6 +218,11 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 
 			MaxExecRequests: int(model.MaxExecRequests.ValueInt64()),
 		}
+		nodeName := model.NodeName.ValueString()
+		if nodeName == "" {
+			nodeName = name
+		}
+		hostTargetNodes[name] = hostTargetNode(model.Endpoint.ValueString(), nodeName)
 	}
 
 	maxRequests := transport.DefaultMaxRequests
@@ -228,6 +253,10 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		client:       client,
 		aptLocks:     &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
 		sysrepoLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		hostTargetLocks: &hostTargetLocks{
+			nodes: hostTargetNodes,
+			locks: &hashLocks{locks: map[string]*sync.Mutex{}},
+		},
 
 		controllerCAFile: config.ControllerCAFile.ValueString(),
 
