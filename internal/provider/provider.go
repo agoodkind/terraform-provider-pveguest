@@ -3,6 +3,9 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -82,8 +85,39 @@ type hostTargetLocks struct {
 	locks *hashLocks
 }
 
-func hostTargetNode(endpoint string, nodeName string) string {
-	return strings.TrimRight(endpoint, "/") + hostTargetLockSeparator + nodeName
+var defaultEndpointPorts = map[string]string{"http": "80", "https": "443"}
+
+func newHostTargetLocks(nodes map[string]transport.NodeConfig) (*hostTargetLocks, error) {
+	identities := make(map[string]string, len(nodes))
+	for name, node := range nodes {
+		nodeName := node.NodeName
+		if nodeName == "" {
+			nodeName = name
+		}
+		endpoint, err := url.Parse(node.Endpoint)
+		if err != nil {
+			slog.Error("parse node endpoint failed", "node", name, "err", err)
+			return nil, fmt.Errorf("node %q: parse endpoint: %w", name, err)
+		}
+		identities[name] = hostTargetNode(endpoint, nodeName)
+	}
+	return &hostTargetLocks{nodes: identities, locks: &hashLocks{locks: map[string]*sync.Mutex{}}}, nil
+}
+
+func hostTargetNode(parsed *url.URL, nodeName string) string {
+	scheme := strings.ToLower(parsed.Scheme)
+	host := strings.ToLower(parsed.Hostname())
+	port := parsed.Port()
+	if port == defaultEndpointPorts[scheme] {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	identity := scheme + "://" + host + strings.TrimRight(parsed.EscapedPath(), "/")
+	return identity + hostTargetLockSeparator + nodeName
 }
 
 func (locks *hostTargetLocks) lock(node string, target string) func() {
@@ -200,7 +234,6 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	}
 
 	nodes := make(map[string]transport.NodeConfig, len(nodeModels))
-	hostTargetNodes := make(map[string]string, len(nodeModels))
 	for name, model := range nodeModels {
 		if model.Endpoint.IsUnknown() || model.APIToken.IsUnknown() || model.Insecure.IsUnknown() ||
 			model.NodeName.IsUnknown() || model.MaxExecRequests.IsUnknown() {
@@ -218,11 +251,6 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 
 			MaxExecRequests: int(model.MaxExecRequests.ValueInt64()),
 		}
-		nodeName := model.NodeName.ValueString()
-		if nodeName == "" {
-			nodeName = name
-		}
-		hostTargetNodes[name] = hostTargetNode(model.Endpoint.ValueString(), nodeName)
 	}
 
 	maxRequests := transport.DefaultMaxRequests
@@ -231,6 +259,12 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	}
 
 	client, err := transport.NewClient(nodes, maxRequests)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
+		return
+	}
+
+	hostTargetLocks, err := newHostTargetLocks(nodes)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
 		return
@@ -250,13 +284,10 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 		return
 	}
 	data := &providerData{
-		client:       client,
-		aptLocks:     &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
-		sysrepoLocks: &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
-		hostTargetLocks: &hostTargetLocks{
-			nodes: hostTargetNodes,
-			locks: &hashLocks{locks: map[string]*sync.Mutex{}},
-		},
+		client:          client,
+		aptLocks:        &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		sysrepoLocks:    &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
+		hostTargetLocks: hostTargetLocks,
 
 		controllerCAFile: config.ControllerCAFile.ValueString(),
 
