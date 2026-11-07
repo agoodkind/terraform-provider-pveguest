@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
@@ -28,7 +29,7 @@ type Options struct {
 	MaxBodyBytes int64
 }
 
-// Serve runs the proxy until ctx ends and removes its local socket before returning.
+// Serve runs the proxy until ctx ends and closes its server before returning.
 func Serve(ctx context.Context, client *transport.Client, guest transport.Guest, options Options) error {
 	err := validateInputs(client, guest, options)
 	if err != nil {
@@ -43,7 +44,6 @@ func Serve(ctx context.Context, client *transport.Client, guest transport.Guest,
 		slog.Error("listen failed", "socket", options.SocketPath, "err", err)
 		return fmt.Errorf("listen on %s: %w", options.SocketPath, err)
 	}
-	defer func() { _ = os.Remove(options.SocketPath) }()
 	err = os.Chmod(options.SocketPath, socketFileMode)
 	if err != nil {
 		_ = listener.Close()
@@ -51,32 +51,51 @@ func Serve(ctx context.Context, client *transport.Client, guest transport.Guest,
 		return fmt.Errorf("restrict socket mode: %w", err)
 	}
 
+	requestContext, cancelRequests := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelRequests()
+	var connections sync.WaitGroup
 	server := &http.Server{
 		Handler:           proxy,
 		ReadHeaderTimeout: readHeaderTimeout,
+		BaseContext:       func(net.Listener) context.Context { return requestContext },
+		ConnState: func(_ net.Conn, state http.ConnState) {
+			trackConnection(&connections, state)
+		},
 	}
 	stop, cancelStop := context.WithCancel(ctx)
-	shutdownDone := make(chan struct{})
+	shutdownResult := make(chan error, 1)
 	go func() {
-		defer close(shutdownDone)
 		defer func() {
 			recovered := recover()
 			if recovered != nil {
-				slog.Error("shutdown panicked", "err", fmt.Errorf("%v", recovered))
+				failure := fmt.Errorf("%v", recovered)
+				slog.Error("shutdown panicked", "err", failure)
+				shutdownResult <- failure
 			}
 		}()
-		shutdownOnStop(stop, server)
+		shutdownResult <- shutdownOnStop(stop, server, cancelRequests)
 	}()
 
 	slog.Info("listening", "socket", options.SocketPath, "guest", guest.String(), "get_only", options.GetOnly)
-	err = server.Serve(listener)
+	serveErr := server.Serve(listener)
 	cancelStop()
-	<-shutdownDone
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("serve failed", "err", err)
-		return fmt.Errorf("serve: %w", err)
+	shutdownErr := <-shutdownResult
+	connections.Wait()
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		slog.Error("serve failed", "err", serveErr)
+		return errors.Join(fmt.Errorf("serve: %w", serveErr), shutdownErr)
 	}
-	return nil
+	return shutdownErr
+}
+
+func trackConnection(connections *sync.WaitGroup, state http.ConnState) {
+	switch state {
+	case http.StateNew:
+		connections.Add(1)
+	case http.StateHijacked, http.StateClosed:
+		connections.Done()
+	case http.StateActive, http.StateIdle:
+	}
 }
 
 func validateInputs(client *transport.Client, guest transport.Guest, options Options) error {
@@ -103,12 +122,25 @@ func validateInputs(client *transport.Client, guest transport.Guest, options Opt
 
 // shutdownOnStop waits for the stop context to end, then shuts down the server
 // with shutdownTimeout.
-func shutdownOnStop(stop context.Context, server *http.Server) {
+func shutdownOnStop(stop context.Context, server *http.Server, cancelRequests context.CancelFunc) error {
 	<-stop.Done()
 	shutdownContext, shutdownCancel := context.WithTimeout(context.WithoutCancel(stop), shutdownTimeout)
 	defer shutdownCancel()
 	err := server.Shutdown(shutdownContext)
-	if err != nil {
-		slog.Error("shutdown failed", "err", err)
+	if err == nil {
+		return nil
 	}
+	slog.Error("shutdown failed", "err", err)
+	shutdownErr := fmt.Errorf("shut down Docker socket proxy: %w", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		return shutdownErr
+	}
+
+	// Close active connections when graceful shutdown exceeds its deadline.
+	cancelRequests()
+	err = server.Close()
+	if err != nil {
+		return errors.Join(shutdownErr, fmt.Errorf("close Docker socket proxy connections: %w", err))
+	}
+	return shutdownErr
 }
