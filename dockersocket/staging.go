@@ -1,4 +1,4 @@
-package main
+package dockersocket
 
 import (
 	"context"

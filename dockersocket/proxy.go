@@ -1,4 +1,4 @@
-package main
+package dockersocket
 
 import (
 	"bufio"
@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agoodkind/terraform-provider-pveguest/internal/clock"
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
@@ -63,6 +64,7 @@ type proxy struct {
 	guestSocket  string
 	getOnly      bool
 	maxBodyBytes int64
+	now          func() time.Time
 }
 
 func newProxy(
@@ -78,18 +80,19 @@ func newProxy(
 		guestSocket:  guestSocket,
 		getOnly:      getOnly,
 		maxBodyBytes: maxBodyBytes,
+		now:          clock.Now,
 	}
 }
 
 func (handler *proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	started := time.Now()
+	started := handler.now()
 	status := handler.handle(writer, request)
 	slog.Info(
 		"docker request",
 		"method", request.Method,
 		"path", request.URL.RequestURI(),
 		"status", status,
-		"seconds", time.Since(started).Seconds(),
+		"seconds", handler.now().Sub(started).Seconds(),
 	)
 }
 

@@ -4,26 +4,19 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
+	"github.com/agoodkind/terraform-provider-pveguest/dockersocket"
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
 const (
-	socketFileMode    = 0o600
-	shutdownTimeout   = 5 * time.Second
-	readHeaderTimeout = 10 * time.Second
-
 	exitFailure = 1
 
 	defaultKind        = string(transport.KindLXC)
@@ -126,55 +119,18 @@ func run(arguments []string) error {
 	}
 
 	guest := transport.Guest{Node: settings.node, VMID: settings.vmid, Kind: transport.Kind(settings.kind)}
-	proxy := newProxy(client, guest, defaultGuestSocket, settings.getOnly, settings.maxBodyBytes)
 
 	stop, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	var listenConfig net.ListenConfig
-	listener, err := listenConfig.Listen(stop, "unix", settings.socketPath)
+	err = dockersocket.Serve(stop, client, guest, dockersocket.Options{
+		SocketPath:   settings.socketPath,
+		GuestSocket:  defaultGuestSocket,
+		GetOnly:      settings.getOnly,
+		MaxBodyBytes: settings.maxBodyBytes,
+	})
 	if err != nil {
-		slog.Error("listen failed", "socket", settings.socketPath, "err", err)
-		return fmt.Errorf("listen on %s: %w", settings.socketPath, err)
-	}
-	defer func() { _ = os.Remove(settings.socketPath) }()
-	err = os.Chmod(settings.socketPath, socketFileMode)
-	if err != nil {
-		slog.Error("restrict socket mode failed", "err", err)
-		return fmt.Errorf("restrict socket mode: %w", err)
-	}
-
-	server := &http.Server{
-		Handler:           proxy,
-		ReadHeaderTimeout: readHeaderTimeout,
-	}
-	go func() {
-		defer func() {
-			recovered := recover()
-			if recovered != nil {
-				slog.Error("shutdown panicked", "err", fmt.Errorf("%v", recovered))
-			}
-		}()
-		shutdownOnStop(stop, server)
-	}()
-
-	slog.Info("listening", "socket", settings.socketPath, "guest", guest.String(), "get_only", settings.getOnly)
-	err = server.Serve(listener)
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("serve failed", "err", err)
-		return fmt.Errorf("serve: %w", err)
+		return fmt.Errorf("run Docker socket proxy: %w", err)
 	}
 	return nil
-}
-
-// shutdownOnStop waits for the stop context to end, then shuts down the server
-// with shutdownTimeout.
-func shutdownOnStop(stop context.Context, server *http.Server) {
-	<-stop.Done()
-	shutdownContext, shutdownCancel := context.WithTimeout(context.WithoutCancel(stop), shutdownTimeout)
-	defer shutdownCancel()
-	err := server.Shutdown(shutdownContext)
-	if err != nil {
-		slog.Error("shutdown failed", "err", err)
-	}
 }
