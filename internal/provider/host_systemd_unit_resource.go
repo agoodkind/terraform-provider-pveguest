@@ -191,7 +191,9 @@ func (r *hostSystemdUnitResource) Delete(ctx context.Context, req resource.Delet
 	if !state.RemoveOnDelete.ValueBool() {
 		return
 	}
-	if err := removeUnit(ctx, r.unitTarget(state), state.Name.ValueString()); err != nil {
+	target := r.unitTarget(state)
+	defer r.data.hostTargetLocks.lock(target.node, target.target)()
+	if err := removeUnit(ctx, target, state.Name.ValueString()); err != nil {
 		resp.Diagnostics.AddError(hostUnitDeleteSummary, err.Error())
 	}
 }
@@ -199,6 +201,7 @@ func (r *hostSystemdUnitResource) Delete(ctx context.Context, req resource.Delet
 func (r *hostSystemdUnitResource) apply(ctx context.Context, plan hostSystemdUnitModel, restart bool) error {
 	target := r.unitTarget(plan)
 	name := plan.Name.ValueString()
+	defer r.data.hostTargetLocks.lock(target.node, target.target)()
 
 	// A unit file that the host artifact installed earlier in the same apply
 	// is unknown to the manager until this reload.

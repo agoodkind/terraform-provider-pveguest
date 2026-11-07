@@ -2,6 +2,7 @@ package acceptance_test
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,6 +21,11 @@ const (
 	hostUnitUnlisted    = "hostartifact-acceptance-unlisted.service"
 	hostUnitUnlistedErr = "does not list the unit file"
 	hostUnitRestartOn   = "\n  restart_on = { unit = pveguest_host_artifact.test.write_ids[\"" + hostUnitFixturePath + "\"] }"
+
+	// PVE::Tools::lock_file writes this text to the task log when its first
+	// attempt to acquire the target lock fails.
+	hostLockWaitText = "trying to acquire lock"
+	hostUnitTaskType = "hostunit"
 )
 
 type hostUnitTest struct {
@@ -30,7 +36,8 @@ type hostUnitTest struct {
 
 func TestAccHostSystemdUnit(t *testing.T) {
 	artifact, unrelated := prepareSelectedFixtures(t, caseUnitV1, caseUnitV2)
-	test := &hostUnitTest{hostSecretTest: &hostSecretTest{hostArtifactTest: artifact}, unrelated: unrelated}
+	secret := &hostSecretTest{hostArtifactTest: artifact, target: transport.HostArtifactTarget(fixtureWorkspace)}
+	test := &hostUnitTest{hostSecretTest: secret, unrelated: unrelated}
 	t.Cleanup(test.removeFixtureUnit)
 	test.removeFixtureUnit()
 
@@ -77,7 +84,62 @@ func TestAccHostSystemdUnit(t *testing.T) {
 	test.applyUnit()
 	test.expectUnitState("enabled", "active")
 	test.expectInvocation(restarted)
+
+	test.expectSerializedMutations(restarted)
 	test.workspace.mustRun("state", "rm", hostArtifactAddress)
+}
+
+func (u *hostUnitTest) expectSerializedMutations(invocation string) {
+	u.t.Helper()
+	marker := u.newMarker()
+	u.workspace.variableValue = marker
+	u.workspace.writeConfig(u.unitConfig(caseUnitV1, hostUnitFixture, hostUnitRestartOn) + fmt.Sprintf(`
+variable "secret" {
+  type      = string
+  sensitive = true
+  ephemeral = true
+}
+
+resource "pveguest_host_secret" "test" {
+  node             = %q
+  workspace        = %q
+  field            = %q
+  %s
+  value_wo_version = 1
+
+  depends_on = [pveguest_host_artifact.test]
+}
+`, u.node, fixtureWorkspace, hostSecretField, hostSecretValueArgument))
+	before := strings.Fields(u.taskRecords(u.target))
+	u.mustTofu("apply", "-no-color", "-auto-approve")
+	u.expectUnrelated()
+	u.expectUnitState("enabled", "active")
+	u.expectNewInvocation(invocation)
+	entry := u.secretEntry()
+	if !entry.Configured || entry.Version != 1 || entry.RestartPending {
+		u.t.Fatalf("the GET secrets[] entry reports configured as %t, version as %d, and restart_pending as %t instead of configured true, version 1, and restart_pending false",
+			entry.Configured, entry.Version, entry.RestartPending)
+	}
+	u.expectFileContent(marker)
+
+	taskTypes := map[string]bool{}
+	for _, record := range strings.Fields(u.taskRecords(u.target)) {
+		if slices.Contains(before, record) {
+			continue
+		}
+		for _, taskType := range []string{hostSecretTaskType, hostUnitTaskType} {
+			if strings.Contains(record, ":"+taskType+":") {
+				taskTypes[taskType] = true
+			}
+		}
+		if strings.Contains(u.hostMustRun("cat", "--", record), hostLockWaitText) {
+			u.t.Fatalf("task log %s shows that the task waited for the target lock", record)
+		}
+	}
+	if !taskTypes[hostSecretTaskType] || !taskTypes[hostUnitTaskType] {
+		u.t.Fatalf("the apply created task types %v on the fixture target, want %s and %s", taskTypes, hostSecretTaskType, hostUnitTaskType)
+	}
+	u.mustTofu("state", "rm", hostSecretAddress)
 }
 
 func (u *hostUnitTest) unitConfig(fixtureCase string, unit string, extra string) string {
