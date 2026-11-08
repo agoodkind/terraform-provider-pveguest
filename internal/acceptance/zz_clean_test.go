@@ -20,6 +20,8 @@ func TestAccGuestIsClean(t *testing.T) {
 		unitDirectory + "/multi-user.target.wants/" + testRemovalService,
 		unitDirectory + "/" + testImportService,
 		unitDirectory + "/multi-user.target.wants/" + testImportService,
+		testSysVScriptPath,
+		testSysVGenerated,
 		guestWorkDirectory,
 		guestCAPath,
 		guestCALink,
