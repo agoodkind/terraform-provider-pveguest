@@ -129,8 +129,12 @@ func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest
 	}
 }
 
-// ValidateConfig requires enabled = false and active = false when
-// allow_missing or masked is true.
+// ValidateConfig checks systemd unit attributes during OpenTofu validation.
+//
+// It reports an error on each true allow_missing or masked attribute when
+// enabled or active is true. It does not treat null or unknown values as true.
+//
+//   - allow_missing = true with active = true produces an allow_missing error.
 func (r *systemdUnitResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
 	var config systemdUnitModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
