@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strconv"
@@ -595,10 +596,40 @@ func (target guestUnitTarget) readUnit(ctx context.Context, name string) (unitSt
 	return readUnitStatus(ctx, target.client, target.guest, name)
 }
 
+// runUnitAction runs a systemctl action inside the guest. It skips reenable
+// when UnitFileState is generated because systemctl reenable fails for
+// generated units, even when is-enabled reports an enabled SysV service.
 func (target guestUnitTarget) runUnitAction(ctx context.Context, action unitAction, name string) error {
+	if action == unitActionReenable {
+		fileState, err := target.unitFileState(ctx, name)
+		if err != nil {
+			return err
+		}
+		if fileState == unitFileGenerated {
+			slog.InfoContext(
+				ctx, "skip systemctl reenable for generated unit",
+				"node", target.guest.Node, "vmid", target.guest.VMID, "kind", target.guest.Kind, "unit", name,
+			)
+			return nil
+		}
+	}
 	command := systemctlCommand(string(action), "--", name)
 	if action == unitActionDaemonReload {
 		command = systemctlCommand(string(action))
 	}
 	return runChecked(ctx, target.client, target.guest, command)
+}
+
+// unitFileState returns the first line of the unit's UnitFileState property.
+// It returns an error if the systemctl command fails.
+func (target guestUnitTarget) unitFileState(ctx context.Context, name string) (unitFileState, error) {
+	command := systemctlCommand("show", "--property=UnitFileState", "--value", "--", name)
+	result, err := runReadOnlyGuest(ctx, target.client, target.guest, command)
+	if err != nil {
+		return "", err
+	}
+	if result.ExitCode != 0 {
+		return "", commandFailure(target.guest, command, result)
+	}
+	return unitFileState(firstLine(result.Stdout)), nil
 }
