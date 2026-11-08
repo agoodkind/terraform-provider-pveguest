@@ -27,7 +27,7 @@ const (
 	unitFileStateOption = "UnitFileState"
 )
 
-//go:embed testdata/pveguest-acc-sysv
+//go:embed testdata/pveguest-acc-sysv.sh
 var testSysVScript string
 
 // useSysVService installs, enables, and starts a SysV service with a generated
