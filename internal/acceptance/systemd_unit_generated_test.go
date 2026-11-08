@@ -1,6 +1,7 @@
 package acceptance_test
 
 import (
+	"context"
 	_ "embed"
 	"fmt"
 	"strings"
@@ -53,11 +54,28 @@ func (g *testGuest) useSysVService() {
 
 func (g *testGuest) removeSysVService() {
 	g.t.Helper()
-	g.mustRun("systemctl", "stop", "--", testSysVService)
-	g.mustRun("systemctl", "disable", "--", testSysVService)
-	g.mustRun("rm", "-f", "--", testSysVScriptPath)
-	g.mustRun("update-rc.d", testSysVName, "remove")
-	g.mustRun("systemctl", "daemon-reload")
+	cleanupSteps := [][]string{
+		{"systemctl", "stop", "--", testSysVService},
+		{"systemctl", "disable", "--", testSysVService},
+		{"rm", "-f", "--", testSysVScriptPath},
+		{"update-rc.d", testSysVName, "remove"},
+		{"systemctl", "daemon-reload"},
+	}
+	for _, argv := range cleanupSteps {
+		g.runCleanupStep(argv)
+	}
+}
+
+func (g *testGuest) runCleanupStep(argv []string) {
+	g.t.Helper()
+	result, err := g.client.Run(context.Background(), g.guest, guestCommand(nil, argv))
+	if err != nil {
+		g.t.Errorf("cleanup command %q failed: %v", argv, err)
+		return
+	}
+	if result.ExitCode != 0 {
+		g.t.Errorf("cleanup command %q exited with status %d: %s", argv, result.ExitCode, result.Stderr)
+	}
 }
 
 func (g *testGuest) sysVProperty(property string) string {
