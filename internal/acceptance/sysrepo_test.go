@@ -23,7 +23,9 @@ func testSysrepoYang(revision string) string {
 	if revision == testSysrepoSecond {
 		extraLeaf = "    leaf level { type uint8; }\n"
 	}
-	return fmt.Sprintf(`module %s {
+
+	return fmt.Sprintf(
+		`module %s {
   yang-version 1.1;
   namespace "urn:pveguest:acc";
   prefix pga;
@@ -34,7 +36,12 @@ func testSysrepoYang(revision string) string {
     leaf note { type string; }
 %s  }
 }
-`, testSysrepoModule, revision, testSysrepoFeature, extraLeaf)
+`,
+		testSysrepoModule,
+		revision,
+		testSysrepoFeature,
+		extraLeaf,
+	)
 }
 
 func testSysrepoModulePath(revision string) string {
@@ -47,6 +54,7 @@ func (g *testGuest) useSysrepo() {
 	if probe.ExitCode != 0 {
 		g.t.Skipf("%s has no sysrepoctl and sysrepocfg in its PATH", g.guest)
 	}
+
 	g.t.Cleanup(func() {
 		// The uninstall exits with a nonzero status for a module that the
 		// test already removed.
@@ -56,23 +64,34 @@ func (g *testGuest) useSysrepo() {
 
 func (g *testGuest) sysrepoModuleRow() string {
 	g.t.Helper()
+
 	for line := range strings.SplitSeq(g.mustRun("sysrepoctl", "--list"), "\n") {
 		if strings.HasPrefix(line, testSysrepoModule+" ") {
 			return line
 		}
 	}
+
 	return ""
 }
 
 func (g *testGuest) sysrepoExport() string {
 	g.t.Helper()
+
 	return g.mustRun(
-		"sysrepocfg", "--export", "--datastore", "running", "--module", testSysrepoModule, "--format", "xml",
+		"sysrepocfg",
+		"--export",
+		"--datastore",
+		"running",
+		"--module",
+		testSysrepoModule,
+		"--format",
+		"xml",
 	)
 }
 
 func (g *testGuest) sysrepoConfig(revision string, dataContent string) string {
-	return g.providerBlock() + fmt.Sprintf(`
+	return g.providerBlock() + fmt.Sprintf(
+		`
 resource "pveguest_file" "module" {
   node    = local.node
   vmid    = local.vmid
@@ -98,11 +117,17 @@ resource "pveguest_sysrepo_data" "test" {
   module    = pveguest_sysrepo_module.test.module
   content   = %q
 }
-`, testSysrepoModulePath(revision), testSysrepoYang(revision), testSysrepoFeature, dataContent)
+`,
+		testSysrepoModulePath(revision),
+		testSysrepoYang(revision),
+		testSysrepoFeature,
+		dataContent,
+	)
 }
 
 func (g *testGuest) sysrepoModuleOnlyConfig(revision string) string {
-	return g.providerBlock() + fmt.Sprintf(`
+	return g.providerBlock() + fmt.Sprintf(
+		`
 resource "pveguest_file" "module" {
   node    = local.node
   vmid    = local.vmid
@@ -117,7 +142,10 @@ resource "pveguest_sysrepo_module" "test" {
   kind = local.kind
   path = pveguest_file.module.path
 }
-`, testSysrepoModulePath(revision), testSysrepoYang(revision))
+`,
+		testSysrepoModulePath(revision),
+		testSysrepoYang(revision),
+	)
 }
 
 func TestAccSysrepoModuleWithoutUpdateKeepsInstalledRevision(t *testing.T) {
@@ -125,32 +153,42 @@ func TestAccSysrepoModuleWithoutUpdateKeepsInstalledRevision(t *testing.T) {
 	guest.useSysrepo()
 	guest.useTestDirectory()
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				PreConfig: func() {
-					guest.writeFile(testSysrepoModulePath(testSysrepoSecond), testSysrepoYang(testSysrepoSecond))
-					guest.mustRun(
-						"sysrepoctl", "--install", testSysrepoModulePath(testSysrepoSecond),
-						"--search-dirs", testDirectory,
-					)
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			Steps: []resource.TestStep{
+				{
+					PreConfig: func() {
+						guest.writeFile(
+							testSysrepoModulePath(testSysrepoSecond),
+							testSysrepoYang(testSysrepoSecond),
+						)
+						guest.mustRun(
+							"sysrepoctl",
+							"--install",
+							testSysrepoModulePath(testSysrepoSecond),
+							"--search-dirs",
+							testDirectory,
+						)
+					},
+					Config: guest.sysrepoModuleOnlyConfig(testSysrepoFirst),
+					Check: checkGuest(func() error {
+						row := guest.sysrepoModuleRow()
+						if !strings.Contains(row, testSysrepoSecond) {
+							return fmt.Errorf("module row is %q", row)
+						}
+
+						return nil
+					}),
 				},
-				Config: guest.sysrepoModuleOnlyConfig(testSysrepoFirst),
-				Check: checkGuest(func() error {
-					row := guest.sysrepoModuleRow()
-					if !strings.Contains(row, testSysrepoSecond) {
-						return fmt.Errorf("module row is %q", row)
-					}
-					return nil
-				}),
-			},
-			{
-				Config:   guest.sysrepoModuleOnlyConfig(testSysrepoFirst),
-				PlanOnly: true,
+				{
+					Config:   guest.sysrepoModuleOnlyConfig(testSysrepoFirst),
+					PlanOnly: true,
+				},
 			},
 		},
-	})
+	)
 }
 
 func TestAccSysrepoModuleAndData(t *testing.T) {
@@ -161,83 +199,108 @@ func TestAccSysrepoModuleAndData(t *testing.T) {
 	moduleAddress := "pveguest_sysrepo_module.test"
 	dataAddress := "pveguest_sysrepo_data.test"
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy: checkGuest(func() error {
-			if row := guest.sysrepoModuleRow(); row != "" {
-				return fmt.Errorf("module row %q remains after destroy", row)
-			}
-			return nil
-		}),
-		Steps: []resource.TestStep{
-			{
-				Config: guest.sysrepoConfig(testSysrepoFirst, testSysrepoFirstXML),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(moduleAddress, "module", testSysrepoModule),
-					resource.TestCheckResourceAttr(moduleAddress, "revision", testSysrepoFirst),
-					resource.TestCheckResourceAttr(moduleAddress, "features.#", "1"),
-					checkGuest(func() error {
-						row := guest.sysrepoModuleRow()
-						if !strings.Contains(row, testSysrepoFirst) || !strings.Contains(row, testSysrepoFeature) {
-							return fmt.Errorf("module row is %q", row)
-						}
-						return nil
-					}),
-					checkGuest(func() error {
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy: checkGuest(func() error {
+				if row := guest.sysrepoModuleRow(); row != "" {
+					return fmt.Errorf("module row %q remains after destroy", row)
+				}
+
+				return nil
+			}),
+			Steps: []resource.TestStep{
+				{
+					Config: guest.sysrepoConfig(testSysrepoFirst, testSysrepoFirstXML),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(moduleAddress, "module", testSysrepoModule),
+						resource.TestCheckResourceAttr(moduleAddress, "revision", testSysrepoFirst),
+						resource.TestCheckResourceAttr(moduleAddress, "features.#", "1"),
+						checkGuest(func() error {
+							row := guest.sysrepoModuleRow()
+							if !strings.Contains(row, testSysrepoFirst) ||
+								!strings.Contains(row, testSysrepoFeature) {
+								return fmt.Errorf("module row is %q", row)
+							}
+
+							return nil
+						}),
+						checkGuest(func() error {
+							export := guest.sysrepoExport()
+							if !strings.Contains(export, "<name>alpha</name>") {
+								return fmt.Errorf("export is %q", export)
+							}
+
+							return nil
+						}),
+					),
+				},
+				{
+					// Replacement must remove a node added outside OpenTofu.
+					PreConfig: func() {
+						guest.writeFile(testDirectory+"/edit.xml", testSysrepoEditXML)
+						guest.mustRun(
+							"sysrepocfg",
+							"--edit="+testDirectory+"/edit.xml",
+							"--datastore",
+							"running",
+							"--module",
+							testSysrepoModule,
+							"--format",
+							"xml",
+						)
+					},
+					Config:           guest.sysrepoConfig(testSysrepoFirst, testSysrepoFirstXML),
+					ConfigPlanChecks: expectAction(dataAddress, plancheck.ResourceActionUpdate),
+					Check: checkGuest(func() error {
 						export := guest.sysrepoExport()
-						if !strings.Contains(export, "<name>alpha</name>") {
+						if !strings.Contains(export, "<name>alpha</name>") ||
+							strings.Contains(export, "<note>") {
 							return fmt.Errorf("export is %q", export)
 						}
+
 						return nil
 					}),
-				),
-			},
-			{
-				// Replacement must remove a node added outside OpenTofu.
-				PreConfig: func() {
-					guest.writeFile(testDirectory+"/edit.xml", testSysrepoEditXML)
-					guest.mustRun(
-						"sysrepocfg", "--edit="+testDirectory+"/edit.xml", "--datastore", "running",
-						"--module", testSysrepoModule, "--format", "xml",
-					)
 				},
-				Config:           guest.sysrepoConfig(testSysrepoFirst, testSysrepoFirstXML),
-				ConfigPlanChecks: expectAction(dataAddress, plancheck.ResourceActionUpdate),
-				Check: checkGuest(func() error {
-					export := guest.sysrepoExport()
-					if !strings.Contains(export, "<name>alpha</name>") || strings.Contains(export, "<note>") {
-						return fmt.Errorf("export is %q", export)
-					}
-					return nil
-				}),
-			},
-			{
-				PreConfig: func() {
-					guest.mustRun("sysrepoctl", "--uninstall", testSysrepoModule)
-				},
-				Config:           guest.sysrepoConfig(testSysrepoFirst, testSysrepoFirstXML),
-				ConfigPlanChecks: expectAction(moduleAddress, plancheck.ResourceActionCreate),
-				Check: checkGuest(func() error {
-					if row := guest.sysrepoModuleRow(); !strings.Contains(row, testSysrepoFirst) {
-						return fmt.Errorf("module row is %q", row)
-					}
-					return nil
-				}),
-			},
-			{
-				Config:           guest.sysrepoConfig(testSysrepoSecond, testSysrepoFirstXML),
-				ConfigPlanChecks: expectAction(moduleAddress, plancheck.ResourceActionUpdate),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(moduleAddress, "revision", testSysrepoSecond),
-					checkGuest(func() error {
-						row := guest.sysrepoModuleRow()
-						if !strings.Contains(row, testSysrepoSecond) || !strings.Contains(row, testSysrepoFeature) {
+				{
+					PreConfig: func() {
+						guest.mustRun("sysrepoctl", "--uninstall", testSysrepoModule)
+					},
+					Config:           guest.sysrepoConfig(testSysrepoFirst, testSysrepoFirstXML),
+					ConfigPlanChecks: expectAction(moduleAddress, plancheck.ResourceActionCreate),
+					Check: checkGuest(func() error {
+						if row := guest.sysrepoModuleRow(); !strings.Contains(
+							row,
+							testSysrepoFirst,
+						) {
 							return fmt.Errorf("module row is %q", row)
 						}
+
 						return nil
 					}),
-				),
+				},
+				{
+					Config:           guest.sysrepoConfig(testSysrepoSecond, testSysrepoFirstXML),
+					ConfigPlanChecks: expectAction(moduleAddress, plancheck.ResourceActionUpdate),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							moduleAddress,
+							"revision",
+							testSysrepoSecond,
+						),
+						checkGuest(func() error {
+							row := guest.sysrepoModuleRow()
+							if !strings.Contains(row, testSysrepoSecond) ||
+								!strings.Contains(row, testSysrepoFeature) {
+								return fmt.Errorf("module row is %q", row)
+							}
+
+							return nil
+						}),
+					),
+				},
 			},
 		},
-	})
+	)
 }

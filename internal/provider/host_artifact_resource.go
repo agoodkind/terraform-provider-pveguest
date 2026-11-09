@@ -7,9 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"os"
-	"regexp"
 	"strings"
-	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/mapvalidator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -26,82 +24,41 @@ import (
 	"github.com/agoodkind/terraform-provider-pveguest/transport"
 )
 
-const (
-	// The hostartifact task runs gh attestation verify with a 300-second
-	// limit, waits up to 10 seconds for the target lock, and then writes the
-	// files.
-	hostArtifactTaskTimeout = 10 * time.Minute
-
-	// The private state key stores the observed_sha256 that the node reported
-	// after the last apply.
-	hostArtifactAppliedObservedEntry = "applied_observed_sha256"
-	// The private state key stores whether the last Read found a file or owned
-	// directory that differs from the installed record.
-	hostArtifactMismatchEntry = "observation_mismatch"
-
-	hostArtifactImportFormat  = "<node>:<workspace>"
-	hostArtifactImportSummary = "Cannot import host artifact"
-	hostArtifactImportSep     = ":"
-)
-
 var (
-	hostArtifactNamePattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
-	hostArtifactRevisionPattern   = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	hostArtifactRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
-
-	hostArtifactFileType = types.ObjectType{AttrTypes: map[string]attr.Type{
-		"sha256": types.StringType,
-		"mode":   types.StringType,
-		"owner":  types.StringType,
-		"group":  types.StringType,
-	}}
-	hostArtifactDirectoryType = types.ObjectType{AttrTypes: map[string]attr.Type{
-		"mode":  types.StringType,
-		"owner": types.StringType,
-		"group": types.StringType,
-	}}
+	hostArtifactFileType = types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"sha256": types.StringType,
+			"mode":   types.StringType,
+			"owner":  types.StringType,
+			"group":  types.StringType,
+		},
+	}
+	hostArtifactDirectoryType = types.ObjectType{
+		AttrTypes: map[string]attr.Type{
+			"mode":  types.StringType,
+			"owner": types.StringType,
+			"group": types.StringType,
+		},
+	}
 )
-
-type hostArtifactResource struct {
-	data *providerData
-}
-
-type hostArtifactModel struct {
-	Node           types.String `tfsdk:"node"`
-	Workspace      types.String `tfsdk:"workspace"`
-	Repository     types.String `tfsdk:"repository"`
-	ReleaseTag     types.String `tfsdk:"release_tag"`
-	Asset          types.String `tfsdk:"asset"`
-	SHA256         types.String `tfsdk:"sha256"`
-	BundleAsset    types.String `tfsdk:"bundle_asset"`
-	BundleSHA256   types.String `tfsdk:"bundle_sha256"`
-	SourceRevision types.String `tfsdk:"source_revision"`
-	ProgramBundles types.Map    `tfsdk:"program_bundles"`
-
-	Target                  types.String `tfsdk:"target"`
-	State                   types.String `tfsdk:"state"`
-	InstalledSHA256         types.String `tfsdk:"installed_sha256"`
-	InstalledSourceRevision types.String `tfsdk:"installed_source_revision"`
-	ObservedSHA256          types.String `tfsdk:"observed_sha256"`
-	Files                   types.Map    `tfsdk:"files"`
-	Directories             types.Map    `tfsdk:"directories"`
-	WriteIDs                types.Map    `tfsdk:"write_ids"`
-}
-
-// The framework accepts only JSON documents as private state values.
-type hostArtifactMismatchDocument struct {
-	Mismatch bool `json:"mismatch"`
-}
 
 func newHostArtifactResource() resource.Resource {
 	return &hostArtifactResource{}
 }
 
-func (r *hostArtifactResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *hostArtifactResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_host_artifact"
 }
 
-func (r *hostArtifactResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *hostArtifactResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	attributes := hostArtifactPinAttributes()
 	maps.Copy(attributes, hostArtifactObservedAttributes())
 	resp.Schema = schema.Schema{
@@ -116,11 +73,15 @@ func (r *hostArtifactResource) Schema(_ context.Context, _ resource.SchemaReques
 // target, and the pinned release assets.
 func hostArtifactPinAttributes() map[string]schema.Attribute {
 	nameValidators := []validator.String{
-		stringvalidator.RegexMatches(hostArtifactNamePattern, "must start with a letter or digit and contain only letters, digits, '.', '_', and '-'"),
+		stringvalidator.RegexMatches(
+			hostArtifactNamePattern,
+			"must start with a letter or digit and contain only letters, digits, '.', '_', and '-'",
+		),
 	}
 	sha256Validators := []validator.String{
 		stringvalidator.RegexMatches(sha256Pattern, "must be 64 lowercase hexadecimal characters"),
 	}
+
 	return map[string]schema.Attribute{
 		"node": schema.StringAttribute{
 			Description:   "The node value must be a key in the provider's nodes map. Changing node replaces the resource.",
@@ -137,7 +98,10 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 			Description: "The repository argument selects the GitHub repository that publishes the release, such as agoodkind/configs.",
 			Required:    true,
 			Validators: []validator.String{
-				stringvalidator.RegexMatches(hostArtifactRepositoryPattern, "must have the form owner/repository"),
+				stringvalidator.RegexMatches(
+					hostArtifactRepositoryPattern,
+					"must have the form owner/repository",
+				),
 			},
 		},
 		"release_tag": schema.StringAttribute{
@@ -169,7 +133,10 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 			Description: "The source_revision argument specifies the 40-character commit that built the archive.",
 			Required:    true,
 			Validators: []validator.String{
-				stringvalidator.RegexMatches(hostArtifactRevisionPattern, "must be 40 lowercase hexadecimal characters"),
+				stringvalidator.RegexMatches(
+					hostArtifactRevisionPattern,
+					"must be 40 lowercase hexadecimal characters",
+				),
 			},
 		},
 		"program_bundles": schema.MapNestedAttribute{
@@ -177,7 +144,12 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 				"The entries must match all programs in the manifest. Archives without programs do not require this argument.",
 			Optional: true,
 			Validators: []validator.Map{
-				mapvalidator.KeysAre(stringvalidator.RegexMatches(hostArtifactNamePattern, "each program_bundles key must begin with a letter or digit and use only letters, digits, '.', '_', and '-'")),
+				mapvalidator.KeysAre(
+					stringvalidator.RegexMatches(
+						hostArtifactNamePattern,
+						"each program_bundles key must begin with a letter or digit and use only letters, digits, '.', '_', and '-'",
+					),
+				),
 			},
 			NestedObject: schema.NestedAttributeObject{
 				Attributes: map[string]schema.Attribute{
@@ -229,10 +201,22 @@ func hostArtifactObservedAttributes() map[string]schema.Attribute {
 			Computed: true,
 			NestedObject: schema.NestedAttributeObject{
 				Attributes: map[string]schema.Attribute{
-					"sha256": schema.StringAttribute{Computed: true, Description: "The sha256 attribute contains the SHA-256 of the file content."},
-					"mode":   schema.StringAttribute{Computed: true, Description: "The mode attribute contains the permission bits as four octal digits."},
-					"owner":  schema.StringAttribute{Computed: true, Description: "The owner attribute contains the owner name."},
-					"group":  schema.StringAttribute{Computed: true, Description: "The group attribute contains the group name."},
+					"sha256": schema.StringAttribute{
+						Computed:    true,
+						Description: "The sha256 attribute contains the SHA-256 of the file content.",
+					},
+					"mode": schema.StringAttribute{
+						Computed:    true,
+						Description: "The mode attribute contains the permission bits as four octal digits.",
+					},
+					"owner": schema.StringAttribute{
+						Computed:    true,
+						Description: "The owner attribute contains the owner name.",
+					},
+					"group": schema.StringAttribute{
+						Computed:    true,
+						Description: "The group attribute contains the group name.",
+					},
 				},
 			},
 		},
@@ -242,9 +226,18 @@ func hostArtifactObservedAttributes() map[string]schema.Attribute {
 			Computed: true,
 			NestedObject: schema.NestedAttributeObject{
 				Attributes: map[string]schema.Attribute{
-					"mode":  schema.StringAttribute{Computed: true, Description: "The mode attribute contains the permission bits as four octal digits."},
-					"owner": schema.StringAttribute{Computed: true, Description: "The owner attribute contains the owner name."},
-					"group": schema.StringAttribute{Computed: true, Description: "The group attribute contains the group name."},
+					"mode": schema.StringAttribute{
+						Computed:    true,
+						Description: "The mode attribute contains the permission bits as four octal digits.",
+					},
+					"owner": schema.StringAttribute{
+						Computed:    true,
+						Description: "The owner attribute contains the owner name.",
+					},
+					"group": schema.StringAttribute{
+						Computed:    true,
+						Description: "The group attribute contains the group name.",
+					},
 				},
 			},
 		},
@@ -257,47 +250,70 @@ func hostArtifactObservedAttributes() map[string]schema.Attribute {
 	}
 }
 
-func (r *hostArtifactResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *hostArtifactResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *hostArtifactResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *hostArtifactResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	node, workspace, found := strings.Cut(req.ID, hostArtifactImportSep)
 	if !found || node == "" || workspace == "" {
-		resp.Diagnostics.AddError(hostArtifactImportSummary, importIDError(req.ID, hostArtifactImportFormat))
+		resp.Diagnostics.AddError(
+			hostArtifactImportSummary,
+			importIDError(req.ID, hostArtifactImportFormat),
+		)
+
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("node"), node)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("workspace"), workspace)...)
 }
 
-func (r *hostArtifactResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+func (r *hostArtifactResource) ModifyPlan(
+	ctx context.Context,
+	req resource.ModifyPlanRequest,
+	resp *resource.ModifyPlanResponse,
+) {
 	if req.Plan.Raw.IsNull() {
 		return
 	}
+
 	var plan hostArtifactModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if !plan.Workspace.IsUnknown() {
 		target := types.StringValue(transport.HostArtifactTarget(plan.Workspace.ValueString()))
 		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("target"), target)...)
 	}
+
 	pin, known, pinDiagnostics := pinOf(ctx, plan)
 	resp.Diagnostics.Append(pinDiagnostics...)
 	if resp.Diagnostics.HasError() || !known {
 		return
 	}
+
 	manifest, _, err := loadPinnedManifest(ctx, r.data.controllerCAFile, pin)
 	if err != nil {
 		resp.Diagnostics.AddError("Read host artifact manifest", err.Error())
 		return
 	}
+
 	if err := manifest.checkProgramBundles(pin.ProgramBundles); err != nil {
 		resp.Diagnostics.AddError("Validate host artifact program bundles", err.Error())
 		return
 	}
+
 	desiredFiles := manifest.desiredFiles()
 	desiredDirectories := manifest.desiredDirectories()
 
@@ -308,10 +324,12 @@ func (r *hostArtifactResource) ModifyPlan(ctx context.Context, req resource.Modi
 		if resp.Diagnostics.HasError() {
 			return
 		}
+
 		// A node or workspace change replaces the resource. The prior state
 		// cannot predict values for the new target.
 		hasState = plan.Node.Equal(state.Node) && plan.Workspace.Equal(state.Workspace)
 	}
+
 	repair := true
 	if hasState {
 		needed, diagnostics := repairPlanned(ctx, req, state, pin, desiredFiles, desiredDirectories)
@@ -319,27 +337,45 @@ func (r *hostArtifactResource) ModifyPlan(ctx context.Context, req resource.Modi
 		if resp.Diagnostics.HasError() {
 			return
 		}
+
 		repair = needed
 	}
 
 	files, diagnostics := types.MapValueFrom(ctx, hostArtifactFileType, desiredFiles)
 	resp.Diagnostics.Append(diagnostics...)
-	directories, diagnostics := types.MapValueFrom(ctx, hostArtifactDirectoryType, desiredDirectories)
+	directories, diagnostics := types.MapValueFrom(
+		ctx,
+		hostArtifactDirectoryType,
+		desiredDirectories,
+	)
 	resp.Diagnostics.Append(diagnostics...)
 	writeIDs, diagnostics := plannedWriteIDs(ctx, state, hasState, desiredFiles)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	observed := types.StringUnknown()
 	if !repair {
 		observed = state.ObservedSHA256
 	}
 
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("state"), transport.HostArtifactStateCommitted)...)
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("installed_sha256"), pin.SHA256)...)
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("installed_source_revision"), pin.SourceRevision)...)
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("observed_sha256"), observed)...)
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(ctx, fwpath.Root("state"), transport.HostArtifactStateCommitted)...,
+	)
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(ctx, fwpath.Root("installed_sha256"), pin.SHA256)...,
+	)
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(
+			ctx,
+			fwpath.Root("installed_source_revision"),
+			pin.SourceRevision,
+		)...,
+	)
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(ctx, fwpath.Root("observed_sha256"), observed)...,
+	)
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("files"), files)...)
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("directories"), directories)...)
 	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("write_ids"), writeIDs)...)
@@ -363,6 +399,7 @@ func repairPlanned(
 		state.InstalledSourceRevision.ValueString() != pin.SourceRevision {
 		return true, diagnostics
 	}
+
 	stateFiles, fileDiagnostics := stateFileValues(ctx, state)
 	diagnostics.Append(fileDiagnostics...)
 	stateDirectories, directoryDiagnostics := stateDirectoryValues(ctx, state)
@@ -370,6 +407,7 @@ func repairPlanned(
 	if diagnostics.HasError() {
 		return true, diagnostics
 	}
+
 	if len(fileDifferences(desiredFiles, stateFiles)) > 0 ||
 		len(directoryDifferences(desiredDirectories, stateDirectories)) > 0 {
 		return true, diagnostics
@@ -382,11 +420,15 @@ func repairPlanned(
 	if diagnostics.HasError() {
 		return true, diagnostics
 	}
+
 	if decodeMismatch(mismatch) {
 		return true, diagnostics
 	}
+
 	appliedObserved := decodeAppliedHash(applied)
-	return appliedObserved != "" && appliedObserved != state.ObservedSHA256.ValueString(), diagnostics
+
+	return appliedObserved != "" &&
+		appliedObserved != state.ObservedSHA256.ValueString(), diagnostics
 }
 
 // plannedWriteIDs keeps the write_id of each file that has the manifest
@@ -409,10 +451,12 @@ func plannedWriteIDs(
 		if !state.WriteIDs.IsNull() && !state.WriteIDs.IsUnknown() {
 			diagnostics.Append(state.WriteIDs.ElementsAs(ctx, &stateWriteIDs, false)...)
 		}
+
 		if diagnostics.HasError() {
 			return types.MapUnknown(types.StringType), diagnostics
 		}
 	}
+
 	elements := make(map[string]attr.Value, len(desiredFiles))
 	for path, want := range desiredFiles {
 		got, found := stateFiles[path]
@@ -421,127 +465,182 @@ func plannedWriteIDs(
 			elements[path] = types.StringValue(writeID)
 			continue
 		}
+
 		elements[path] = types.StringUnknown()
 	}
+
 	writeIDs, mapDiagnostics := types.MapValue(types.StringType, elements)
 	diagnostics.Append(mapDiagnostics...)
+
 	return writeIDs, diagnostics
 }
 
-func stateFileValues(ctx context.Context, state hostArtifactModel) (map[string]hostArtifactFileValue, diag.Diagnostics) {
+func stateFileValues(
+	ctx context.Context,
+	state hostArtifactModel,
+) (map[string]hostArtifactFileValue, diag.Diagnostics) {
 	values := map[string]hostArtifactFileValue{}
 	if state.Files.IsNull() || state.Files.IsUnknown() {
 		return values, nil
 	}
+
 	diagnostics := state.Files.ElementsAs(ctx, &values, false)
+
 	return values, diagnostics
 }
 
-func stateDirectoryValues(ctx context.Context, state hostArtifactModel) (map[string]hostArtifactDirectoryValue, diag.Diagnostics) {
+func stateDirectoryValues(
+	ctx context.Context,
+	state hostArtifactModel,
+) (map[string]hostArtifactDirectoryValue, diag.Diagnostics) {
 	values := map[string]hostArtifactDirectoryValue{}
 	if state.Directories.IsNull() || state.Directories.IsUnknown() {
 		return values, nil
 	}
+
 	diagnostics := state.Directories.ElementsAs(ctx, &values, false)
+
 	return values, diagnostics
 }
 
-func (r *hostArtifactResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *hostArtifactResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan hostArtifactModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	current, diagnostics := r.apply(ctx, plan)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(setObservedState(ctx, &plan, current)...)
 	resp.Diagnostics.Append(storeAppliedObservation(ctx, resp.Private, current)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *hostArtifactResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *hostArtifactResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan hostArtifactModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	current, diagnostics := r.apply(ctx, plan)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(setObservedState(ctx, &plan, current)...)
 	resp.Diagnostics.Append(storeAppliedObservation(ctx, resp.Private, current)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // Read calls only GET and stores the live values that the node reports.
-func (r *hostArtifactResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *hostArtifactResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state hostArtifactModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	target := transport.HostArtifactTarget(state.Workspace.ValueString())
 	current, err := r.data.client.GetHostArtifact(ctx, state.Node.ValueString(), target)
 	if err != nil {
 		resp.Diagnostics.AddError("Read host artifact", err.Error())
 		return
 	}
+
 	if current.Workspace != state.Workspace.ValueString() {
-		resp.Diagnostics.AddError("Read host artifact", fmt.Sprintf(
-			"the node reports workspace %q for target %s, and the resource sets workspace %q",
-			current.Workspace, target, state.Workspace.ValueString(),
-		))
+		resp.Diagnostics.AddError(
+			"Read host artifact",
+			fmt.Sprintf(
+				"the node reports workspace %q for target %s, and the resource sets workspace %q",
+				current.Workspace,
+				target,
+				state.Workspace.ValueString(),
+			),
+		)
+
 		return
 	}
+
 	resp.Diagnostics.Append(setObservedState(ctx, &state, current)...)
 	mismatch, err := json.Marshal(hostArtifactMismatchDocument{Mismatch: reportsMismatch(current)})
 	if err != nil {
 		slog.ErrorContext(ctx, "encode host artifact mismatch failed", "err", err)
 		resp.Diagnostics.AddError("Store host artifact observation", err.Error())
+
 		return
 	}
+
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, hostArtifactMismatchEntry, mismatch)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
 // Delete calls only GET and fails while the installed record lists files.
 // Installing an archive with an empty file list deletes the target files.
-func (r *hostArtifactResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *hostArtifactResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state hostArtifactModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	target := transport.HostArtifactTarget(state.Workspace.ValueString())
 	current, err := r.data.client.GetHostArtifact(ctx, state.Node.ValueString(), target)
 	if err != nil {
 		resp.Diagnostics.AddError("Destroy host artifact", err.Error())
 		return
 	}
+
 	if current.Installed != nil && len(current.Files) > 0 {
-		resp.Diagnostics.AddError("Destroy host artifact", fmt.Sprintf(
-			"the installed record of workspace %q on node %q lists %d files. "+
-				"Install an archive with an empty file list before destroying the resource.",
-			state.Workspace.ValueString(), state.Node.ValueString(), len(current.Files),
-		))
+		resp.Diagnostics.AddError(
+			"Destroy host artifact",
+			fmt.Sprintf(
+				"the installed record of workspace %q on node %q lists %d files. "+
+					"Install an archive with an empty file list before destroying the resource.",
+				state.Workspace.ValueString(),
+				state.Node.ValueString(),
+				len(current.Files),
+			),
+		)
 	}
 }
 
 // apply reads the target and installs the pinned archive if the installed
 // archive or its files and owned directories differ. It returns the GET
 // response after any install.
-func (r *hostArtifactResource) apply(ctx context.Context, plan hostArtifactModel) (transport.HostArtifactState, diag.Diagnostics) {
+func (r *hostArtifactResource) apply(
+	ctx context.Context,
+	plan hostArtifactModel,
+) (transport.HostArtifactState, diag.Diagnostics) {
 	var diagnostics diag.Diagnostics
 	pin, _, pinDiagnostics := pinOf(ctx, plan)
 	diagnostics.Append(pinDiagnostics...)
 	if diagnostics.HasError() {
 		return transport.HostArtifactState{}, diagnostics
 	}
+
 	node := plan.Node.ValueString()
 	target := transport.HostArtifactTarget(pin.Workspace)
 	manifest, archivePath, err := loadPinnedManifest(ctx, r.data.controllerCAFile, pin)
@@ -549,16 +648,19 @@ func (r *hostArtifactResource) apply(ctx context.Context, plan hostArtifactModel
 		diagnostics.AddError("Read host artifact manifest", err.Error())
 		return transport.HostArtifactState{}, diagnostics
 	}
+
 	if err := manifest.checkProgramBundles(pin.ProgramBundles); err != nil {
 		diagnostics.AddError("Validate host artifact program bundles", err.Error())
 		return transport.HostArtifactState{}, diagnostics
 	}
+
 	defer r.data.hostTargetLocks.lock(node, target)()
 	current, err := r.data.client.GetHostArtifact(ctx, node, target)
 	if err != nil {
 		diagnostics.AddError("Read host artifact", err.Error())
 		return transport.HostArtifactState{}, diagnostics
 	}
+
 	if len(liveDifferences(manifest, pin, current)) == 0 {
 		return current, diagnostics
 	}
@@ -567,16 +669,25 @@ func (r *hostArtifactResource) apply(ctx context.Context, plan hostArtifactModel
 	if diagnostics.HasError() {
 		return transport.HostArtifactState{}, diagnostics
 	}
+
 	current, err = r.data.client.GetHostArtifact(ctx, node, target)
 	if err != nil {
 		diagnostics.AddError("Read host artifact", err.Error())
 		return transport.HostArtifactState{}, diagnostics
 	}
+
 	if differences := liveDifferences(manifest, pin, current); len(differences) > 0 {
-		diagnostics.AddError("Install host artifact", fmt.Sprintf(
-			"after the install of %s on node %q, %s", pin.Asset, node, joinDifferences(differences),
-		))
+		diagnostics.AddError(
+			"Install host artifact",
+			fmt.Sprintf(
+				"after the install of %s on node %q, %s",
+				pin.Asset,
+				node,
+				joinDifferences(differences),
+			),
+		)
 	}
+
 	return current, diagnostics
 }
 
@@ -592,54 +703,80 @@ func (r *hostArtifactResource) install(
 ) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	bundleURL := releaseAssetURL(pin.Repository, pin.ReleaseTag, pin.BundleAsset)
-	bundlePath, err := cachedArchive(ctx, r.data.controllerCAFile, bundleURL, pin.BundleSHA256, requestHeaders{})
+	bundlePath, err := cachedArchive(
+		ctx,
+		r.data.controllerCAFile,
+		bundleURL,
+		pin.BundleSHA256,
+		requestHeaders{},
+	)
 	if err != nil {
 		diagnostics.AddError("Download host artifact bundle", err.Error())
 		return diagnostics
 	}
+
 	programFiles, downloadDiagnostics := r.downloadPrograms(ctx, pin, manifest)
 	diagnostics.Append(downloadDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
-	archiveStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindArchive, "", archivePath)
+
+	archiveStage, stageDiagnostics := r.stageFile(
+		ctx,
+		node,
+		target,
+		transport.HostArtifactKindArchive,
+		"",
+		archivePath,
+	)
 	diagnostics.Append(stageDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
-	bundleStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindBundle, "", bundlePath)
+
+	bundleStage, stageDiagnostics := r.stageFile(
+		ctx,
+		node,
+		target,
+		transport.HostArtifactKindBundle,
+		"",
+		bundlePath,
+	)
 	diagnostics.Append(stageDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
+
 	programStages, stageDiagnostics := r.stagePrograms(ctx, node, target, programFiles)
 	diagnostics.Append(stageDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
-	upid, err := r.data.client.InstallHostArtifact(ctx, node, target, transport.HostArtifactInstall{
-		ReleaseTag:     pin.ReleaseTag,
-		Asset:          pin.Asset,
-		SHA256:         pin.SHA256,
-		SourceRevision: pin.SourceRevision,
-		ArchiveStage:   archiveStage,
-		BundleStage:    bundleStage,
-		ProgramStages:  programStages,
-	})
+
+	upid, err := r.data.client.InstallHostArtifact(
+		ctx,
+		node,
+		target,
+		transport.HostArtifactInstall{
+			ReleaseTag:     pin.ReleaseTag,
+			Asset:          pin.Asset,
+			SHA256:         pin.SHA256,
+			SourceRevision: pin.SourceRevision,
+			ArchiveStage:   archiveStage,
+			BundleStage:    bundleStage,
+			ProgramStages:  programStages,
+		},
+	)
 	if err != nil {
 		diagnostics.AddError("Install host artifact", err.Error())
 		return diagnostics
 	}
+
 	if err := r.data.client.WaitTaskWithin(ctx, node, upid, hostArtifactTaskTimeout); err != nil {
 		diagnostics.AddError("Install host artifact", err.Error())
 	}
-	return diagnostics
-}
 
-type hostArtifactProgramFiles struct {
-	Name        string
-	ArchivePath string
-	BundlePath  string
+	return diagnostics
 }
 
 // downloadPrograms caches each program archive from its own release and each
@@ -651,23 +788,54 @@ func (r *hostArtifactResource) downloadPrograms(
 	manifest hostArtifactManifest,
 ) ([]hostArtifactProgramFiles, diag.Diagnostics) {
 	var diagnostics diag.Diagnostics
+
 	files := make([]hostArtifactProgramFiles, 0, len(manifest.Programs))
 	for _, program := range manifest.Programs {
 		archiveURL := releaseAssetURL(program.Repository, program.ReleaseTag, program.Asset)
-		archivePath, err := cachedArchive(ctx, r.data.controllerCAFile, archiveURL, program.SHA256, requestHeaders{})
+		archivePath, err := cachedArchive(
+			ctx,
+			r.data.controllerCAFile,
+			archiveURL,
+			program.SHA256,
+			requestHeaders{},
+		)
 		if err != nil {
-			diagnostics.AddError("Download host artifact program archive", fmt.Sprintf("archive download failed for program %s: %s", program.Name, err))
+			diagnostics.AddError(
+				"Download host artifact program archive",
+				fmt.Sprintf("archive download failed for program %s: %s", program.Name, err),
+			)
+
 			return nil, diagnostics
 		}
+
 		bundle := pin.ProgramBundles[program.Name]
 		bundleURL := releaseAssetURL(pin.Repository, pin.ReleaseTag, bundle.Asset)
-		bundlePath, err := cachedArchive(ctx, r.data.controllerCAFile, bundleURL, bundle.SHA256, requestHeaders{})
+		bundlePath, err := cachedArchive(
+			ctx,
+			r.data.controllerCAFile,
+			bundleURL,
+			bundle.SHA256,
+			requestHeaders{},
+		)
 		if err != nil {
-			diagnostics.AddError("Download program attestation bundle", fmt.Sprintf("bundle download failed for program %s: %s", program.Name, err))
+			diagnostics.AddError(
+				"Download program attestation bundle",
+				fmt.Sprintf("bundle download failed for program %s: %s", program.Name, err),
+			)
+
 			return nil, diagnostics
 		}
-		files = append(files, hostArtifactProgramFiles{Name: program.Name, ArchivePath: archivePath, BundlePath: bundlePath})
+
+		files = append(
+			files,
+			hostArtifactProgramFiles{
+				Name:        program.Name,
+				ArchivePath: archivePath,
+				BundlePath:  bundlePath,
+			},
+		)
 	}
+
 	return files, diagnostics
 }
 
@@ -678,24 +846,50 @@ func (r *hostArtifactResource) stagePrograms(
 	programFiles []hostArtifactProgramFiles,
 ) (string, diag.Diagnostics) {
 	var diagnostics diag.Diagnostics
+
 	stages := make([]transport.HostProgramStage, 0, len(programFiles))
 	for _, program := range programFiles {
-		archiveStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindProgram, program.Name, program.ArchivePath)
+		archiveStage, stageDiagnostics := r.stageFile(
+			ctx,
+			node,
+			target,
+			transport.HostArtifactKindProgram,
+			program.Name,
+			program.ArchivePath,
+		)
 		diagnostics.Append(stageDiagnostics...)
 		if diagnostics.HasError() {
 			return "", diagnostics
 		}
-		bundleStage, stageDiagnostics := r.stageFile(ctx, node, target, transport.HostArtifactKindProgramBundle, program.Name, program.BundlePath)
+
+		bundleStage, stageDiagnostics := r.stageFile(
+			ctx,
+			node,
+			target,
+			transport.HostArtifactKindProgramBundle,
+			program.Name,
+			program.BundlePath,
+		)
 		diagnostics.Append(stageDiagnostics...)
 		if diagnostics.HasError() {
 			return "", diagnostics
 		}
-		stages = append(stages, transport.HostProgramStage{Name: program.Name, ArchiveStage: archiveStage, BundleStage: bundleStage})
+
+		stages = append(
+			stages,
+			transport.HostProgramStage{
+				Name:         program.Name,
+				ArchiveStage: archiveStage,
+				BundleStage:  bundleStage,
+			},
+		)
 	}
+
 	programStages, err := transport.FormatProgramStages(stages)
 	if err != nil {
 		diagnostics.AddError("Format host artifact program stages", err.Error())
 	}
+
 	return programStages, diagnostics
 }
 
@@ -710,90 +904,73 @@ func (r *hostArtifactResource) stageFile(
 	var diagnostics diag.Diagnostics
 	file, err := os.Open(filePath)
 	if err != nil {
-		diagnostics.AddError("Stage host artifact", fmt.Sprintf("open the cached %s: %s", kind, err))
+		diagnostics.AddError(
+			"Stage host artifact",
+			fmt.Sprintf("open the cached %s: %s", kind, err),
+		)
+
 		return "", diagnostics
 	}
+
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		diagnostics.AddError("Stage host artifact", fmt.Sprintf("read the size of the cached %s: %s", kind, err))
+		diagnostics.AddError(
+			"Stage host artifact",
+			fmt.Sprintf("read the size of the cached %s: %s", kind, err),
+		)
+
 		return "", diagnostics
 	}
-	stage, err := r.data.client.StageHostArtifactProgram(ctx, node, target, kind, program, file, info.Size())
+
+	stage, err := r.data.client.StageHostArtifactProgram(
+		ctx,
+		node,
+		target,
+		kind,
+		program,
+		file,
+		info.Size(),
+	)
 	if err != nil {
 		diagnostics.AddError("Stage host artifact", err.Error())
 	}
+
 	return stage, diagnostics
 }
 
-// pinOf returns the pin of the model and whether every pin attribute is known.
-func pinOf(ctx context.Context, model hostArtifactModel) (hostArtifactPin, bool, diag.Diagnostics) {
-	values := []types.String{
-		model.Node, model.Workspace, model.Repository, model.ReleaseTag, model.Asset,
-		model.SHA256, model.BundleAsset, model.BundleSHA256, model.SourceRevision,
-	}
-	for _, value := range values {
-		if value.IsUnknown() || value.IsNull() {
-			return hostArtifactPin{}, false, nil
-		}
-	}
-	bundles, known, diagnostics := programBundlesOf(ctx, model)
-	if diagnostics.HasError() || !known {
-		return hostArtifactPin{}, false, diagnostics
-	}
-	return hostArtifactPin{
-		Workspace:      model.Workspace.ValueString(),
-		Repository:     model.Repository.ValueString(),
-		ReleaseTag:     model.ReleaseTag.ValueString(),
-		Asset:          model.Asset.ValueString(),
-		SHA256:         model.SHA256.ValueString(),
-		BundleAsset:    model.BundleAsset.ValueString(),
-		BundleSHA256:   model.BundleSHA256.ValueString(),
-		SourceRevision: model.SourceRevision.ValueString(),
-		ProgramBundles: bundles,
-	}, true, diagnostics
-}
-
-func programBundlesOf(ctx context.Context, model hostArtifactModel) (map[string]hostArtifactProgramBundle, bool, diag.Diagnostics) {
-	bundles := map[string]hostArtifactProgramBundle{}
-	if model.ProgramBundles.IsNull() {
-		return bundles, true, nil
-	}
-	if model.ProgramBundles.IsUnknown() {
-		return nil, false, nil
-	}
-	var values map[string]hostArtifactProgramBundleValue
-	diagnostics := model.ProgramBundles.ElementsAs(ctx, &values, false)
-	if diagnostics.HasError() {
-		return nil, false, diagnostics
-	}
-	for name, value := range values {
-		if value.Asset.IsUnknown() || value.Asset.IsNull() || value.SHA256.IsUnknown() || value.SHA256.IsNull() {
-			return nil, false, diagnostics
-		}
-		bundles[name] = hostArtifactProgramBundle{Asset: value.Asset.ValueString(), SHA256: value.SHA256.ValueString()}
-	}
-	return bundles, true, diagnostics
-}
-
 // setObservedState copies the GET response into the computed attributes.
-func setObservedState(ctx context.Context, model *hostArtifactModel, current transport.HostArtifactState) diag.Diagnostics {
+func setObservedState(
+	ctx context.Context,
+	model *hostArtifactModel,
+	current transport.HostArtifactState,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	files, fileDiagnostics := types.MapValueFrom(ctx, hostArtifactFileType, observedFiles(current))
 	diagnostics.Append(fileDiagnostics...)
-	directories, directoryDiagnostics := types.MapValueFrom(ctx, hostArtifactDirectoryType, observedDirectories(current))
+	directories, directoryDiagnostics := types.MapValueFrom(
+		ctx,
+		hostArtifactDirectoryType,
+		observedDirectories(current),
+	)
 	diagnostics.Append(directoryDiagnostics...)
-	writeIDs, writeIDDiagnostics := types.MapValueFrom(ctx, types.StringType, observedWriteIDs(current))
+	writeIDs, writeIDDiagnostics := types.MapValueFrom(
+		ctx,
+		types.StringType,
+		observedWriteIDs(current),
+	)
 	diagnostics.Append(writeIDDiagnostics...)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
+
 	installedSHA256 := ""
 	installedSourceRevision := ""
 	if current.Installed != nil {
 		installedSHA256 = current.Installed.SHA256
 		installedSourceRevision = current.Installed.SourceRevision
 	}
+
 	model.Target = types.StringValue(transport.HostArtifactTarget(model.Workspace.ValueString()))
 	model.State = types.StringValue(current.State)
 	model.InstalledSHA256 = types.StringValue(installedSHA256)
@@ -802,6 +979,7 @@ func setObservedState(ctx context.Context, model *hostArtifactModel, current tra
 	model.Files = files
 	model.Directories = directories
 	model.WriteIDs = writeIDs
+
 	return diagnostics
 }
 
@@ -812,21 +990,29 @@ type privateSetter interface {
 
 // storeAppliedObservation stores observed_sha256 after an apply and clears the
 // mismatch that the last Read stored.
-func storeAppliedObservation(ctx context.Context, private privateSetter, current transport.HostArtifactState) diag.Diagnostics {
+func storeAppliedObservation(
+	ctx context.Context,
+	private privateSetter,
+	current transport.HostArtifactState,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	applied, err := encodeAppliedHash(current.ObservedSHA256)
 	if err != nil {
 		diagnostics.AddError("Store host artifact observation", err.Error())
 		return diagnostics
 	}
+
 	mismatch, err := json.Marshal(hostArtifactMismatchDocument{Mismatch: false})
 	if err != nil {
 		slog.ErrorContext(ctx, "encode host artifact mismatch failed", "err", err)
 		diagnostics.AddError("Store host artifact observation", err.Error())
+
 		return diagnostics
 	}
+
 	diagnostics.Append(private.SetKey(ctx, hostArtifactAppliedObservedEntry, applied)...)
 	diagnostics.Append(private.SetKey(ctx, hostArtifactMismatchEntry, mismatch)...)
+
 	return diagnostics
 }
 
@@ -836,5 +1022,6 @@ func decodeMismatch(document []byte) bool {
 	if err := json.Unmarshal(document, &decoded); err != nil {
 		return false
 	}
+
 	return decoded.Mismatch
 }

@@ -32,11 +32,19 @@ func newLinkResource() resource.Resource {
 	return &linkResource{}
 }
 
-func (r *linkResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *linkResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_link"
 }
 
-func (r *linkResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *linkResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "A symbolic link inside a guest.",
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
@@ -44,7 +52,10 @@ func (r *linkResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				Required:    true,
 				Description: "Absolute path of the link. The parent directory must exist.",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path that ends in a file name"),
+					stringvalidator.RegexMatches(
+						absolutePathPattern,
+						"must be an absolute path that ends in a file name",
+					),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
@@ -57,24 +68,38 @@ func (r *linkResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 	}
 }
 
-func (r *linkResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *linkResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *linkResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *linkResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan linkModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if err := r.writeLink(ctx, plan); err != nil {
 		resp.Diagnostics.AddError("Create link", err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *linkResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *linkResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state linkModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
@@ -88,13 +113,17 @@ func (r *linkResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		resp.Diagnostics.AddError("Read link", err.Error())
 		return
 	}
+
 	if result.ExitCode != 0 {
 		stderr := string(result.Stderr)
-		if strings.Contains(stderr, missingFileMessage) || strings.Contains(stderr, notALinkMessage) {
+		if strings.Contains(stderr, missingFileMessage) ||
+			strings.Contains(stderr, notALinkMessage) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
+
 		resp.Diagnostics.AddError("Read link", commandFailure(guest, command, result).Error())
+
 		return
 	}
 
@@ -104,27 +133,43 @@ func (r *linkResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *linkResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *linkResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan linkModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if err := r.writeLink(ctx, plan); err != nil {
 		resp.Diagnostics.AddError("Update link", err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *linkResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *linkResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state linkModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	err := runChecked(ctx, r.data.client, guest, guestCommand("rm", "-f", "--", state.Path.ValueString()))
+	err := runChecked(
+		ctx,
+		r.data.client,
+		guest,
+		guestCommand("rm", "-f", "--", state.Path.ValueString()),
+	)
 	if err != nil {
 		resp.Diagnostics.AddError("Delete link", err.Error())
 	}
@@ -135,5 +180,6 @@ func (r *linkResource) writeLink(ctx context.Context, plan linkModel) error {
 	// -T makes ln replace a link to a directory instead of creating the new
 	// link inside that directory.
 	command := guestCommand("ln", "-sfT", "--", plan.Target.ValueString(), plan.Path.ValueString())
+
 	return runChecked(ctx, r.data.client, guest, command)
 }

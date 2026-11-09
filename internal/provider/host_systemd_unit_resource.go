@@ -53,11 +53,19 @@ func newHostSystemdUnitResource() resource.Resource {
 	return &hostSystemdUnitResource{}
 }
 
-func (r *hostSystemdUnitResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *hostSystemdUnitResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_host_systemd_unit"
 }
 
-func (r *hostSystemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *hostSystemdUnitResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "pveguest_host_systemd_unit sets the enabled state and the active state of a systemd unit on a Proxmox node " +
 			"through the overlay host artifact API. The target policy of the workspace must list the unit file " +
@@ -78,7 +86,10 @@ func (r *hostSystemdUnitResource) Schema(_ context.Context, _ resource.SchemaReq
 				Required:    true,
 				Description: "Full service unit name, for example mwan-ifmgr.service. Changing name replaces the resource.",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(hostUnitNamePattern, "must be a service unit name without a colon"),
+					stringvalidator.RegexMatches(
+						hostUnitNamePattern,
+						"must be a service unit name without a colon",
+					),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
@@ -106,16 +117,28 @@ func (r *hostSystemdUnitResource) Schema(_ context.Context, _ resource.SchemaReq
 	}
 }
 
-func (r *hostSystemdUnitResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *hostSystemdUnitResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *hostSystemdUnitResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *hostSystemdUnitResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	node, workspace, name, isValid := splitHostImportID(req.ID)
 	if !isValid || !hostUnitNamePattern.MatchString(name) {
-		resp.Diagnostics.AddError(hostUnitImportSummary, importIDError(req.ID, hostUnitImportFormat))
+		resp.Diagnostics.AddError(
+			hostUnitImportSummary,
+			importIDError(req.ID, hostUnitImportFormat),
+		)
 		return
 	}
+
 	imported := hostSystemdUnitModel{
 		Node:           types.StringValue(node),
 		Workspace:      types.StringValue(workspace),
@@ -128,12 +151,17 @@ func (r *hostSystemdUnitResource) ImportState(ctx context.Context, req resource.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &imported)...)
 }
 
-func (r *hostSystemdUnitResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *hostSystemdUnitResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan hostSystemdUnitModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	// A nonempty restart_on map can reference files installed before the
 	// resource existed. Restart an active unit if the plan keeps it active.
 	restart := len(plan.RestartOn.Elements()) > 0
@@ -141,32 +169,45 @@ func (r *hostSystemdUnitResource) Create(ctx context.Context, req resource.Creat
 		resp.Diagnostics.AddError(hostUnitCreateSummary, err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *hostSystemdUnitResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *hostSystemdUnitResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state hostSystemdUnitModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	status, err := r.unitTarget(state).readUnit(ctx, state.Name.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError(hostUnitReadSummary, err.Error())
 		return
 	}
+
 	if !status.Found {
 		resp.State.RemoveResource(ctx)
 		return
 	}
+
 	state.Enabled, state.Active = observedUnitValues(status, state.Enabled)
 	if state.RemoveOnDelete.IsNull() {
 		state.RemoveOnDelete = types.BoolValue(false)
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *hostSystemdUnitResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *hostSystemdUnitResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan hostSystemdUnitModel
 	var state hostSystemdUnitModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -174,23 +215,31 @@ func (r *hostSystemdUnitResource) Update(ctx context.Context, req resource.Updat
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	restart := !plan.RestartOn.Equal(state.RestartOn)
 	if err := r.apply(ctx, plan, restart); err != nil {
 		resp.Diagnostics.AddError(hostUnitUpdateSummary, err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *hostSystemdUnitResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *hostSystemdUnitResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state hostSystemdUnitModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if !state.RemoveOnDelete.ValueBool() {
 		return
 	}
+
 	target := r.unitTarget(state)
 	defer r.data.hostTargetLocks.lock(target.node, target.target)()
 	if err := removeUnit(ctx, target, state.Name.ValueString()); err != nil {
@@ -198,7 +247,11 @@ func (r *hostSystemdUnitResource) Delete(ctx context.Context, req resource.Delet
 	}
 }
 
-func (r *hostSystemdUnitResource) apply(ctx context.Context, plan hostSystemdUnitModel, restart bool) error {
+func (r *hostSystemdUnitResource) apply(
+	ctx context.Context,
+	plan hostSystemdUnitModel,
+	restart bool,
+) error {
 	target := r.unitTarget(plan)
 	name := plan.Name.ValueString()
 	defer r.data.hostTargetLocks.lock(target.node, target.target)()
@@ -208,18 +261,30 @@ func (r *hostSystemdUnitResource) apply(ctx context.Context, plan hostSystemdUni
 	if err := target.runUnitAction(ctx, unitActionDaemonReload, name); err != nil {
 		return err
 	}
+
 	status, err := target.readUnit(ctx, name)
 	if err != nil {
 		return err
 	}
+
 	if !status.Found {
 		return fmt.Errorf("on %s, the unit file of %s does not exist", target.location(), name)
 	}
-	return reconcileUnit(ctx, target, name, status, plan.Enabled.ValueBool(), plan.Active.ValueBool(), restart)
+
+	return reconcileUnit(
+		ctx,
+		target,
+		name,
+		status,
+		plan.Enabled.ValueBool(),
+		plan.Active.ValueBool(),
+		restart,
+	)
 }
 
 func (r *hostSystemdUnitResource) unitTarget(model hostSystemdUnitModel) hostUnitTarget {
 	workspace := model.Workspace.ValueString()
+
 	return hostUnitTarget{
 		client:    r.data.client,
 		node:      model.Node.ValueString(),
@@ -244,12 +309,25 @@ func (target hostUnitTarget) location() string {
 func (target hostUnitTarget) readUnit(ctx context.Context, name string) (unitStatus, error) {
 	state, err := target.client.GetHostUnit(ctx, target.node, target.target, name)
 	if err != nil {
-		slog.ErrorContext(ctx, "read host unit failed", "node", target.node, "workspace", target.workspace, "unit", name, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"read host unit failed",
+			"node",
+			target.node,
+			"workspace",
+			target.workspace,
+			"unit",
+			name,
+			"err",
+			err,
+		)
 		return unitStatus{}, fmt.Errorf("on %s, read unit %s: %w", target.location(), name, err)
 	}
+
 	if !state.Found {
 		return unitStatus{}, nil
 	}
+
 	return unitStatus{
 		Found:     true,
 		FileState: unitFileState(state.UnitFileState),
@@ -257,14 +335,45 @@ func (target hostUnitTarget) readUnit(ctx context.Context, name string) (unitSta
 	}, nil
 }
 
-func (target hostUnitTarget) runUnitAction(ctx context.Context, action unitAction, name string) error {
-	upid, err := target.client.StartHostUnitAction(ctx, target.node, target.target, name, string(action))
+func (target hostUnitTarget) runUnitAction(
+	ctx context.Context,
+	action unitAction,
+	name string,
+) error {
+	upid, err := target.client.StartHostUnitAction(
+		ctx,
+		target.node,
+		target.target,
+		name,
+		string(action),
+	)
 	if err == nil {
 		err = target.client.WaitTaskWithin(ctx, target.node, upid, hostUnitTaskTimeout)
 	}
+
 	if err != nil {
-		slog.ErrorContext(ctx, "host unit action failed", "node", target.node, "workspace", target.workspace, "unit", name, "action", action, "err", err)
-		return fmt.Errorf("on %s, systemctl %s for unit %s: %w", target.location(), action, name, err)
+		slog.ErrorContext(
+			ctx,
+			"host unit action failed",
+			"node",
+			target.node,
+			"workspace",
+			target.workspace,
+			"unit",
+			name,
+			"action",
+			action,
+			"err",
+			err,
+		)
+		return fmt.Errorf(
+			"on %s, systemctl %s for unit %s: %w",
+			target.location(),
+			action,
+			name,
+			err,
+		)
 	}
+
 	return nil
 }

@@ -31,7 +31,9 @@ type HostSecretState struct {
 
 // errHostSecretOverlay indicates that a secrets[] entry in GET does not contain
 // restart_pending.
-var errHostSecretOverlay = errors.New("the node overlay is too old: a secrets[] entry in the GET response does not contain restart_pending")
+var errHostSecretOverlay = errors.New(
+	"the node overlay is too old: a secrets[] entry in the GET response does not contain restart_pending",
+)
 
 type hostSecretBody struct {
 	Value   string `json:"value"`
@@ -60,18 +62,41 @@ func (client *Client) SetHostSecret(
 	body := hostSecretBody{Value: value, Version: version}
 	document, err := encodeJSON(&body)
 	if err != nil {
-		return "", redactHostSecret(fmt.Errorf("node %q target %s field %s: %w", node, target, field, err), value)
+		return "", redactHostSecret(
+			fmt.Errorf("node %q target %s field %s: %w", node, target, field, err),
+			value,
+		)
 	}
+
 	suffix := hostSecretsPath + url.PathEscape(field)
 	data, err := client.hostArtifactCall(ctx, node, http.MethodPut, target, suffix, document)
 	if err != nil {
 		return "", redactHostSecret(err, value)
 	}
+
 	var upid string
 	if err := json.Unmarshal(data, &upid); err != nil {
-		slog.ErrorContext(ctx, "host secret response is malformed", "node", node, "target", target, "field", field, "err", err)
-		return "", fmt.Errorf("node %q target %s field %s: parse task identifier: %w", node, target, field, err)
+		slog.ErrorContext(
+			ctx,
+			"host secret response is malformed",
+			"node",
+			node,
+			"target",
+			target,
+			"field",
+			field,
+			"err",
+			err,
+		)
+		return "", fmt.Errorf(
+			"node %q target %s field %s: parse task identifier: %w",
+			node,
+			target,
+			field,
+			err,
+		)
 	}
+
 	return upid, nil
 }
 
@@ -79,6 +104,7 @@ func redactHostSecret(err error, value string) error {
 	if err == nil || value == "" || !strings.Contains(err.Error(), value) {
 		return err
 	}
+
 	return errors.New(strings.ReplaceAll(err.Error(), value, redactedSecretValue))
 }
 
@@ -87,9 +113,11 @@ func (entry hostSecretData) convert() (HostSecretState, error) {
 	if err != nil {
 		return HostSecretState{}, err
 	}
+
 	if entry.RestartPending == nil {
 		return HostSecretState{}, errHostSecretOverlay
 	}
+
 	return HostSecretState{
 		Field:          entry.Field,
 		Configured:     bool(entry.Configured),

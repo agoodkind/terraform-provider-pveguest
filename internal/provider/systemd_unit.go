@@ -93,12 +93,14 @@ func reconcileUnit(
 			return err
 		}
 	}
+
 	// Rebuild installation links after dependency changes.
 	if current == enablementEnabled && wantEnabled && restart {
 		if err := target.runUnitAction(ctx, unitActionReenable, name); err != nil {
 			return err
 		}
 	}
+
 	if current == enablementEnabled && !wantEnabled {
 		if err := target.runUnitAction(ctx, unitActionDisable, name); err != nil {
 			return err
@@ -117,6 +119,7 @@ func reconcileUnit(
 	default:
 		return nil
 	}
+
 	return target.runUnitAction(ctx, action, name)
 }
 
@@ -127,6 +130,7 @@ func removeUnit(ctx context.Context, target unitTarget, name string) error {
 	if err != nil {
 		return err
 	}
+
 	if !status.Found {
 		return nil
 	}
@@ -136,6 +140,7 @@ func removeUnit(ctx context.Context, target unitTarget, name string) error {
 			return err
 		}
 	}
+
 	if classifyEnabledState(status.FileState) == enablementEnabled {
 		if err := target.runUnitAction(ctx, unitActionDisable, name); err != nil {
 			return err
@@ -146,15 +151,29 @@ func removeUnit(ctx context.Context, target unitTarget, name string) error {
 	if err != nil {
 		return err
 	}
+
 	if !after.Found {
 		return nil
 	}
+
 	if !isStoppedState(after.Active) {
-		return fmt.Errorf("on %s, unit %s has active state %s after stop; the active state must be inactive or failed", target.location(), name, after.Active)
+		return fmt.Errorf(
+			"on %s, unit %s has active state %s after stop; the active state must be inactive or failed",
+			target.location(),
+			name,
+			after.Active,
+		)
 	}
+
 	if classifyEnabledState(after.FileState) == enablementEnabled {
-		return fmt.Errorf("on %s, unit %s has unit file state %s after disable; the unit file state must not be enabled", target.location(), name, after.FileState)
+		return fmt.Errorf(
+			"on %s, unit %s has unit file state %s after disable; the unit file state must not be enabled",
+			target.location(),
+			name,
+			after.FileState,
+		)
 	}
+
 	return nil
 }
 
@@ -168,6 +187,7 @@ func observedUnitValues(status unitStatus, enabled types.Bool) (types.Bool, type
 		enabled = types.BoolValue(false)
 	case enablementFixed:
 	}
+
 	return enabled, types.BoolValue(isActiveState(status.Active))
 }
 

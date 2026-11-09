@@ -56,7 +56,9 @@ func (g *testGuest) removeImportUnit() {
 	g.run(nil, "systemctl", "stop", "--", testImportService)
 	g.run(nil, "systemctl", "kill", "--signal=SIGKILL", "--", testImportService)
 	g.mustRun(
-		"rm", "-f", "--",
+		"rm",
+		"-f",
+		"--",
 		unitDirectory+"/"+testImportService,
 		unitDirectory+"/multi-user.target.wants/"+testImportService,
 	)
@@ -75,12 +77,25 @@ func (g *testGuest) importFileID() string {
 // unit.
 func (g *testGuest) importUnitMainPID() string {
 	g.t.Helper()
-	result := g.runReadOnly("systemctl", "show", "--property=MainPID", "--value", "--", testImportService)
+	result := g.runReadOnly(
+		"systemctl",
+		"show",
+		"--property=MainPID",
+		"--value",
+		"--",
+		testImportService,
+	)
 	mainPID := strings.TrimSpace(string(result.Stdout))
 	if result.ExitCode != 0 || mainPID == "" || mainPID == "0" {
-		g.t.Fatalf("%s main PID = %q, exit status = %d, stderr = %s",
-			testImportService, mainPID, result.ExitCode, result.Stderr)
+		g.t.Fatalf(
+			"%s main PID = %q, exit status = %d, stderr = %s",
+			testImportService,
+			mainPID,
+			result.ExitCode,
+			result.Stderr,
+		)
 	}
+
 	return mainPID
 }
 
@@ -88,12 +103,24 @@ func (g *testGuest) expectImportUnitPID(want *string, same bool) resource.TestCh
 	return checkGuest(func() error {
 		got := g.importUnitMainPID()
 		if same && got != *want {
-			return fmt.Errorf("%s main PID after apply = %s, want unchanged PID %s", testImportService, got, *want)
+			return fmt.Errorf(
+				"%s main PID after apply = %s, want unchanged PID %s",
+				testImportService,
+				got,
+				*want,
+			)
 		}
+
 		if !same && got == *want {
-			return fmt.Errorf("%s main PID after apply = %s, want a different PID after restart", testImportService, got)
+			return fmt.Errorf(
+				"%s main PID after apply = %s, want a different PID after restart",
+				testImportService,
+				got,
+			)
 		}
+
 		*want = got
+
 		return nil
 	})
 }
@@ -103,9 +130,14 @@ func (g *testGuest) expectImportUnit() resource.TestCheckFunc {
 		gotEnabled := g.systemctlState("is-enabled", testImportService)
 		gotActive := g.systemctlState("is-active", testImportService)
 		if gotEnabled != "enabled" || gotActive != "active" {
-			return fmt.Errorf("%s is %s and %s after destroy, want enabled and active",
-				testImportService, gotEnabled, gotActive)
+			return fmt.Errorf(
+				"%s is %s and %s after destroy, want enabled and active",
+				testImportService,
+				gotEnabled,
+				gotActive,
+			)
 		}
+
 		return nil
 	})
 }
@@ -119,7 +151,8 @@ func (g *testGuest) importUnitResource(restartOn string) string {
 // unitResource returns HCL for an enabled, active unit and inserts arguments
 // into the resource block.
 func (g *testGuest) unitResource(arguments string) string {
-	return fmt.Sprintf(`
+	return fmt.Sprintf(
+		`
 resource "pveguest_systemd_unit" "imported" {
   node    = %q
   vmid    = %d
@@ -129,13 +162,20 @@ resource "pveguest_systemd_unit" "imported" {
   active  = true
   %s
 }
-`, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportService, arguments)
+`,
+		g.guest.Node,
+		g.guest.VMID,
+		string(g.guest.Kind),
+		testImportService,
+		arguments,
+	)
 }
 
 // installedImportConfig returns a configuration for the installed provider
 // with one import block for each address and ID pair.
 func (g *testGuest) installedImportConfig(imports map[string]string) string {
-	config := fmt.Sprintf(`
+	config := fmt.Sprintf(
+		`
 terraform {
   required_providers {
     pveguest = {
@@ -152,22 +192,36 @@ provider "pveguest" {
     }
   }
 }
-`, providerSource, candidateInstalledVersion, g.guest.Node, g.nodeAttributes())
+`,
+		providerSource,
+		candidateInstalledVersion,
+		g.guest.Node,
+		g.nodeAttributes(),
+	)
+
 	for address, id := range imports {
-		config += fmt.Sprintf(`
+		config += fmt.Sprintf(
+			`
 import {
   to = %s
   id = %q
 }
-`, address, id)
+`,
+			address,
+			id,
+		)
 	}
+
 	return config
 }
 
 // dependencyConfig imports the configuration file and the unit. The unit
 // restart_on map uses the write_id of the file.
 func (g *testGuest) dependencyConfig(content string) string {
-	imports := map[string]string{importFileAddress: g.importFileID(), importUnitAddress: g.importUnitID()}
+	imports := map[string]string{
+		importFileAddress: g.importFileID(),
+		importUnitAddress: g.importUnitID(),
+	}
 	return g.installedImportConfig(imports) + g.dependencyResources(content)
 }
 
@@ -178,7 +232,8 @@ func (g *testGuest) dependencyResources(content string) string {
 }
 
 func (g *testGuest) importFileResource(content string) string {
-	return fmt.Sprintf(`
+	return fmt.Sprintf(
+		`
 resource "pveguest_file" "conf" {
   node    = %q
   vmid    = %d
@@ -186,7 +241,13 @@ resource "pveguest_file" "conf" {
   path    = %q
   content = %q
 }
-`, g.guest.Node, g.guest.VMID, string(g.guest.Kind), testImportConfPath, content)
+`,
+		g.guest.Node,
+		g.guest.VMID,
+		string(g.guest.Kind),
+		testImportConfPath,
+		content,
+	)
 }
 
 // fileWriteID returns the write_id of pveguest_file.conf from tofu show -json.
@@ -196,12 +257,15 @@ func (w *tofuWorkspace) fileWriteID() string {
 	if err := json.Unmarshal([]byte(w.mustRun("show", "-json")), &shown); err != nil {
 		w.t.Fatalf("json.Unmarshal returned an error for tofu show -json output: %v", err)
 	}
+
 	for _, resourceState := range shown.Values.RootModule.Resources {
 		if resourceState.Address == importFileAddress {
 			return resourceState.Values.WriteID
 		}
 	}
+
 	w.t.Fatalf("state does not contain resource %s", importFileAddress)
+
 	return ""
 }
 
@@ -223,26 +287,45 @@ type shownState struct {
 func expectImportedWriteID(writeID string, wantImported bool) error {
 	isImported := importedWriteIDPattern.MatchString(writeID)
 	if wantImported && !isImported {
-		return fmt.Errorf("resource %s has write_id %q; expected import form %s", importFileAddress, writeID, importedWriteIDPattern)
+		return fmt.Errorf(
+			"resource %s has write_id %q; expected import form %s",
+			importFileAddress,
+			writeID,
+			importedWriteIDPattern,
+		)
 	}
+
 	if !wantImported && isImported {
-		return fmt.Errorf("resource %s has write_id %q in import form after the rewrite", importFileAddress, writeID)
+		return fmt.Errorf(
+			"resource %s has write_id %q in import form after the rewrite",
+			importFileAddress,
+			writeID,
+		)
 	}
+
 	return nil
 }
 
 // expectImportedAttributes checks the imported test unit's attributes.
 func expectImportedAttributes(states []*terraform.InstanceState) error {
 	var unitStates []*terraform.InstanceState
+
 	for _, state := range states {
 		if state.Attributes["name"] == testImportService {
 			unitStates = append(unitStates, state)
 		}
 	}
+
 	if len(unitStates) != 1 {
-		return fmt.Errorf("import returned %d states with a name matching unit %s", len(unitStates), testImportService)
+		return fmt.Errorf(
+			"import returned %d states with a name matching unit %s",
+			len(unitStates),
+			testImportService,
+		)
 	}
+
 	attributes := unitStates[0].Attributes
+
 	want := map[string]string{
 		"name":             testImportService,
 		"enabled":          "true",
@@ -254,6 +337,7 @@ func expectImportedAttributes(states []*terraform.InstanceState) error {
 			return fmt.Errorf("imported %s = %q, want %q", name, attributes[name], value)
 		}
 	}
+
 	return nil
 }
 
@@ -269,6 +353,7 @@ func TestAccSystemdUnitImport(t *testing.T) {
 
 func testSystemdImportMalformedID(t *testing.T) {
 	guest := newTestGuest(t)
+
 	cases := []struct {
 		name string
 		id   string
@@ -282,27 +367,43 @@ func testSystemdImportMalformedID(t *testing.T) {
 		{name: "invalid unit", id: "node/101/lxc/unit", want: "must be a unit name with a suffix"},
 	}
 	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			imports := map[string]string{importUnitAddress: testCase.id}
-			config := guest.installedImportConfig(imports) + guest.importUnitResource(fmt.Sprintf("%q", firstRestartValue))
-			expectImportPlanError(t, config, testCase.want)
-		})
+		t.Run(
+			testCase.name,
+			func(t *testing.T) {
+				imports := map[string]string{importUnitAddress: testCase.id}
+				config := guest.installedImportConfig(imports) + guest.importUnitResource(
+					fmt.Sprintf("%q", firstRestartValue),
+				)
+				expectImportPlanError(t, config, testCase.want)
+			},
+		)
 	}
-	t.Run("file import requires an absolute path", func(t *testing.T) {
-		config := guest.dependencyConfig(adoptedConfContent)
-		config = strings.ReplaceAll(config, guest.importFileID(), "node/101/lxc/relative.conf")
-		expectImportPlanError(t, config, "must be an absolute path that ends in a file name")
-	})
-	t.Run("file import shows the format", func(t *testing.T) {
-		config := guest.dependencyConfig(adoptedConfContent)
-		config = strings.ReplaceAll(config, guest.importFileID(), malformedImportID)
-		expectImportPlanError(t, config, fileImportIDFormat)
-	})
+
+	t.Run(
+		"file import requires an absolute path",
+		func(t *testing.T) {
+			config := guest.dependencyConfig(adoptedConfContent)
+			config = strings.ReplaceAll(config, guest.importFileID(), "node/101/lxc/relative.conf")
+			expectImportPlanError(t, config, "must be an absolute path that ends in a file name")
+		},
+	)
+	t.Run(
+		"file import shows the format",
+		func(t *testing.T) {
+			config := guest.dependencyConfig(adoptedConfContent)
+			config = strings.ReplaceAll(config, guest.importFileID(), malformedImportID)
+			expectImportPlanError(t, config, fileImportIDFormat)
+		},
+	)
 }
 
 func expectImportPlanError(t *testing.T, config string, want string) {
 	t.Helper()
-	workspace := &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
+	workspace := &tofuWorkspace{
+		t:         t,
+		directory: t.TempDir(),
+		binary:    requireVariable(t, tofuPathVariable),
+	}
 	workspace.writeConfig(config)
 	workspace.mustRun("init", "-no-color")
 
@@ -310,6 +411,7 @@ func expectImportPlanError(t *testing.T, config string, want string) {
 	if exitCode == 0 {
 		t.Fatalf("plan with a malformed import ID exited with status 0:\n%s", output)
 	}
+
 	collapsed := collapseWhitespace(output)
 	if !strings.Contains(collapsed, want) {
 		t.Fatalf("plan output does not contain %q:\n%s", want, output)
@@ -325,14 +427,19 @@ func testSystemdImportCommand(t *testing.T) {
 	second := guest.providerBlock() + guest.dependencyResources(changedConfContent)
 
 	steps := guest.importBothSteps(first)
-	steps = append(steps,
+	steps = append(
+		steps,
 		resource.TestStep{
 			// Import leaves content null. When the file attributes match the
 			// guest, Update preserves the inode and write_id.
 			Config:           first,
 			ConfigPlanChecks: expectActions(importFileAddress, importUnitAddress),
 			Check: resource.ComposeAggregateTestCheckFunc(
-				resource.TestMatchResourceAttr(importFileAddress, "write_id", importedWriteIDPattern),
+				resource.TestMatchResourceAttr(
+					importFileAddress,
+					"write_id",
+					importedWriteIDPattern,
+				),
 				guest.expectImportFileInode(inode),
 				guest.expectImportUnitPID(&mainPID, true),
 			),
@@ -343,11 +450,14 @@ func testSystemdImportCommand(t *testing.T) {
 			Check:            guest.expectImportUnitPID(&mainPID, false),
 		},
 	)
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy:             guest.expectImportUnit(),
-		Steps:                    steps,
-	})
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy:             guest.expectImportUnit(),
+			Steps:                    steps,
+		},
+	)
 }
 
 // importBothSteps returns two ImportState steps that use config and persist the
@@ -376,9 +486,14 @@ func (g *testGuest) importBothSteps(config string) []resource.TestStep {
 // updatedAddresses.
 func expectActions(updatedAddresses ...string) resource.ConfigPlanChecks {
 	var checks []plancheck.PlanCheck
+
 	for _, address := range updatedAddresses {
-		checks = append(checks, plancheck.ExpectResourceAction(address, plancheck.ResourceActionUpdate))
+		checks = append(
+			checks,
+			plancheck.ExpectResourceAction(address, plancheck.ResourceActionUpdate),
+		)
 	}
+
 	return resource.ConfigPlanChecks{PreApply: checks}
 }
 
@@ -390,6 +505,7 @@ func (g *testGuest) expectImportFileInode(want string) resource.TestCheckFunc {
 		if got != want {
 			return fmt.Errorf("file %s has inode %s, want inode %s", testImportConfPath, got, want)
 		}
+
 		return nil
 	})
 }
@@ -405,7 +521,8 @@ func testSystemdImportMarkerClears(t *testing.T) {
 		guest.unitResource("remove_on_delete = true")
 
 	steps := guest.importBothSteps(imported)
-	steps = append(steps,
+	steps = append(
+		steps,
 		resource.TestStep{
 			// Update deletes the "imported" key without restarting the unit when
 			// restart_on remains null.
@@ -419,16 +536,23 @@ func testSystemdImportMarkerClears(t *testing.T) {
 			Config:           imported,
 			ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
 			Check: resource.ComposeAggregateTestCheckFunc(
-				resource.TestMatchResourceAttr(importFileAddress, "write_id", importedWriteIDPattern),
+				resource.TestMatchResourceAttr(
+					importFileAddress,
+					"write_id",
+					importedWriteIDPattern,
+				),
 				guest.expectImportUnitPID(&mainPID, false),
 			),
 		},
 	)
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy:             guest.expectImportUnit(),
-		Steps:                    steps,
-	})
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy:             guest.expectImportUnit(),
+			Steps:                    steps,
+		},
+	)
 }
 
 func testSystemdNotImportedUnit(t *testing.T) {
@@ -436,24 +560,35 @@ func testSystemdNotImportedUnit(t *testing.T) {
 	guest.useImportUnit()
 	mainPID := guest.importUnitMainPID()
 	withoutRestartOn := guest.providerBlock() + guest.unitResource("")
-	withRestartOn := guest.providerBlock() + guest.importUnitResource(fmt.Sprintf("%q", importFormRestartValue))
+	withRestartOn := guest.providerBlock() + guest.importUnitResource(
+		fmt.Sprintf("%q", importFormRestartValue),
+	)
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy:             guest.expectImportUnit(),
-		Steps: []resource.TestStep{
-			{
-				Config:           withoutRestartOn,
-				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionCreate),
-				Check:            guest.expectImportUnitPID(&mainPID, true),
-			},
-			{
-				Config:           withRestartOn,
-				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
-				Check:            guest.expectImportUnitPID(&mainPID, false),
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy:             guest.expectImportUnit(),
+			Steps: []resource.TestStep{
+				{
+					Config: withoutRestartOn,
+					ConfigPlanChecks: expectAction(
+						importUnitAddress,
+						plancheck.ResourceActionCreate,
+					),
+					Check: guest.expectImportUnitPID(&mainPID, true),
+				},
+				{
+					Config: withRestartOn,
+					ConfigPlanChecks: expectAction(
+						importUnitAddress,
+						plancheck.ResourceActionUpdate,
+					),
+					Check: guest.expectImportUnitPID(&mainPID, false),
+				},
 			},
 		},
-	})
+	)
 }
 
 func testSystemdImportLiteralValue(t *testing.T) {
@@ -462,25 +597,31 @@ func testSystemdImportLiteralValue(t *testing.T) {
 	mainPID := guest.importUnitMainPID()
 	config := guest.providerBlock() + guest.importUnitResource(fmt.Sprintf("%q", firstRestartValue))
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy:             guest.expectImportUnit(),
-		Steps: []resource.TestStep{
-			{
-				Config:             config,
-				ResourceName:       importUnitAddress,
-				ImportState:        true,
-				ImportStateId:      guest.importUnitID(),
-				ImportStatePersist: true,
-				ImportStateCheck:   expectImportedAttributes,
-			},
-			{
-				Config:           config,
-				ConfigPlanChecks: expectAction(importUnitAddress, plancheck.ResourceActionUpdate),
-				Check:            guest.expectImportUnitPID(&mainPID, false),
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy:             guest.expectImportUnit(),
+			Steps: []resource.TestStep{
+				{
+					Config:             config,
+					ResourceName:       importUnitAddress,
+					ImportState:        true,
+					ImportStateId:      guest.importUnitID(),
+					ImportStatePersist: true,
+					ImportStateCheck:   expectImportedAttributes,
+				},
+				{
+					Config: config,
+					ConfigPlanChecks: expectAction(
+						importUnitAddress,
+						plancheck.ResourceActionUpdate,
+					),
+					Check: guest.expectImportUnitPID(&mainPID, false),
+				},
 			},
 		},
-	})
+	)
 }
 
 func testSystemdImportUnchangedDependency(t *testing.T) {
@@ -498,7 +639,11 @@ func runDependencyImport(t *testing.T, content string, wantRestart bool) {
 	guest.useImportUnit()
 	mainPID := guest.importUnitMainPID()
 	inode := guest.importFileInode()
-	workspace := &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
+	workspace := &tofuWorkspace{
+		t:         t,
+		directory: t.TempDir(),
+		binary:    requireVariable(t, tofuPathVariable),
+	}
 
 	workspace.writeConfig(guest.dependencyConfig(content))
 	workspace.mustRun("init", "-no-color")
@@ -507,15 +652,19 @@ func runDependencyImport(t *testing.T, content string, wantRestart bool) {
 	if !strings.Contains(applyOutput, importedSummaryText) {
 		t.Fatalf("apply output does not report two imported resources:\n%s", applyOutput)
 	}
+
 	if err := guest.expectFileContent(testImportConfPath, content)(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := guest.expectImportUnitPID(&mainPID, !wantRestart)(nil); err != nil {
 		t.Fatal(err)
 	}
+
 	if !wantRestart && guest.importFileInode() != inode {
 		t.Fatal("the unchanged import rewrote the configuration file")
 	}
+
 	if err := expectImportedWriteID(workspace.fileWriteID(), !wantRestart); err != nil {
 		t.Fatal(err)
 	}
@@ -542,7 +691,13 @@ func (g *testGuest) importFileInode() string {
 	result := g.runReadOnly("stat", "--format=%i", "--", testImportConfPath)
 	inode := strings.TrimSpace(string(result.Stdout))
 	if result.ExitCode != 0 || inode == "" {
-		g.t.Fatalf("configuration file inode = %q, exit status = %d, stderr = %s", inode, result.ExitCode, result.Stderr)
+		g.t.Fatalf(
+			"configuration file inode = %q, exit status = %d, stderr = %s",
+			inode,
+			result.ExitCode,
+			result.Stderr,
+		)
 	}
+
 	return inode
 }

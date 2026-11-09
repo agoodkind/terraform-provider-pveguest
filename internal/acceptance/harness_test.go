@@ -64,6 +64,7 @@ func nodeConfigFromEnvironment(t *testing.T) transport.NodeConfig {
 	if err != nil {
 		t.Fatalf("%s: %v", tokenFileVariable, err)
 	}
+
 	insecure := false
 	insecureText := os.Getenv(insecureVariable)
 	if insecureText != "" {
@@ -72,6 +73,7 @@ func nodeConfigFromEnvironment(t *testing.T) transport.NodeConfig {
 			t.Fatalf("%s: %v", insecureVariable, err)
 		}
 	}
+
 	return transport.NodeConfig{
 		Endpoint: requireVariable(t, endpointVariable),
 		APIToken: strings.TrimSpace(string(tokenBytes)),
@@ -84,6 +86,7 @@ func newTestGuest(t *testing.T) *testGuest {
 	if os.Getenv(acceptanceVariable) == "" {
 		t.Skipf("%s is not set", acceptanceVariable)
 	}
+
 	node := requireVariable(t, nodeVariable)
 	kind := requireVariable(t, kindVariable)
 	vmid, err := strconv.ParseInt(requireVariable(t, vmidVariable), 10, 64)
@@ -92,10 +95,14 @@ func newTestGuest(t *testing.T) *testGuest {
 	}
 
 	nodeConfig := nodeConfigFromEnvironment(t)
-	client, err := transport.NewClient(map[string]transport.NodeConfig{node: nodeConfig}, transport.DefaultMaxRequests)
+	client, err := transport.NewClient(
+		map[string]transport.NodeConfig{node: nodeConfig},
+		transport.DefaultMaxRequests,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return &testGuest{
 		t:      t,
 		client: client,
@@ -109,7 +116,9 @@ func newTestGuest(t *testing.T) *testGuest {
 func (g *testGuest) nodeAttributes() string {
 	return fmt.Sprintf(
 		"endpoint  = %q\n      api_token = %q\n      insecure  = %t",
-		g.node.Endpoint, g.node.APIToken, g.node.Insecure,
+		g.node.Endpoint,
+		g.node.APIToken,
+		g.node.Insecure,
 	)
 }
 
@@ -119,12 +128,16 @@ func requireVariable(t *testing.T, name string) string {
 	if value == "" {
 		t.Fatalf("%s must be set for acceptance tests", name)
 	}
+
 	return value
 }
 
 func guestCommand(stdin []byte, argv []string) transport.Command {
 	return transport.Command{
-		Argv:           append([]string{"env", "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive"}, argv...),
+		Argv: append(
+			[]string{"env", "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive"},
+			argv...,
+		),
 		Stdin:          stdin,
 		TimeoutSeconds: directTimeout,
 	}
@@ -136,6 +149,7 @@ func (g *testGuest) run(stdin []byte, argv ...string) transport.Result {
 	if err != nil {
 		g.t.Fatalf("run %q: %v", argv, err)
 	}
+
 	return result
 }
 
@@ -147,6 +161,7 @@ func (g *testGuest) runReadOnly(argv ...string) transport.Result {
 	if err != nil {
 		g.t.Fatalf("run %q: %v", argv, err)
 	}
+
 	return result
 }
 
@@ -156,6 +171,7 @@ func (g *testGuest) mustRun(argv ...string) string {
 	if result.ExitCode != 0 {
 		g.t.Fatalf("%q exited with status %d: %s", argv, result.ExitCode, result.Stderr)
 	}
+
 	return string(result.Stdout)
 }
 
@@ -174,6 +190,7 @@ func (g *testGuest) readFile(path string) string {
 	if result.ExitCode != 0 {
 		g.t.Fatalf("%q exited with status %d: %s", argv, result.ExitCode, result.Stderr)
 	}
+
 	return string(result.Stdout)
 }
 
@@ -181,18 +198,21 @@ func (g *testGuest) exists(path string) bool {
 	g.t.Helper()
 	// test -e follows links; -L also accepts a dangling link.
 	result := g.runReadOnly("sh", "-c", `test -e "$1" || test -L "$1"`, "sh", path)
+
 	return result.ExitCode == 0
 }
 
 func (g *testGuest) packageInstalled(name string) bool {
 	g.t.Helper()
 	result := g.run(nil, "dpkg-query", "--show", "--showformat", "${db:Status-Abbrev}", "--", name)
+
 	return result.ExitCode == 0 && strings.HasPrefix(string(result.Stdout), "ii")
 }
 
 func (g *testGuest) systemctlState(verb string, unit string) string {
 	g.t.Helper()
 	result := g.runReadOnly("systemctl", verb, "--", unit)
+
 	return strings.TrimSpace(string(result.Stdout))
 }
 
@@ -230,7 +250,8 @@ func (g *testGuest) purgeTestPackage() {
 
 // providerBlock returns the provider configuration for the test guest.
 func (g *testGuest) providerBlock() string {
-	return fmt.Sprintf(`
+	return fmt.Sprintf(
+		`
 terraform {
   required_providers {
     pveguest = {
@@ -253,8 +274,15 @@ locals {
   vmid = %d
   kind = %q
 }
-`, providerSource, g.guest.Node, g.nodeAttributes(), g.controllerAttribute(),
-		g.guest.Node, g.guest.VMID, string(g.guest.Kind))
+`,
+		providerSource,
+		g.guest.Node,
+		g.nodeAttributes(),
+		g.controllerAttribute(),
+		g.guest.Node,
+		g.guest.VMID,
+		string(g.guest.Kind),
+	)
 }
 
 // controllerAttribute returns the controller_ca_file attribute of the provider
@@ -263,5 +291,6 @@ func (g *testGuest) controllerAttribute() string {
 	if g.controllerCAFile == "" {
 		return ""
 	}
+
 	return fmt.Sprintf("controller_ca_file = %q", g.controllerCAFile)
 }

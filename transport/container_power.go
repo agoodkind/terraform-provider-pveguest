@@ -67,11 +67,22 @@ func (client *Client) GetContainerStatus(
 	if err != nil {
 		return "", err
 	}
+
 	var current containerStatus
 	if err := json.Unmarshal(data, &current); err != nil {
-		slog.ErrorContext(ctx, "container status response is malformed", "node", node, "vmid", vmid, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"container status response is malformed",
+			"node",
+			node,
+			"vmid",
+			vmid,
+			"err",
+			err,
+		)
 		return "", fmt.Errorf("node %q container %d: parse status response: %w", node, vmid, err)
 	}
+
 	return current.Status, nil
 }
 
@@ -92,9 +103,19 @@ func (client *Client) ShutdownContainer(
 	body := containerShutdownBody{"timeout": timeoutSeconds}
 	document, err := encodeJSON(&body)
 	if err != nil {
-		slog.ErrorContext(ctx, "encode container shutdown body failed", "node", node, "vmid", vmid, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"encode container shutdown body failed",
+			"node",
+			node,
+			"vmid",
+			vmid,
+			"err",
+			err,
+		)
 		return fmt.Errorf("node %q container %d: %w", node, vmid, err)
 	}
+
 	return client.runContainerTask(ctx, node, vmid, shutdownOperation, document)
 }
 
@@ -114,14 +135,34 @@ func (client *Client) runContainerTask(
 	if err != nil {
 		return err
 	}
+
 	var upid string
 	if err := json.Unmarshal(data, &upid); err != nil {
-		slog.ErrorContext(ctx, "container task response is malformed", "node", node, "vmid", vmid, "operation", operation, "err", err)
-		return fmt.Errorf("node %q container %d: %s: parse task identifier: %w", node, vmid, operation, err)
+		slog.ErrorContext(
+			ctx,
+			"container task response is malformed",
+			"node",
+			node,
+			"vmid",
+			vmid,
+			"operation",
+			operation,
+			"err",
+			err,
+		)
+		return fmt.Errorf(
+			"node %q container %d: %s: parse task identifier: %w",
+			node,
+			vmid,
+			operation,
+			err,
+		)
 	}
+
 	if err := client.WaitTask(ctx, node, upid); err != nil {
 		return fmt.Errorf("container %d %s: %w", vmid, operation, err)
 	}
+
 	return nil
 }
 
@@ -133,43 +174,87 @@ func (client *Client) WaitTask(ctx context.Context, node string, upid string) er
 // WaitTaskWithin polls the task status until the task stops or timeout expires.
 // If the exit status is not OK, it returns an error with the log tail. The
 // delay between polls starts at 200 ms and doubles up to 2 s.
-func (client *Client) WaitTaskWithin(ctx context.Context, node string, upid string, timeout time.Duration) error {
+func (client *Client) WaitTaskWithin(
+	ctx context.Context,
+	node string,
+	upid string,
+	timeout time.Duration,
+) error {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	delay := pollInitialDelay
+
 	for {
 		current, err := client.GetTaskStatus(waitCtx, node, upid)
 		if err != nil {
 			return err
 		}
+
 		if current.Status == TaskStopped {
 			if current.ExitStatus == taskExitOK {
 				return nil
 			}
+
 			return client.taskFailure(ctx, node, upid, current.ExitStatus)
 		}
+
 		select {
 		case <-time.After(delay):
 		case <-waitCtx.Done():
-			slog.ErrorContext(ctx, "wait for task ended", "node", node, "upid", upid, "err", waitCtx.Err())
-			return fmt.Errorf("node %q task %s: wait for the task to stop: %w", node, upid, waitCtx.Err())
+			slog.ErrorContext(
+				ctx,
+				"wait for task ended",
+				"node",
+				node,
+				"upid",
+				upid,
+				"err",
+				waitCtx.Err(),
+			)
+			return fmt.Errorf(
+				"node %q task %s: wait for the task to stop: %w",
+				node,
+				upid,
+				waitCtx.Err(),
+			)
 		}
+
 		delay = min(delay*2, pollMaximumDelay)
 	}
 }
 
 // GetTaskStatus returns the task status and, after the task stops, its exit
 // status.
-func (client *Client) GetTaskStatus(ctx context.Context, node string, upid string) (TaskStatus, error) {
+func (client *Client) GetTaskStatus(
+	ctx context.Context,
+	node string,
+	upid string,
+) (TaskStatus, error) {
 	data, err := client.taskCall(ctx, node, upid, "status", nil)
 	if err != nil {
 		return TaskStatus{}, err
 	}
+
 	var current TaskStatus
 	if err := json.Unmarshal(data, &current); err != nil {
-		slog.ErrorContext(ctx, "task status response is malformed", "node", node, "upid", upid, "err", err)
-		return TaskStatus{}, fmt.Errorf("node %q task %s: parse status response: %w", node, upid, err)
+		slog.ErrorContext(
+			ctx,
+			"task status response is malformed",
+			"node",
+			node,
+			"upid",
+			upid,
+			"err",
+			err,
+		)
+		return TaskStatus{}, fmt.Errorf(
+			"node %q task %s: parse status response: %w",
+			node,
+			upid,
+			err,
+		)
 	}
+
 	return current, nil
 }
 
@@ -181,11 +266,17 @@ func (client *Client) StopTask(ctx context.Context, node string, upid string) er
 	if !found {
 		return fmt.Errorf("node %q is not in the provider nodes map", node)
 	}
+
 	guest := Guest{Node: node, Kind: KindLXC}
-	_, err := connection.call(ctx, guest, apiRequest{
-		method: http.MethodDelete,
-		path:   taskPath(connection, upid),
-	})
+	_, err := connection.call(
+		ctx,
+		guest,
+		apiRequest{
+			method: http.MethodDelete,
+			path:   taskPath(connection, upid),
+		},
+	)
+
 	return err
 }
 
@@ -193,27 +284,63 @@ func taskPath(connection *nodeConnection, upid string) string {
 	return taskPathPrefix + url.PathEscape(connection.nodeName) + taskPathSep + url.PathEscape(upid)
 }
 
-func (client *Client) taskFailure(ctx context.Context, node string, upid string, exitStatus string) error {
+func (client *Client) taskFailure(
+	ctx context.Context,
+	node string,
+	upid string,
+	exitStatus string,
+) error {
 	query := url.Values{}
 	query.Set("limit", strconv.Itoa(taskLogLimit))
 	data, err := client.taskCall(ctx, node, upid, "log", query)
 	if err != nil {
 		slog.ErrorContext(ctx, "read task log failed", "node", node, "upid", upid, "err", err)
-		return fmt.Errorf("node %q task %s ended with exit status %q; reading the task log failed: %w", node, upid, exitStatus, err)
+		return fmt.Errorf(
+			"node %q task %s ended with exit status %q; reading the task log failed: %w",
+			node,
+			upid,
+			exitStatus,
+			err,
+		)
 	}
+
 	var lines []taskLogLine
 	if err := json.Unmarshal(data, &lines); err != nil {
-		slog.ErrorContext(ctx, "task log response is malformed", "node", node, "upid", upid, "err", err)
-		return fmt.Errorf("node %q task %s ended with exit status %q; parse task log: %w", node, upid, exitStatus, err)
+		slog.ErrorContext(
+			ctx,
+			"task log response is malformed",
+			"node",
+			node,
+			"upid",
+			upid,
+			"err",
+			err,
+		)
+		return fmt.Errorf(
+			"node %q task %s ended with exit status %q; parse task log: %w",
+			node,
+			upid,
+			exitStatus,
+			err,
+		)
 	}
+
 	if len(lines) > taskLogTail {
 		lines = lines[len(lines)-taskLogTail:]
 	}
+
 	texts := make([]string, 0, len(lines))
 	for _, line := range lines {
 		texts = append(texts, line.Text)
 	}
-	return fmt.Errorf("node %q task %s ended with exit status %q; log tail:\n%s", node, upid, exitStatus, strings.Join(texts, "\n"))
+
+	return fmt.Errorf(
+		"node %q task %s ended with exit status %q; log tail:\n%s",
+		node,
+		upid,
+		exitStatus,
+		strings.Join(texts, "\n"),
+	)
 }
 
 func (client *Client) taskCall(
@@ -227,10 +354,16 @@ func (client *Client) taskCall(
 	if !found {
 		return nil, fmt.Errorf("node %q is not in the provider nodes map", node)
 	}
+
 	guest := Guest{Node: node, Kind: KindLXC}
-	return connection.call(ctx, guest, apiRequest{
-		method: http.MethodGet,
-		path:   taskPath(connection, upid) + "/" + operation,
-		query:  query,
-	})
+
+	return connection.call(
+		ctx,
+		guest,
+		apiRequest{
+			method: http.MethodGet,
+			path:   taskPath(connection, upid) + "/" + operation,
+			query:  query,
+		},
+	)
 }

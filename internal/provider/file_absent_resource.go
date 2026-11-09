@@ -58,14 +58,20 @@ func (v pathValidator) MarkdownDescription(ctx context.Context) string {
 	return v.Description(ctx)
 }
 
-func (pathValidator) ValidateString(_ context.Context, req validator.StringRequest, resp *validator.StringResponse) {
+func (pathValidator) ValidateString(
+	_ context.Context,
+	req validator.StringRequest,
+	resp *validator.StringResponse,
+) {
 	if req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
 		return
 	}
+
 	value := req.ConfigValue.ValueString()
 	if absolutePathPattern.MatchString(value) && path.Clean(value) == value {
 		return
 	}
+
 	resp.Diagnostics.AddAttributeError(
 		req.Path,
 		invalidPathSummary,
@@ -73,11 +79,19 @@ func (pathValidator) ValidateString(_ context.Context, req validator.StringReque
 	)
 }
 
-func (r *fileAbsentResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *fileAbsentResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_file_absent"
 }
 
-func (r *fileAbsentResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *fileAbsentResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "pveguest_file_absent requires a path inside a guest not to exist. " +
 			"Create and Update delete a regular file or symbolic link at the path. " +
@@ -94,11 +108,19 @@ func (r *fileAbsentResource) Schema(_ context.Context, _ resource.SchemaRequest,
 	}
 }
 
-func (r *fileAbsentResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *fileAbsentResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *fileAbsentResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *fileAbsentResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	parsed, isValid := splitGuestImportID(req.ID)
 	if !isValid {
 		resp.Diagnostics.AddError(fileAbsentImportSummary, importIDError(req.ID, fileImportFormat))
@@ -108,8 +130,12 @@ func (r *fileAbsentResource) ImportState(ctx context.Context, req resource.Impor
 	var schemaResp resource.SchemaResponse
 	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
 	attributes := schemaResp.Schema.Attributes
-	resp.Diagnostics.Append(validateImportedString(ctx, fileAbsentImportSummary, attributes, "kind", parsed.Kind)...)
-	resp.Diagnostics.Append(validateImportedString(ctx, fileAbsentImportSummary, attributes, "path", parsed.Rest)...)
+	resp.Diagnostics.Append(
+		validateImportedString(ctx, fileAbsentImportSummary, attributes, "kind", parsed.Kind)...,
+	)
+	resp.Diagnostics.Append(
+		validateImportedString(ctx, fileAbsentImportSummary, attributes, "path", parsed.Rest)...,
+	)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -120,64 +146,91 @@ func (r *fileAbsentResource) ImportState(ctx context.Context, req resource.Impor
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, fwpath.Root("path"), parsed.Rest)...)
 }
 
-func (r *fileAbsentResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *fileAbsentResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan fileAbsentModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
 	if err := r.removePath(ctx, guest, plan.Path.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Cannot remove file", err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // When the path exists, Read removes the resource from state. The next plan
 // proposes recreating the resource; applying it tries to delete the path.
-func (r *fileAbsentResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *fileAbsentResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state fileAbsentModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	guest := guestOf(state.Node, state.VMID, state.Kind)
 	_, exists, err := lstatType(ctx, r.data.client, guest, state.Path.ValueString())
 	if err != nil {
 		resp.Diagnostics.AddError("Cannot read pveguest_file_absent", err.Error())
 		return
 	}
+
 	if exists {
 		resp.State.RemoveResource(ctx)
 	}
 }
 
-func (r *fileAbsentResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *fileAbsentResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan fileAbsentModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	guest := guestOf(plan.Node, plan.VMID, plan.Kind)
 	if err := r.removePath(ctx, guest, plan.Path.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Cannot remove file", err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // Delete removes only the state entry and does not change the guest.
-func (r *fileAbsentResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
+func (r *fileAbsentResource) Delete(
+	_ context.Context,
+	_ resource.DeleteRequest,
+	_ *resource.DeleteResponse,
+) {
 }
 
 // removePath deletes a regular file or symbolic link and verifies that the
 // path does not exist.
-func (r *fileAbsentResource) removePath(ctx context.Context, guest transport.Guest, filePath string) error {
+func (r *fileAbsentResource) removePath(
+	ctx context.Context,
+	guest transport.Guest,
+	filePath string,
+) error {
 	fileType, exists, err := lstatType(ctx, r.data.client, guest, filePath)
 	if err != nil {
 		return err
 	}
+
 	if exists {
 		switch fileType {
 		case fileTypeRegular, fileTypeRegularEmpty, fileTypeSymbolicLink:
@@ -186,9 +239,18 @@ func (r *fileAbsentResource) removePath(ctx context.Context, guest transport.Gue
 				return err
 			}
 		case fileTypeDirectory:
-			return fmt.Errorf("on guest %s, %s is a directory; pveguest_file_absent removes only a regular file or a symbolic link", guest, filePath)
+			return fmt.Errorf(
+				"on guest %s, %s is a directory; pveguest_file_absent removes only a regular file or a symbolic link",
+				guest,
+				filePath,
+			)
 		default:
-			return fmt.Errorf("on guest %s, %s has file type %s; pveguest_file_absent removes only a regular file or a symbolic link", guest, filePath, fileType)
+			return fmt.Errorf(
+				"on guest %s, %s has file type %s; pveguest_file_absent removes only a regular file or a symbolic link",
+				guest,
+				filePath,
+				fileType,
+			)
 		}
 	}
 
@@ -196,9 +258,11 @@ func (r *fileAbsentResource) removePath(ctx context.Context, guest transport.Gue
 	if err != nil {
 		return err
 	}
+
 	if stillExists {
 		return fmt.Errorf("on guest %s, %s still exists after removal", guest, filePath)
 	}
+
 	return nil
 }
 
@@ -215,12 +279,16 @@ func lstatType(
 	if err != nil {
 		return "", false, err
 	}
+
 	if result.ExitCode != 0 {
 		stderr := string(result.Stderr)
-		if strings.Contains(stderr, missingFileMessage) || strings.Contains(stderr, notADirectoryMessage) {
+		if strings.Contains(stderr, missingFileMessage) ||
+			strings.Contains(stderr, notADirectoryMessage) {
 			return "", false, nil
 		}
+
 		return "", false, commandFailure(guest, command, result)
 	}
+
 	return firstLine(result.Stdout), true, nil
 }

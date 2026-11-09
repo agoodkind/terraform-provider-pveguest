@@ -35,57 +35,93 @@ func TestAccGuestIsClean(t *testing.T) {
 			t.Errorf("%s exists after the tests", path)
 		}
 	}
-	for _, name := range []string{testPackage, noStartPackage, servicePackage, secondServicePackage, thirdServicePackage, fourthServicePackage} {
+
+	for _, name := range []string{
+		testPackage,
+		noStartPackage,
+		servicePackage,
+		secondServicePackage,
+		thirdServicePackage,
+		fourthServicePackage,
+	} {
 		if err := guest.expectPackagePurged(name)(nil); err != nil {
 			t.Error(err)
 		}
 	}
+
 	if state := guest.systemctlState("is-active", noStartUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", noStartUnit, state)
 	}
+
 	if state := guest.systemctlState("is-active", serviceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", serviceUnit, state)
 	}
+
 	if state := guest.systemctlState("is-active", secondServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", secondServiceUnit, state)
 	}
+
 	if state := guest.systemctlState("is-active", thirdServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", thirdServiceUnit, state)
 	}
+
 	if state := guest.systemctlState("is-active", fourthServiceUnit); state != "inactive" {
 		t.Errorf("%s has state %s after the tests; expected inactive", fourthServiceUnit, state)
 	}
+
 	present := guest.presentPackages()
 	recordBaseline(present)
 	baselineMutex.Lock()
 	baseline := baselinePackages
 	baselineMutex.Unlock()
 	if added := packagesAbsentFrom(baseline, present); len(added) > 0 {
-		t.Errorf("Package records added by the tests remain in dpkg: %s.", strings.Join(added, ", "))
+		t.Errorf(
+			"Package records added by the tests remain in dpkg: %s.",
+			strings.Join(added, ", "),
+		)
 	}
+
 	for _, pattern := range ownedFilePatterns {
 		if remaining := guest.findFiles(pattern.directory, pattern.name); len(remaining) > 0 {
-			t.Errorf("Files matching %s remain after the tests: %s", pattern.directory+"/"+pattern.name, strings.Join(remaining, ", "))
+			t.Errorf(
+				"Files matching %s remain after the tests: %s",
+				pattern.directory+"/"+pattern.name,
+				strings.Join(remaining, ", "),
+			)
 		}
 	}
+
 	hasSysrepo := guest.run(nil, "sh", "-c", "command -v sysrepoctl").ExitCode == 0
 	if hasSysrepo && guest.sysrepoModuleRow() != "" {
 		t.Errorf("sysrepo module %s is installed after the tests", testSysrepoModule)
 	}
+
 	if state := guest.systemctlState("is-active", testTimer); state != "inactive" {
 		t.Errorf("%s is %s after the tests, want inactive", testTimer, state)
 	}
+
 	removalState := guest.systemctlState("is-active", testRemovalService)
 	if removalState != "inactive" && removalState != "failed" {
-		t.Errorf("%s is %s after the tests, want inactive or failed", testRemovalService, removalState)
+		t.Errorf(
+			"%s is %s after the tests, want inactive or failed",
+			testRemovalService,
+			removalState,
+		)
 	}
+
 	importState := guest.systemctlState("is-active", testImportService)
 	if importState != "inactive" && importState != "failed" {
-		t.Errorf("%s is %s after the tests, want inactive or failed", testImportService, importState)
+		t.Errorf(
+			"%s is %s after the tests, want inactive or failed",
+			testImportService,
+			importState,
+		)
 	}
+
 	headerServerUnit := guestServerUnit + ".service"
 	if state := guest.systemctlState("is-active", headerServerUnit); state != "inactive" {
 		t.Errorf("%s is %s after the tests, want inactive", headerServerUnit, state)
 	}
+
 	t.Logf("%s: test directory, test units, and package %s are absent", guest.guest, testPackage)
 }

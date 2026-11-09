@@ -100,26 +100,42 @@ func (s *requestHeaderServer) clearCache(t *testing.T) {
 
 func (s *requestHeaderServer) handler(content []byte) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(requestHeaderObject, func(writer http.ResponseWriter, request *http.Request) {
-		want, _ := s.accepted.Load().(string)
-		if request.Header.Get(requestHeaderName) != want {
-			s.rejected.Add(1)
-			http.Error(writer, "missing or wrong Authorization header", http.StatusUnauthorized)
-			return
-		}
-		s.authorized.Add(1)
-		_, _ = writer.Write(content)
-	})
-	mux.HandleFunc("/redirect", func(writer http.ResponseWriter, request *http.Request) {
-		http.Redirect(writer, request, s.redirectTarget, http.StatusFound)
-	})
-	mux.HandleFunc("/same", func(writer http.ResponseWriter, request *http.Request) {
-		http.Redirect(writer, request, requestHeaderObject, http.StatusFound)
-	})
+	mux.HandleFunc(
+		requestHeaderObject,
+		func(writer http.ResponseWriter, request *http.Request) {
+			want, _ := s.accepted.Load().(string)
+			if request.Header.Get(requestHeaderName) != want {
+				s.rejected.Add(1)
+				http.Error(writer, "missing or wrong Authorization header", http.StatusUnauthorized)
+
+				return
+			}
+
+			s.authorized.Add(1)
+			_, _ = writer.Write(content)
+		},
+	)
+	mux.HandleFunc(
+		"/redirect",
+		func(writer http.ResponseWriter, request *http.Request) {
+			http.Redirect(writer, request, s.redirectTarget, http.StatusFound)
+		},
+	)
+	mux.HandleFunc(
+		"/same",
+		func(writer http.ResponseWriter, request *http.Request) {
+			http.Redirect(writer, request, requestHeaderObject, http.StatusFound)
+		},
+	)
+
 	return mux
 }
 
-func (g *testGuest) serveWithRequestHeader(t *testing.T, content []byte, token string) *requestHeaderServer {
+func (g *testGuest) serveWithRequestHeader(
+	t *testing.T,
+	content []byte,
+	token string,
+) *requestHeaderServer {
 	t.Helper()
 	recorder := &requestHeaderServer{cacheHome: t.TempDir()}
 	recorder.accept(token)
@@ -129,16 +145,21 @@ func (g *testGuest) serveWithRequestHeader(t *testing.T, content []byte, token s
 	g.controllerCAFile = writeServerCA(t, server)
 	t.Setenv("XDG_CACHE_HOME", recorder.cacheHome)
 	recorder.url = server.URL
+
 	return recorder
 }
 
 func writeServerCA(t *testing.T, server *httptest.Server) string {
 	t.Helper()
-	certificate := pem.EncodeToMemory(&pem.Block{Type: requestHeaderPEMBlock, Bytes: server.Certificate().Raw})
+	certificate := pem.EncodeToMemory(&pem.Block{
+		Type:  requestHeaderPEMBlock,
+		Bytes: server.Certificate().Raw,
+	})
 	caFile := filepath.Join(t.TempDir(), requestHeaderCAName)
 	if err := os.WriteFile(caFile, certificate, requestHeaderCAMode); err != nil {
 		t.Fatal(err)
 	}
+
 	return caFile
 }
 
@@ -161,18 +182,24 @@ func (s *guestHeaderServer) state() guestHeaderServerState {
 	if err := json.Unmarshal([]byte(s.guest.readFile(s.statePath)), &state); err != nil {
 		s.guest.t.Fatal(err)
 	}
+
 	return state
 }
 
 func (s *guestHeaderServer) checkProcessScan() error {
 	state := s.state()
 	if state.Authorized == 0 || state.Scanned == 0 {
-		return fmt.Errorf("the guest server scanned %d process command lines for %d authorized requests",
-			state.Scanned, state.Authorized)
+		return fmt.Errorf(
+			"the guest server scanned %d process command lines for %d authorized requests",
+			state.Scanned,
+			state.Authorized,
+		)
 	}
+
 	if state.Leaks != 0 {
 		return fmt.Errorf("%d guest process command lines contained the header value", state.Leaks)
 	}
+
 	return nil
 }
 
@@ -193,16 +220,25 @@ func buildHeaderServer(t *testing.T, architecture string) []byte {
 	t.Helper()
 	output := filepath.Join(t.TempDir(), "headerserver")
 	command := exec.CommandContext(
-		t.Context(), "go", "build", "-trimpath", "-ldflags=-s -w", "-o", output, guestServerSource,
+		t.Context(),
+		"go",
+		"build",
+		"-trimpath",
+		"-ldflags=-s -w",
+		"-o",
+		output,
+		guestServerSource,
 	)
 	command.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+architecture, "CGO_ENABLED=0")
 	if combined, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("go build %s: %v: %s", guestServerSource, err, combined)
 	}
+
 	content, err := os.ReadFile(output)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return content
 }
 
@@ -213,9 +249,11 @@ func gzipBytes(t *testing.T, content []byte) []byte {
 	if _, err := writer.Write(content); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	return compressed.Bytes()
 }
 
@@ -225,6 +263,7 @@ func guestServerCertificate(t *testing.T) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	template := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
 		Subject:               pkix.Name{CommonName: guestServerCommonName},
@@ -240,18 +279,28 @@ func guestServerCertificate(t *testing.T) ([]byte, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: requestHeaderPEMBlock, Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	certificatePEM := pem.EncodeToMemory(&pem.Block{
+		Type:  requestHeaderPEMBlock,
+		Bytes: der,
+	})
+	keyPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "EC PRIVATE KEY",
+		Bytes: keyDER,
+	})
+
 	return certificatePEM, keyPEM
 }
 
 func (g *testGuest) putFile(path string, content []byte, mode string) {
 	g.t.Helper()
 	g.mustRun("install", "-m", mode, "/dev/null", path)
+
 	for _, piece := range transport.SplitStdin(g.guest.Kind, content) {
 		result := g.run(piece, "dd", "of="+path, "oflag=append", "conv=notrunc", "status=none")
 		if result.ExitCode != 0 {
@@ -269,7 +318,11 @@ func (g *testGuest) stopHeaderServer() {
 	g.mustRun("rm", "-rf", "--", guestWorkDirectory)
 }
 
-func (g *testGuest) startHeaderServer(t *testing.T, content []byte, token string) *guestHeaderServer {
+func (g *testGuest) startHeaderServer(
+	t *testing.T,
+	content []byte,
+	token string,
+) *guestHeaderServer {
 	t.Helper()
 	t.Cleanup(g.stopHeaderServer)
 	architecture := goArchitecture(t, strings.TrimSpace(g.mustRun("uname", "-m")))
@@ -293,33 +346,73 @@ func (g *testGuest) startHeaderServer(t *testing.T, content []byte, token string
 
 	g.putFile(guestCAPath, certificatePEM, guestPublicMode)
 	g.mustRun("update-ca-certificates")
-	if hash := strings.TrimSpace(g.mustRun("openssl", "x509", "-hash", "-noout", "-in", guestCAPath)); hash != guestCAHash {
-		t.Fatalf("the generated CA has subject hash %s, the cleanup removes the link for %s", hash, guestCAHash)
+	if hash := strings.TrimSpace(
+		g.mustRun("openssl", "x509", "-hash", "-noout", "-in", guestCAPath),
+	); hash != guestCAHash {
+		t.Fatalf(
+			"the generated CA has subject hash %s, the cleanup removes the link for %s",
+			hash,
+			guestCAHash,
+		)
 	}
 
 	g.mustRun(
-		"systemd-run", "--unit="+guestServerUnit, "--collect", binary,
-		"-addr", "127.0.0.1:"+guestServerPort, "-cert", certificatePath, "-key", keyPath,
-		"-token-file", tokenPath, "-content-file", contentPath, "-state-file", statePath,
+		"systemd-run",
+		"--unit="+guestServerUnit,
+		"--collect",
+		binary,
+		"-addr",
+		"127.0.0.1:"+guestServerPort,
+		"-cert",
+		certificatePath,
+		"-key",
+		keyPath,
+		"-token-file",
+		tokenPath,
+		"-content-file",
+		contentPath,
+		"-state-file",
+		statePath,
 	)
+
 	for attempt := 0; attempt < guestReadyAttempts; attempt++ {
 		result := g.run(nil, "curl", "-fsS", "-o", "/dev/null", guestServerBase+"/ready")
 		if result.ExitCode == 0 {
-			return &guestHeaderServer{guest: g, url: guestServerBase + requestHeaderObject, statePath: statePath}
+			return &guestHeaderServer{
+				guest:     g,
+				url:       guestServerBase + requestHeaderObject,
+				statePath: statePath,
+			}
 		}
+
 		time.Sleep(guestReadyDelay)
 	}
+
 	t.Fatalf("the guest server did not answer %s/ready", guestServerBase)
+
 	return nil
 }
 
 func requestHeaderArguments(token string, version int) string {
-	return fmt.Sprintf(`request_headers_wo         = { %s = %q, %s }
-  request_headers_wo_version = %d`, requestHeaderName, requestHeaderPrefix+token, requestHeaderEscapedLine, version)
+	return fmt.Sprintf(
+		`request_headers_wo         = { %s = %q, %s }
+  request_headers_wo_version = %d`,
+		requestHeaderName,
+		requestHeaderPrefix+token,
+		requestHeaderEscapedLine,
+		version,
+	)
 }
 
-func (g *testGuest) guestDownloadBlock(name string, url string, hash string, path string, extra string) string {
-	return fmt.Sprintf(`
+func (g *testGuest) guestDownloadBlock(
+	name string,
+	url string,
+	hash string,
+	path string,
+	extra string,
+) string {
+	return fmt.Sprintf(
+		`
 resource "pveguest_download" %q {
   node   = local.node
   vmid   = local.vmid
@@ -330,17 +423,38 @@ resource "pveguest_download" %q {
   path   = %q
   %s
 }
-`, name, url, hash, path, extra)
+`,
+		name,
+		url,
+		hash,
+		path,
+		extra,
+	)
 }
 
-func (g *testGuest) workspaceConfig(fetch string, url string, hash string, path string, version int, headers bool) string {
+func (g *testGuest) workspaceConfig(
+	fetch string,
+	url string,
+	hash string,
+	path string,
+	version int,
+	headers bool,
+) string {
 	extra := ""
 	if headers {
-		extra = fmt.Sprintf(`request_headers_wo         = { %s = "%s${var.secret}", %s = var.secret, %s }
+		extra = fmt.Sprintf(
+			`request_headers_wo         = { %s = "%s${var.secret}", %s = var.secret, %s }
   request_headers_wo_version = %d`,
-			requestHeaderName, requestHeaderPrefix, requestHeaderEchoName, requestHeaderEscapedLine, version)
+			requestHeaderName,
+			requestHeaderPrefix,
+			requestHeaderEchoName,
+			requestHeaderEscapedLine,
+			version,
+		)
 	}
-	return g.providerBlock() + fmt.Sprintf(`
+
+	return g.providerBlock() + fmt.Sprintf(
+		`
 variable "secret" {
   type      = string
   sensitive = true
@@ -357,18 +471,29 @@ resource "pveguest_download" "test" {
   path   = %q
   %s
 }
-`, fetch, url, hash, path, extra)
+`,
+		fetch,
+		url,
+		hash,
+		path,
+		extra,
+	)
 }
 
 func newHeaderWorkspace(t *testing.T) *tofuWorkspace {
 	t.Helper()
-	return &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
+	return &tofuWorkspace{
+		t:         t,
+		directory: t.TempDir(),
+		binary:    requireVariable(t, tofuPathVariable),
+	}
 }
 
 func (w *tofuWorkspace) applyConfig(config string, token string) (string, int) {
 	w.t.Helper()
 	w.variableValue = token
 	w.writeConfig(config)
+
 	return w.run("apply", "-no-color", "-auto-approve")
 }
 
@@ -378,12 +503,15 @@ func (w *tofuWorkspace) requireRejected(config string, token string, pattern *re
 	if exitCode == 0 {
 		w.t.Fatalf("the apply succeeded, want a rejected download:\n%s", output)
 	}
+
 	if !pattern.MatchString(output) {
 		w.t.Fatalf("the apply output does not match %s:\n%s", pattern, output)
 	}
+
 	if token != "" && strings.Contains(output, token) {
 		w.t.Fatal("the apply output contains the header value")
 	}
+
 	w.requireStateOmitsIfPresent(token)
 }
 
@@ -393,9 +521,11 @@ func (w *tofuWorkspace) requireApplied(config string, token string) {
 	if exitCode != 0 {
 		w.t.Fatalf("the apply exited with status %d:\n%s", exitCode, output)
 	}
+
 	if strings.Contains(output, token) {
 		w.t.Fatal("the apply output contains the header value")
 	}
+
 	w.requireStateOmitsIfPresent(token)
 }
 
@@ -404,9 +534,11 @@ func (w *tofuWorkspace) requireStateOmitsIfPresent(token string) {
 	if token == "" {
 		return
 	}
+
 	if _, err := os.Stat(filepath.Join(w.directory, stateFileName)); err != nil {
 		return
 	}
+
 	w.requireOmits(stateFileName, token)
 }
 
@@ -416,6 +548,7 @@ func requestHeaderPayload(t *testing.T) ([]byte, string) {
 	if _, err := rand.Read(payload); err != nil {
 		t.Fatal(err)
 	}
+
 	return payload, bytesHash(payload)
 }
 
@@ -428,44 +561,75 @@ func TestAccDownloadRequestHeader(t *testing.T) {
 	url := recorder.url + requestHeaderObject
 	download := func(token string, version int) string {
 		return guest.providerBlock() +
-			guest.controllerDownloadBlock("test", url, hash, path, requestHeaderArguments(token, version))
+			guest.controllerDownloadBlock(
+				"test",
+				url,
+				hash,
+				path,
+				requestHeaderArguments(token, version),
+			)
 	}
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: download(requestHeaderToken, 1),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("pveguest_download.test", "file_sha256", hash),
-					resource.TestCheckResourceAttr("pveguest_download.test", "request_headers_wo_version", "1"),
-					resource.TestCheckNoResourceAttr("pveguest_download.test", "request_headers_wo.%"),
-					checkStateOmits(requestHeaderToken),
-					checkGuest(func() error {
-						if recorder.authorized.Load() != 1 {
-							return fmt.Errorf("the server answered %d requests with the header, want 1", recorder.authorized.Load())
-						}
-						return guest.expectFileHash(path, hash)()
-					}),
-				),
-			},
-			{
-				Config: download(requestHeaderRotated, 1),
-				ConfigPlanChecks: resource.ConfigPlanChecks{
-					PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			Steps: []resource.TestStep{
+				{
+					Config: download(requestHeaderToken, 1),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							"pveguest_download.test",
+							"file_sha256",
+							hash,
+						),
+						resource.TestCheckResourceAttr(
+							"pveguest_download.test",
+							"request_headers_wo_version",
+							"1",
+						),
+						resource.TestCheckNoResourceAttr(
+							"pveguest_download.test",
+							"request_headers_wo.%",
+						),
+						checkStateOmits(requestHeaderToken),
+						checkGuest(func() error {
+							if recorder.authorized.Load() != 1 {
+								return fmt.Errorf(
+									"the server answered %d requests with the header, want 1",
+									recorder.authorized.Load(),
+								)
+							}
+
+							return guest.expectFileHash(path, hash)()
+						}),
+					),
+				},
+				{
+					Config: download(requestHeaderRotated, 1),
+					ConfigPlanChecks: resource.ConfigPlanChecks{
+						PreApply: []plancheck.PlanCheck{plancheck.ExpectEmptyPlan()},
+					},
+				},
+				{
+					Config: download(requestHeaderRotated, 2),
+					ConfigPlanChecks: expectAction(
+						"pveguest_download.test",
+						plancheck.ResourceActionUpdate,
+					),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							"pveguest_download.test",
+							"request_headers_wo_version",
+							"2",
+						),
+						checkStateOmits(requestHeaderRotated),
+						checkGuest(guest.expectFileHash(path, hash)),
+					),
 				},
 			},
-			{
-				Config:           download(requestHeaderRotated, 2),
-				ConfigPlanChecks: expectAction("pveguest_download.test", plancheck.ResourceActionUpdate),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("pveguest_download.test", "request_headers_wo_version", "2"),
-					checkStateOmits(requestHeaderRotated),
-					checkGuest(guest.expectFileHash(path, hash)),
-				),
-			},
 		},
-	})
+	)
 }
 
 func TestAccDownloadRequestHeaderCacheMissRejected(t *testing.T) {
@@ -474,7 +638,14 @@ func TestAccDownloadRequestHeaderCacheMissRejected(t *testing.T) {
 	payload, hash := requestHeaderPayload(t)
 	recorder := guest.serveWithRequestHeader(t, payload, requestHeaderToken)
 	path := testDirectory + "/request-header/rejected.bin"
-	config := guest.workspaceConfig("controller", recorder.url+requestHeaderObject, hash, path, 1, true)
+	config := guest.workspaceConfig(
+		"controller",
+		recorder.url+requestHeaderObject,
+		hash,
+		path,
+		1,
+		true,
+	)
 	workspace := newHeaderWorkspace(t)
 	workspace.writeConfig(config)
 	workspace.mustRun("init", "-no-color")
@@ -483,8 +654,13 @@ func TestAccDownloadRequestHeaderCacheMissRejected(t *testing.T) {
 	workspace.requireRejected(config, requestHeaderWrong, controllerRejection)
 
 	if recorder.rejected.Load() == 0 || recorder.authorized.Load() != 0 {
-		t.Fatalf("server counts: %d rejected, %d authorized", recorder.rejected.Load(), recorder.authorized.Load())
+		t.Fatalf(
+			"server counts: %d rejected, %d authorized",
+			recorder.rejected.Load(),
+			recorder.authorized.Load(),
+		)
 	}
+
 	if guest.exists(path) {
 		t.Fatalf("%s exists after the rejected download", path)
 	}
@@ -518,9 +694,11 @@ func TestAccDownloadRequestHeaderRotation(t *testing.T) {
 	if got := recorder.authorized.Load() - authorizedBefore; got != 1 {
 		t.Fatalf("the rotated token made %d authorized requests, want 1", got)
 	}
+
 	if err := guest.expectFileHash(path, hash)(); err != nil {
 		t.Fatal(err)
 	}
+
 	workspace.requireOmits(stateFileName, requestHeaderToken)
 
 	workspace.mustRun("destroy", "-no-color", "-auto-approve")
@@ -531,13 +709,17 @@ func TestAccDownloadRequestHeaderRedirect(t *testing.T) {
 	guest.useTestDirectory()
 	payload, hash := requestHeaderPayload(t)
 	var targetRequests, targetLeaks atomic.Int64
-	target := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		targetRequests.Add(1)
-		if request.Header.Get(requestHeaderName) != "" || request.Header.Get("X-Pveguest-Escaped") != "" {
-			targetLeaks.Add(1)
-		}
-		_, _ = writer.Write(payload)
-	}))
+	target := httptest.NewTLSServer(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			targetRequests.Add(1)
+			if request.Header.Get(requestHeaderName) != "" ||
+				request.Header.Get("X-Pveguest-Escaped") != "" {
+				targetLeaks.Add(1)
+			}
+
+			_, _ = writer.Write(payload)
+		}),
+	)
 	t.Cleanup(target.Close)
 	origin := guest.serveWithRequestHeader(t, payload, requestHeaderToken)
 	origin.redirectTarget = target.URL + requestHeaderObject
@@ -551,8 +733,13 @@ func TestAccDownloadRequestHeaderRedirect(t *testing.T) {
 	origin.clearCache(t)
 	workspace.requireApplied(otherHost, requestHeaderToken)
 	if targetRequests.Load() != 1 || targetLeaks.Load() != 0 {
-		t.Fatalf("redirect target: %d requests, %d with a header", targetRequests.Load(), targetLeaks.Load())
+		t.Fatalf(
+			"redirect target: %d requests, %d with a header",
+			targetRequests.Load(),
+			targetLeaks.Load(),
+		)
 	}
+
 	if err := guest.expectFileHash(path, hash)(); err != nil {
 		t.Fatal(err)
 	}
@@ -560,11 +747,16 @@ func TestAccDownloadRequestHeaderRedirect(t *testing.T) {
 	origin.clearCache(t)
 	workspace.requireApplied(sameOrigin, requestHeaderToken)
 	if origin.authorized.Load() != 1 {
-		t.Fatalf("the same-origin redirect made %d authorized requests, want 1", origin.authorized.Load())
+		t.Fatalf(
+			"the same-origin redirect made %d authorized requests, want 1",
+			origin.authorized.Load(),
+		)
 	}
+
 	if err := guest.expectFileHash(path, hash)(); err != nil {
 		t.Fatal(err)
 	}
+
 	workspace.mustRun("destroy", "-no-color", "-auto-approve")
 }
 
@@ -574,6 +766,7 @@ func closingHandler() http.Handler {
 		if err != nil {
 			return
 		}
+
 		_ = connection.Close()
 	})
 }
@@ -585,10 +778,12 @@ func startUntrustedServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	server := httptest.NewUnstartedServer(closingHandler())
 	server.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12}
 	server.StartTLS()
 	t.Cleanup(server.Close)
+
 	return server
 }
 
@@ -606,6 +801,7 @@ func errorPathHandler(closedURL string, untrustedURL string) http.Handler {
 			http.NotFound(writer, request)
 			return
 		}
+
 		writer.WriteHeader(http.StatusFound)
 	})
 }
@@ -626,36 +822,53 @@ func TestAccDownloadRequestHeaderErrorsRedacted(t *testing.T) {
 	closed := httptest.NewTLSServer(closingHandler())
 	t.Cleanup(closed.Close)
 	untrusted := startUntrustedServer(t)
+
 	for _, testCase := range cases {
-		t.Run(testCase.name, func(t *testing.T) {
-			server := httptest.NewTLSServer(errorPathHandler(closed.URL, untrusted.URL))
-			t.Cleanup(server.Close)
-			guest.controllerCAFile = writeServerCA(t, server)
-			t.Setenv("XDG_CACHE_HOME", t.TempDir())
-			path := testDirectory + "/request-header/error.bin"
-			config := guest.workspaceConfig("controller", server.URL+testCase.path, hash, path, 1, true)
-			workspace := newHeaderWorkspace(t)
-			workspace.writeConfig(config)
-			workspace.variableValue = requestHeaderEchoToken
-			workspace.mustRun("init", "-no-color")
-			workspace.mustRun("plan", "-no-color", "-out", planFileName)
+		t.Run(
+			testCase.name,
+			func(t *testing.T) {
+				server := httptest.NewTLSServer(errorPathHandler(closed.URL, untrusted.URL))
+				t.Cleanup(server.Close)
+				guest.controllerCAFile = writeServerCA(t, server)
+				t.Setenv("XDG_CACHE_HOME", t.TempDir())
+				path := testDirectory + "/request-header/error.bin"
+				config := guest.workspaceConfig(
+					"controller",
+					server.URL+testCase.path,
+					hash,
+					path,
+					1,
+					true,
+				)
+				workspace := newHeaderWorkspace(t)
+				workspace.writeConfig(config)
+				workspace.variableValue = requestHeaderEchoToken
+				workspace.mustRun("init", "-no-color")
+				workspace.mustRun("plan", "-no-color", "-out", planFileName)
 
-			t.Setenv("TF_LOG", requestHeaderLogLevel)
-			output, exitCode := workspace.run("apply", "-no-color", planFileName)
+				t.Setenv("TF_LOG", requestHeaderLogLevel)
+				output, exitCode := workspace.run("apply", "-no-color", planFileName)
 
-			if exitCode == 0 {
-				t.Fatalf("the apply succeeded, want a failed download:\n%s", output)
-			}
-			if !strings.Contains(output, requestHeaderLogLine) {
-				t.Fatalf("the provider log line %q is missing from the tofu output", requestHeaderLogLine)
-			}
-			if testCase.requireMarks && !redactedPattern.MatchString(output) {
-				t.Fatal("the tofu output does not contain a redaction marker")
-			}
-			if strings.Contains(output, requestHeaderEchoToken) {
-				t.Fatal("the tofu output contains the header value")
-			}
-		})
+				if exitCode == 0 {
+					t.Fatalf("the apply succeeded, want a failed download:\n%s", output)
+				}
+
+				if !strings.Contains(output, requestHeaderLogLine) {
+					t.Fatalf(
+						"the provider log line %q is missing from the tofu output",
+						requestHeaderLogLine,
+					)
+				}
+
+				if testCase.requireMarks && !redactedPattern.MatchString(output) {
+					t.Fatal("the tofu output does not contain a redaction marker")
+				}
+
+				if strings.Contains(output, requestHeaderEchoToken) {
+					t.Fatal("the tofu output contains the header value")
+				}
+			},
+		)
 	}
 }
 
@@ -677,12 +890,15 @@ func TestAccDownloadGuestRequestHeaderErrorRedacted(t *testing.T) {
 	if exitCode == 0 {
 		t.Fatalf("the apply succeeded, want a failed download:\n%s", output)
 	}
+
 	if !redactedPattern.MatchString(output) {
 		t.Fatal("the tofu output does not contain a redaction marker")
 	}
+
 	if strings.Contains(output, requestHeaderEchoToken) {
 		t.Fatal("the tofu output contains the header value")
 	}
+
 	if guest.exists(path) {
 		t.Fatalf("%s exists after the failed download", path)
 	}
@@ -695,22 +911,38 @@ func TestAccDownloadGuestRequestHeader(t *testing.T) {
 	server := guest.startHeaderServer(t, payload, requestHeaderToken)
 	path := testDirectory + "/request-header/guest.bin"
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				Config: guest.providerBlock() +
-					guest.guestDownloadBlock("test", server.url, hash, path, requestHeaderArguments(requestHeaderToken, 1)),
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("pveguest_download.test", "file_sha256", hash),
-					resource.TestCheckNoResourceAttr("pveguest_download.test", "request_headers_wo.%"),
-					checkStateOmits(requestHeaderToken),
-					checkGuest(server.checkProcessScan),
-					checkGuest(guest.expectFileHash(path, hash)),
-				),
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			Steps: []resource.TestStep{
+				{
+					Config: guest.providerBlock() +
+						guest.guestDownloadBlock(
+							"test",
+							server.url,
+							hash,
+							path,
+							requestHeaderArguments(requestHeaderToken, 1),
+						),
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							"pveguest_download.test",
+							"file_sha256",
+							hash,
+						),
+						resource.TestCheckNoResourceAttr(
+							"pveguest_download.test",
+							"request_headers_wo.%",
+						),
+						checkStateOmits(requestHeaderToken),
+						checkGuest(server.checkProcessScan),
+						checkGuest(guest.expectFileHash(path, hash)),
+					),
+				},
 			},
 		},
-	})
+	)
 }
 
 func TestAccDownloadGuestRequestHeaderRejected(t *testing.T) {
@@ -730,8 +962,13 @@ func TestAccDownloadGuestRequestHeaderRejected(t *testing.T) {
 
 	state := server.state()
 	if state.Authorized != 0 || state.Rejected < 2 {
-		t.Fatalf("guest server counts: %d authorized, %d rejected", state.Authorized, state.Rejected)
+		t.Fatalf(
+			"guest server counts: %d authorized, %d rejected",
+			state.Authorized,
+			state.Rejected,
+		)
 	}
+
 	if guest.exists(path) {
 		t.Fatalf("%s exists after the rejected downloads", path)
 	}
@@ -746,8 +983,10 @@ func TestAccDownloadGuestRequestHeaderRejected(t *testing.T) {
 	if err := guest.expectFileHash(path, hash)(); err != nil {
 		t.Fatal(err)
 	}
+
 	if err := server.checkProcessScan(); err != nil {
 		t.Fatal(err)
 	}
+
 	workspace.mustRun("destroy", "-no-color", "-auto-approve")
 }

@@ -70,9 +70,11 @@ func (locks *guestLocks) lock(guest transport.Guest) func() {
 		guestLock = &sync.Mutex{}
 		locks.locks[guest] = guestLock
 	}
+
 	locks.mutex.Unlock()
 
 	guestLock.Lock()
+
 	return guestLock.Unlock
 }
 
@@ -94,14 +96,20 @@ func newHostTargetLocks(nodes map[string]transport.NodeConfig) (*hostTargetLocks
 		if nodeName == "" {
 			nodeName = name
 		}
+
 		endpoint, err := url.Parse(node.Endpoint)
 		if err != nil {
 			slog.Error("parse node endpoint failed", "node", name, "err", err)
 			return nil, fmt.Errorf("node %q: parse endpoint: %w", name, err)
 		}
+
 		identities[name] = hostTargetNode(endpoint, nodeName)
 	}
-	return &hostTargetLocks{nodes: identities, locks: &hashLocks{locks: map[string]*sync.Mutex{}}}, nil
+
+	return &hostTargetLocks{
+		nodes: identities,
+		locks: &hashLocks{locks: map[string]*sync.Mutex{}},
+	}, nil
 }
 
 func hostTargetNode(parsed *url.URL, nodeName string) string {
@@ -111,12 +119,15 @@ func hostTargetNode(parsed *url.URL, nodeName string) string {
 	if port == defaultEndpointPorts[scheme] {
 		port = ""
 	}
+
 	if port != "" {
 		host = net.JoinHostPort(host, port)
 	} else if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
+
 	identity := scheme + "://" + host + strings.TrimRight(parsed.EscapedPath(), "/")
+
 	return identity + hostTargetLockSeparator + nodeName
 }
 
@@ -132,12 +143,20 @@ func New(version string) func() provider.Provider {
 	}
 }
 
-func (p *pveguestProvider) Metadata(_ context.Context, _ provider.MetadataRequest, resp *provider.MetadataResponse) {
+func (p *pveguestProvider) Metadata(
+	_ context.Context,
+	_ provider.MetadataRequest,
+	resp *provider.MetadataResponse,
+) {
 	resp.TypeName = "pveguest"
 	resp.Version = p.version
 }
 
-func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
+func (p *pveguestProvider) Schema(
+	_ context.Context,
+	_ provider.SchemaRequest,
+	resp *provider.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "Declares files, links, apt packages, systemd units, and sysrepo state inside Proxmox guests. " +
 			"Commands run through the Proxmox VE API of the hypervisor.",
@@ -199,31 +218,18 @@ func (p *pveguestProvider) Schema(_ context.Context, _ provider.SchemaRequest, r
 	}
 }
 
-func (p *pveguestProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
+func (p *pveguestProvider) Configure(
+	ctx context.Context,
+	req provider.ConfigureRequest,
+	resp *provider.ConfigureResponse,
+) {
 	var config providerModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	if config.Nodes.IsUnknown() || config.MaxRequests.IsUnknown() {
-		resp.Diagnostics.AddError(
-			"Unknown provider configuration",
-			"The nodes and max_requests arguments must be known when the provider is configured.",
-		)
-		return
-	}
-	if config.ControllerCAFile.IsUnknown() {
-		resp.Diagnostics.AddError(
-			"Unknown provider configuration",
-			"The controller_ca_file argument must be known when the provider is configured.",
-		)
-		return
-	}
-	if config.SMTP2GOAPIKey.IsUnknown() || config.SMTP2GOAPIURL.IsUnknown() {
-		resp.Diagnostics.AddError(
-			"Unknown provider configuration",
-			"The smtp2go_api_key and smtp2go_api_url arguments must be known when the provider is configured.",
-		)
+
+	if !knownProviderConfiguration(config, resp) {
 		return
 	}
 
@@ -239,10 +245,16 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 			model.NodeName.IsUnknown() || model.MaxExecRequests.IsUnknown() {
 			resp.Diagnostics.AddError(
 				"Unknown provider configuration",
-				fmt.Sprintf("The endpoint, api_token, insecure, node_name, and max_exec_requests arguments of node %q must be known when the provider is configured.", name),
+				fmt.Sprintf(
+					"The endpoint, api_token, insecure, node_name, and max_exec_requests arguments "+
+						"of node %q must be known when the provider is configured.",
+					name,
+				),
 			)
+
 			return
 		}
+
 		nodes[name] = transport.NodeConfig{
 			Endpoint: model.Endpoint.ValueString(),
 			APIToken: model.APIToken.ValueString(),
@@ -274,15 +286,18 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	if smtp2goAPIKey == "" {
 		smtp2goAPIKey = os.Getenv(smtp2goEnvironmentName)
 	}
+
 	smtp2goAPIURL := config.SMTP2GOAPIURL.ValueString()
 	if smtp2goAPIURL == "" {
 		smtp2goAPIURL = defaultSMTP2GOAPIURL
 	}
+
 	smtp2go, err := newSMTP2GOClient(smtp2goAPIURL, smtp2goAPIKey)
 	if err != nil {
 		resp.Diagnostics.AddError("Invalid provider configuration", err.Error())
 		return
 	}
+
 	data := &providerData{
 		client:          client,
 		aptLocks:        &guestLocks{locks: make(map[transport.Guest]*sync.Mutex)},
@@ -295,6 +310,37 @@ func (p *pveguestProvider) Configure(ctx context.Context, req provider.Configure
 	}
 	resp.ResourceData = data
 	resp.DataSourceData = data
+}
+
+func knownProviderConfiguration(config providerModel, resp *provider.ConfigureResponse) bool {
+	if config.Nodes.IsUnknown() || config.MaxRequests.IsUnknown() {
+		resp.Diagnostics.AddError(
+			"Unknown provider configuration",
+			"The nodes and max_requests arguments must be known when the provider is configured.",
+		)
+
+		return false
+	}
+
+	if config.ControllerCAFile.IsUnknown() {
+		resp.Diagnostics.AddError(
+			"Unknown provider configuration",
+			"The controller_ca_file argument must be known when the provider is configured.",
+		)
+
+		return false
+	}
+
+	if config.SMTP2GOAPIKey.IsUnknown() || config.SMTP2GOAPIURL.IsUnknown() {
+		resp.Diagnostics.AddError(
+			"Unknown provider configuration",
+			"The smtp2go_api_key and smtp2go_api_url arguments must be known when the provider is configured.",
+		)
+
+		return false
+	}
+
+	return true
 }
 
 func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resource {

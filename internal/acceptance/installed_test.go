@@ -35,7 +35,13 @@ func (w *tofuWorkspace) run(arguments ...string) (string, int) {
 	w.t.Helper()
 	command := exec.Command(w.binary, arguments...)
 	command.Dir = w.directory
-	command.Env = append(os.Environ(), "TF_IN_AUTOMATION=1", "TF_INPUT=0", reattachVariableName+"=", secretVariable+"="+w.variableValue)
+	command.Env = append(
+		os.Environ(),
+		"TF_IN_AUTOMATION=1",
+		"TF_INPUT=0",
+		reattachVariableName+"=",
+		secretVariable+"="+w.variableValue,
+	)
 	var output bytes.Buffer
 	command.Stdout = &output
 	command.Stderr = &output
@@ -43,10 +49,12 @@ func (w *tofuWorkspace) run(arguments ...string) (string, int) {
 	if err == nil {
 		return output.String(), 0
 	}
+
 	var exitError *exec.ExitError
 	if !errors.As(err, &exitError) {
 		w.t.Fatalf("tofu %s: %v", strings.Join(arguments, " "), err)
 	}
+
 	return output.String(), exitError.ExitCode()
 }
 
@@ -54,14 +62,24 @@ func (w *tofuWorkspace) mustRun(arguments ...string) string {
 	w.t.Helper()
 	output, exitCode := w.run(arguments...)
 	if exitCode != 0 {
-		w.t.Fatalf("tofu %s exited with status %d:\n%s", strings.Join(arguments, " "), exitCode, output)
+		w.t.Fatalf(
+			"tofu %s exited with status %d:\n%s",
+			strings.Join(arguments, " "),
+			exitCode,
+			output,
+		)
 	}
+
 	return output
 }
 
 func (w *tofuWorkspace) writeConfig(config string) {
 	w.t.Helper()
-	if err := os.WriteFile(filepath.Join(w.directory, "main.tf"), []byte(config), 0o600); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(w.directory, "main.tf"),
+		[]byte(config),
+		0o600,
+	); err != nil {
 		w.t.Fatal(err)
 	}
 }
@@ -72,6 +90,7 @@ func (w *tofuWorkspace) requireOmits(fileName string, secret string) {
 	if err != nil {
 		w.t.Fatal(err)
 	}
+
 	if bytes.Contains(content, []byte(secret)) {
 		w.t.Fatalf("%s contains the write-only content", fileName)
 	}
@@ -85,17 +104,21 @@ func (w *tofuWorkspace) requirePlanArchiveOmits(fileName string, secret string) 
 	if err != nil {
 		w.t.Fatal(err)
 	}
+
 	defer func() { _ = archive.Close() }()
+
 	for _, member := range archive.File {
 		reader, err := member.Open()
 		if err != nil {
 			w.t.Fatal(err)
 		}
+
 		content, err := io.ReadAll(reader)
 		_ = reader.Close()
 		if err != nil {
 			w.t.Fatal(err)
 		}
+
 		if bytes.Contains(content, []byte(secret)) {
 			w.t.Fatalf("plan member %s contains the write-only content", member.Name)
 		}
@@ -108,10 +131,15 @@ func TestAccInstalledProviderWriteOnly(t *testing.T) {
 	guest := newTestGuest(t)
 	guest.useTestDirectory()
 	path := testDirectory + "/installed-secret.conf"
-	workspace := &tofuWorkspace{t: t, directory: t.TempDir(), binary: requireVariable(t, tofuPathVariable)}
+	workspace := &tofuWorkspace{
+		t:         t,
+		directory: t.TempDir(),
+		binary:    requireVariable(t, tofuPathVariable),
+	}
 
 	config := func(version int) string {
-		return fmt.Sprintf(`
+		return fmt.Sprintf(
+			`
 terraform {
   required_providers {
     pveguest = {
@@ -144,8 +172,17 @@ resource "pveguest_file" "secret" {
   content_wo_version = %d
   mode               = "0600"
 }
-`, providerSource, installedVersion, guest.guest.Node, guest.nodeAttributes(),
-			guest.guest.Node, guest.guest.VMID, string(guest.guest.Kind), path, version)
+`,
+			providerSource,
+			installedVersion,
+			guest.guest.Node,
+			guest.nodeAttributes(),
+			guest.guest.Node,
+			guest.guest.VMID,
+			string(guest.guest.Kind),
+			path,
+			version,
+		)
 	}
 
 	workspace.variableValue = firstMarker
@@ -156,6 +193,7 @@ resource "pveguest_file" "secret" {
 	if strings.Contains(planOutput, firstMarker) {
 		t.Fatal("the plan output contains the write-only content")
 	}
+
 	workspace.requirePlanArchiveOmits(planFileName, firstMarker)
 	planJSON := workspace.mustRun("show", "-json", planFileName)
 	if strings.Contains(planJSON, firstMarker) {
@@ -166,9 +204,11 @@ resource "pveguest_file" "secret" {
 	if strings.Contains(applyOutput, firstMarker) {
 		t.Fatal("the apply output contains the write-only content")
 	}
+
 	if err := guest.expectFileContent(path, firstMarker)(); err != nil {
 		t.Fatal(err)
 	}
+
 	workspace.requireOmits(stateFileName, firstMarker)
 
 	// With detailed exit codes, OpenTofu returns status 0 for an unchanged plan.
@@ -180,7 +220,12 @@ resource "pveguest_file" "secret" {
 	guest.writeFile(path, "edited by hand\n")
 	output, exitCode = workspace.run("plan", "-no-color", "-detailed-exitcode")
 	if exitCode != planChangesExitCode {
-		t.Fatalf("plan after a hand edit exited with status %d, want %d:\n%s", exitCode, planChangesExitCode, output)
+		t.Fatalf(
+			"plan after a hand edit exited with status %d, want %d:\n%s",
+			exitCode,
+			planChangesExitCode,
+			output,
+		)
 	}
 
 	workspace.variableValue = secondMarker
@@ -189,9 +234,11 @@ resource "pveguest_file" "secret" {
 	if strings.Contains(applyOutput, secondMarker) {
 		t.Fatal("the apply output contains the write-only content")
 	}
+
 	if err := guest.expectFileContent(path, secondMarker)(); err != nil {
 		t.Fatal(err)
 	}
+
 	workspace.requireOmits(stateFileName, secondMarker)
 	workspace.requireOmits(stateFileName, firstMarker)
 

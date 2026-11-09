@@ -83,11 +83,19 @@ func newVMOptionsResource() resource.Resource {
 	return &guestOptionsResource{definition: vmOptionsDefinition}
 }
 
-func (r *guestOptionsResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *guestOptionsResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + r.definition.typeSuffix
 }
 
-func (r *guestOptionsResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *guestOptionsResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: r.definition.description,
 		Attributes: map[string]schema.Attribute{
@@ -120,37 +128,61 @@ func (r *guestOptionsResource) Schema(_ context.Context, _ resource.SchemaReques
 	}
 }
 
-func (r *guestOptionsResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *guestOptionsResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
 // Import IDs use the format <node>/<vmid>.
-func (r *guestOptionsResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *guestOptionsResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	node, vmidText, found := strings.Cut(req.ID, "/")
 	vmid, err := strconv.ParseInt(vmidText, 10, 64)
 	if !found || node == "" || err != nil {
-		resp.Diagnostics.AddError(r.summary("Import %s options"), fmt.Sprintf("the import ID %q must have the form <node>/<vmid>", req.ID))
+		resp.Diagnostics.AddError(
+			r.summary("Import %s options"),
+			fmt.Sprintf("the import ID %q must have the form <node>/<vmid>", req.ID),
+		)
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("node"), node)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("vmid"), vmid)...)
-	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("options"), types.MapNull(types.StringType))...)
+	resp.Diagnostics.Append(
+		resp.State.SetAttribute(ctx, path.Root("options"), types.MapNull(types.StringType))...,
+	)
 }
 
-func (r *guestOptionsResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *guestOptionsResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan guestOptionsModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, &plan, nil)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *guestOptionsResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *guestOptionsResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan guestOptionsModel
 	var state guestOptionsModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -158,25 +190,33 @@ func (r *guestOptionsResource) Update(ctx context.Context, req resource.UpdateRe
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	prior, diagnostics := optionsOf(ctx, state.Options)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, &plan, prior)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // Include every supported key in state to detect options added on the node.
-func (r *guestOptionsResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *guestOptionsResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state guestOptionsModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	guest := r.guest(state.Node.ValueString(), state.VMID.ValueInt64())
 
 	current, err := r.data.client.GetGuestOptions(ctx, guest, r.definition.keys)
@@ -184,11 +224,13 @@ func (r *guestOptionsResource) Read(ctx context.Context, req resource.ReadReques
 		resp.Diagnostics.AddError(r.summary("Read %s options"), err.Error())
 		return
 	}
+
 	pending, err := r.data.client.GetGuestPending(ctx, guest, r.definition.keys)
 	if err != nil {
 		resp.Diagnostics.AddError(r.summary("Read %s pending options"), err.Error())
 		return
 	}
+
 	options, diagnostics := types.MapValueFrom(ctx, types.StringType, current)
 	resp.Diagnostics.Append(diagnostics...)
 	pendingMap, diagnostics := types.MapValueFrom(ctx, types.StringType, pending)
@@ -196,22 +238,29 @@ func (r *guestOptionsResource) Read(ctx context.Context, req resource.ReadReques
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	state.Options = options
 	state.Pending = pendingMap
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *guestOptionsResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *guestOptionsResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state guestOptionsModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	prior, diagnostics := optionsOf(ctx, state.Options)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	guest := r.guest(state.Node.ValueString(), state.VMID.ValueInt64())
 	err := r.data.client.SetGuestOptions(ctx, guest, nil, sortedKeys(prior))
 	if err != nil {
@@ -219,18 +268,25 @@ func (r *guestOptionsResource) Delete(ctx context.Context, req resource.DeleteRe
 	}
 }
 
-func (r *guestOptionsResource) apply(ctx context.Context, plan *guestOptionsModel, prior map[string]string) diag.Diagnostics {
+func (r *guestOptionsResource) apply(
+	ctx context.Context,
+	plan *guestOptionsModel,
+	prior map[string]string,
+) diag.Diagnostics {
 	declared, diagnostics := optionsOf(ctx, plan.Options)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
+
 	var removed []string
+
 	for key := range prior {
 		_, kept := declared[key]
 		if !kept {
 			removed = append(removed, key)
 		}
 	}
+
 	slices.Sort(removed)
 
 	guest := r.guest(plan.Node.ValueString(), plan.VMID.ValueInt64())
@@ -239,14 +295,17 @@ func (r *guestOptionsResource) apply(ctx context.Context, plan *guestOptionsMode
 		diagnostics.AddError(r.summary("Set %s options"), err.Error())
 		return diagnostics
 	}
+
 	pending, err := r.data.client.GetGuestPending(ctx, guest, r.definition.keys)
 	if err != nil {
 		diagnostics.AddError(r.summary("Read %s pending options"), err.Error())
 		return diagnostics
 	}
+
 	pendingMap, pendingDiagnostics := types.MapValueFrom(ctx, types.StringType, pending)
 	diagnostics.Append(pendingDiagnostics...)
 	plan.Pending = pendingMap
+
 	return diagnostics
 }
 
@@ -264,7 +323,9 @@ func optionsOf(ctx context.Context, value types.Map) (map[string]string, diag.Di
 	if value.IsNull() || value.IsUnknown() {
 		return options, nil
 	}
+
 	diagnostics := value.ElementsAs(ctx, &options, false)
+
 	return options, diagnostics
 }
 
@@ -273,6 +334,8 @@ func sortedKeys(options map[string]string) []string {
 	for key := range options {
 		keys = append(keys, key)
 	}
+
 	slices.Sort(keys)
+
 	return keys
 }

@@ -64,18 +64,24 @@ func guestOf(node types.String, vmid types.Int64, kind types.String) transport.G
 	}
 }
 
-func providerDataFrom(req resource.ConfigureRequest, resp *resource.ConfigureResponse) *providerData {
+func providerDataFrom(
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) *providerData {
 	if req.ProviderData == nil {
 		return nil
 	}
+
 	data, isProviderData := req.ProviderData.(*providerData)
 	if !isProviderData {
 		resp.Diagnostics.AddError(
 			"Unexpected provider data",
 			fmt.Sprintf("Got %T. This is a defect in the provider.", req.ProviderData),
 		)
+
 		return nil
 	}
+
 	return data
 }
 
@@ -106,14 +112,29 @@ func runReadOnlyGuest(
 	return guestResult(ctx, guest, result, err)
 }
 
-func guestResult(ctx context.Context, guest transport.Guest, result transport.Result, err error) (transport.Result, error) {
+func guestResult(
+	ctx context.Context,
+	guest transport.Guest,
+	result transport.Result,
+	err error,
+) (transport.Result, error) {
 	if err != nil {
 		slog.ErrorContext(
-			ctx, "guest command failed",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+			ctx,
+			"guest command failed",
+			"node",
+			guest.Node,
+			"vmid",
+			guest.VMID,
+			"kind",
+			guest.Kind,
+			"err",
+			err,
 		)
+
 		return transport.Result{}, fmt.Errorf("run guest command: %w", err)
 	}
+
 	return result, nil
 }
 
@@ -127,13 +148,19 @@ func runChecked(
 	if err != nil {
 		return err
 	}
+
 	if result.ExitCode != 0 {
 		return commandFailure(guest, command, result)
 	}
+
 	return nil
 }
 
-func commandFailure(guest transport.Guest, command transport.Command, result transport.Result) error {
+func commandFailure(
+	guest transport.Guest,
+	command transport.Command,
+	result transport.Result,
+) error {
 	return fmt.Errorf(
 		"%s: command %s exited with status %d: %s",
 		guest,
@@ -150,8 +177,10 @@ func combinedOutput(result transport.Result) string {
 		if text != "" {
 			text += "\n"
 		}
+
 		text += stdout
 	}
+
 	return text
 }
 
@@ -159,6 +188,7 @@ func lastBytes(text string, limit int) string {
 	if len(text) > limit {
 		return text[len(text)-limit:]
 	}
+
 	return text
 }
 

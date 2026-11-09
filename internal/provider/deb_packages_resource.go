@@ -42,11 +42,19 @@ func newDebPackagesResource() resource.Resource {
 	return &debPackagesResource{}
 }
 
-func (r *debPackagesResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *debPackagesResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_deb_packages"
 }
 
-func (r *debPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *debPackagesResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "Packages that are installed from .deb files inside a guest. " +
 			"The resource installs every package when the installed version differs from the version of its file.",
@@ -58,9 +66,17 @@ func (r *debPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 					"for example a path that a pveguest_download writes.",
 				Validators: []validator.Map{
 					mapvalidator.SizeAtLeast(1),
-					mapvalidator.KeysAre(stringvalidator.RegexMatches(packageNamePattern, "must be a Debian package name")),
+					mapvalidator.KeysAre(
+						stringvalidator.RegexMatches(
+							packageNamePattern,
+							"must be a Debian package name",
+						),
+					),
 					mapvalidator.ValueStringsAre(
-						stringvalidator.RegexMatches(absolutePathPattern, "must be an absolute path that ends in a file name"),
+						stringvalidator.RegexMatches(
+							absolutePathPattern,
+							"must be an absolute path that ends in a file name",
+						),
 					),
 				},
 			},
@@ -77,20 +93,30 @@ func (r *debPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 	}
 }
 
-func (r *debPackagesResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *debPackagesResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *debPackagesResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *debPackagesResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan debPackagesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
@@ -98,12 +124,17 @@ func (r *debPackagesResource) Create(ctx context.Context, req resource.CreateReq
 // package is not installed or the installed version differs from the version of
 // its .deb file, and the next plan installs it. A missing .deb file does not
 // remove the package.
-func (r *debPackagesResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *debPackagesResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state debPackagesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	var declared map[string]string
 	resp.Diagnostics.Append(state.Packages.ElementsAs(ctx, &declared, false)...)
 	if resp.Diagnostics.HasError() {
@@ -116,6 +147,7 @@ func (r *debPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 		resp.Diagnostics.AddError("Read deb files", err.Error())
 		return
 	}
+
 	installed, err := readInstalledVersions(ctx, r.data.client, guest, packageNames(declared))
 	if err != nil {
 		resp.Diagnostics.AddError("Read deb packages", err.Error())
@@ -123,16 +155,19 @@ func (r *debPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 
 	retained := make(map[string]string, len(declared))
+
 	versions := make(map[string]string, len(declared))
 	for name, debPath := range declared {
 		installedVersion, isInstalled := installed[name]
 		if !isInstalled {
 			continue
 		}
+
 		fileVersion, hasFile := fileVersions[name]
 		if hasFile && fileVersion != installedVersion {
 			continue
 		}
+
 		retained[name] = debPath
 		versions[name] = installedVersion
 	}
@@ -144,26 +179,37 @@ func (r *debPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	state.Packages = packages
 	state.DebVersions = debVersions
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *debPackagesResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *debPackagesResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan debPackagesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // The framework removes the resource from state after Delete returns.
-func (r *debPackagesResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
+func (r *debPackagesResource) Delete(
+	_ context.Context,
+	_ resource.DeleteRequest,
+	_ *resource.DeleteResponse,
+) {
 }
 
 // apply installs every package that is missing or has another version than its
@@ -180,14 +226,21 @@ func (r *debPackagesResource) apply(ctx context.Context, plan *debPackagesModel)
 	unlock := r.data.aptLocks.lock(guest)
 	defer unlock()
 
-	versions, err := r.installPending(ctx, guest, declared, startServicesEnabled(plan.StartServices))
+	versions, err := r.installPending(
+		ctx,
+		guest,
+		declared,
+		startServicesEnabled(plan.StartServices),
+	)
 	if err != nil {
 		diagnostics.AddError("Install deb packages", err.Error())
 		return diagnostics
 	}
+
 	debVersions, mapDiagnostics := types.MapValueFrom(ctx, types.StringType, versions)
 	diagnostics.Append(mapDiagnostics...)
 	plan.DebVersions = debVersions
+
 	return diagnostics
 }
 
@@ -202,11 +255,18 @@ func (r *debPackagesResource) installPending(
 	if err != nil {
 		return nil, err
 	}
+
 	for _, name := range names {
 		if _, hasFile := fileVersions[name]; !hasFile {
-			return nil, fmt.Errorf("%s: the deb file %s of package %s does not exist", guest, declared[name], name)
+			return nil, fmt.Errorf(
+				"%s: the deb file %s of package %s does not exist",
+				guest,
+				declared[name],
+				name,
+			)
 		}
 	}
+
 	installed, err := readInstalledVersions(ctx, r.data.client, guest, names)
 	if err != nil {
 		return nil, err
@@ -218,6 +278,7 @@ func (r *debPackagesResource) installPending(
 			pendingPaths = append(pendingPaths, declared[name])
 		}
 	}
+
 	if len(pendingPaths) == 0 {
 		return fileVersions, nil
 	}
@@ -226,16 +287,28 @@ func (r *debPackagesResource) installPending(
 	// Disable both repository source locations to reject dependencies that need a download.
 	arguments := append(
 		[]string{
-			"install", "-y", "--no-install-recommends", "--allow-downgrades",
-			"-o", "DPkg::Lock::Timeout=300",
-			"-o", "Dir::Etc::SourceList=/dev/null",
-			"-o", "Dir::Etc::SourceParts=/nonexistent",
+			"install",
+			"-y",
+			"--no-install-recommends",
+			"--allow-downgrades",
+			"-o",
+			"DPkg::Lock::Timeout=300",
+			"-o",
+			"Dir::Etc::SourceList=/dev/null",
+			"-o",
+			"Dir::Etc::SourceParts=/nonexistent",
 			"--",
 		},
 		pendingPaths...,
 	)
 	installCommand := aptCommand(arguments...)
-	if err := runInstallCommand(ctx, r.data.client, guest, installCommand, startServices); err != nil {
+	if err := runInstallCommand(
+		ctx,
+		r.data.client,
+		guest,
+		installCommand,
+		startServices,
+	); err != nil {
 		return nil, err
 	}
 
@@ -243,18 +316,23 @@ func (r *debPackagesResource) installPending(
 	if err != nil {
 		return nil, err
 	}
+
 	var wrong []string
+
 	for _, name := range names {
 		if installed[name] != fileVersions[name] {
 			wrong = append(wrong, name)
 		}
 	}
+
 	if len(wrong) > 0 {
 		return nil, fmt.Errorf(
 			"%s: packages do not have the version of their deb file after apt-get install: %s",
-			guest, strings.Join(wrong, ", "),
+			guest,
+			strings.Join(wrong, ", "),
 		)
 	}
+
 	return fileVersions, nil
 }
 
@@ -263,7 +341,9 @@ func packageNames(declared map[string]string) []string {
 	for name := range declared {
 		names = append(names, name)
 	}
+
 	sort.Strings(names)
+
 	return names
 }
 
@@ -282,14 +362,18 @@ func readDebFileVersions(
 		if err != nil {
 			return nil, err
 		}
+
 		if result.ExitCode != 0 {
 			if strings.Contains(string(result.Stderr), missingFileMessage) {
 				continue
 			}
+
 			return nil, commandFailure(guest, command, result)
 		}
+
 		versions[name] = firstLine(result.Stdout)
 	}
+
 	return versions, nil
 }
 
@@ -304,12 +388,17 @@ func readInstalledVersions(
 	if len(names) == 0 {
 		return map[string]string{}, nil
 	}
-	arguments := append([]string{"dpkg-query", "--show", "--showformat", dpkgVersionQueryFormat, "--"}, names...)
+
+	arguments := append(
+		[]string{"dpkg-query", "--show", "--showformat", dpkgVersionQueryFormat, "--"},
+		names...,
+	)
 	command := guestCommand(arguments...)
 	result, err := runGuest(ctx, client, guest, command)
 	if err != nil {
 		return nil, err
 	}
+
 	// dpkg-query returns status 1 when a requested package is not installed.
 	// Its output still includes the installed packages.
 	noMatch := result.ExitCode == 1 && strings.Contains(string(result.Stderr), dpkgNoMatchMessage)
@@ -318,14 +407,17 @@ func readInstalledVersions(
 	}
 
 	installed := make(map[string]string)
+
 	for line := range strings.SplitSeq(string(result.Stdout), "\n") {
 		fields := strings.Split(line, "\t")
 		if len(fields) != debVersionFieldCount {
 			continue
 		}
+
 		if dpkgStatusInstalled(fields[1]) {
 			installed[fields[0]] = strings.TrimSpace(fields[2])
 		}
 	}
+
 	return installed, nil
 }

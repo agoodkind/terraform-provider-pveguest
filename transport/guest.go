@@ -65,6 +65,7 @@ func (guest Guest) String() string {
 func (guest Guest) apiPath(nodeName string, operation string) string {
 	node := url.PathEscape(nodeName)
 	vmid := strconv.FormatInt(guest.VMID, 10)
+
 	return "/api2/json/nodes/" + node + "/" + string(guest.Kind) + "/" + vmid + "/" + operation
 }
 
@@ -79,11 +80,13 @@ func (kind Kind) StdinLimit() int {
 func SplitStdin(kind Kind, content []byte) [][]byte {
 	limit := kind.StdinLimit()
 	var pieces [][]byte
+
 	remaining := content
 	for len(remaining) > limit {
 		pieces = append(pieces, remaining[:limit])
 		remaining = remaining[limit:]
 	}
+
 	return append(pieces, remaining)
 }
 
@@ -153,7 +156,9 @@ func (value *flag) UnmarshalJSON(document []byte) error {
 	if err != nil {
 		return errors.New("exec-status contains an invalid boolean")
 	}
+
 	*value = flag(parsed)
+
 	return nil
 }
 
@@ -192,14 +197,17 @@ func (client *Client) run(ctx context.Context, guest Guest, command Command) (Re
 	if err != nil {
 		return Result{}, err
 	}
+
 	status, err := connection.waitForExit(ctx, guest, command, processID, timeout)
 	if err != nil {
 		return Result{}, err
 	}
+
 	result, err := decodeExecResult(guest, status)
 	if err != nil {
 		return Result{}, err
 	}
+
 	if err := connection.acknowledgeExec(ctx, guest, processID); err != nil {
 		failureClass := "api"
 		if isConnectionClosed(err) {
@@ -207,12 +215,23 @@ func (client *Client) run(ctx context.Context, guest Guest, command Command) (Re
 		} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			failureClass = "context"
 		}
-		slog.WarnContext(ctx, "command result acknowledgment failed",
-			"guest", guest.String(), "pid", processID, "class", failureClass)
+
+		slog.WarnContext(
+			ctx,
+			"command result acknowledgment failed",
+			"guest",
+			guest.String(),
+			"pid",
+			processID,
+			"class",
+			failureClass,
+		)
 	}
+
 	if err := resultError(guest, command, status, timeout); err != nil {
 		return Result{}, err
 	}
+
 	return result, nil
 }
 
@@ -220,30 +239,40 @@ func (client *Client) prepare(guest Guest, command Command) (*nodeConnection, in
 	if len(command.Argv) == 0 {
 		return nil, 0, fmt.Errorf("%s: empty command", guest)
 	}
+
 	if guest.Kind != KindLXC && guest.Kind != KindQEMU {
 		return nil, 0, fmt.Errorf("%s: unknown kind", guest)
 	}
+
 	connection, found := client.nodes[guest.Node]
 	if !found {
 		return nil, 0, fmt.Errorf("%s: node is not in the provider nodes map", guest)
 	}
+
 	timeout := defaultTimeoutSeconds
 	if command.TimeoutSeconds > 0 {
 		timeout = command.TimeoutSeconds
 	}
+
 	if timeout > maximumTimeoutSeconds {
 		return nil, 0, fmt.Errorf(
 			"%s: timeout of %d seconds exceeds the limit of %d seconds",
-			guest, timeout, maximumTimeoutSeconds,
+			guest,
+			timeout,
+			maximumTimeoutSeconds,
 		)
 	}
+
 	limit := guest.Kind.StdinLimit()
 	if len(command.Stdin) > limit {
 		return nil, 0, fmt.Errorf(
 			"%s: stdin of %d bytes exceeds the limit of %d bytes for one command",
-			guest, len(command.Stdin), limit,
+			guest,
+			len(command.Stdin),
+			limit,
 		)
 	}
+
 	return connection, timeout, nil
 }
 
@@ -253,7 +282,12 @@ func (connection *nodeConnection) startExec(
 	command Command,
 	timeout int,
 ) (int64, error) {
-	body := execStartBody{Command: command.Argv, InputData: nil, Timeout: &timeout, Retention: "acknowledged"}
+	body := execStartBody{
+		Command:   command.Argv,
+		InputData: nil,
+		Timeout:   &timeout,
+		Retention: "acknowledged",
+	}
 	if len(command.Stdin) > 0 {
 		input := base64.StdEncoding.EncodeToString(command.Stdin)
 		body.InputData = &input
@@ -263,23 +297,34 @@ func (connection *nodeConnection) startExec(
 	if err != nil {
 		return 0, fmt.Errorf("%s: POST exec: %w", guest, err)
 	}
-	data, err := connection.call(ctx, guest, apiRequest{
-		method:    http.MethodPost,
-		operation: execStartOperation,
-		query:     nil,
-		body:      document,
-	})
+
+	data, err := connection.call(
+		ctx,
+		guest,
+		apiRequest{
+			method:    http.MethodPost,
+			operation: execStartOperation,
+			query:     nil,
+			body:      document,
+		},
+	)
 	if err != nil {
 		return 0, err
 	}
+
 	var started execStartResponse
 	if err := json.Unmarshal(data, &started); err != nil {
 		slog.ErrorContext(ctx, "exec response has no pid", "guest", guest.String(), "err", err)
 		return 0, fmt.Errorf("%s: exec response has no pid: %w", guest, err)
 	}
+
 	if started.PID <= 0 {
-		return 0, fmt.Errorf("%s: exec response has an invalid pid; guest command may have started", guest)
+		return 0, fmt.Errorf(
+			"%s: exec response has an invalid pid; guest command may have started",
+			guest,
+		)
 	}
+
 	return started.PID, nil
 }
 
@@ -292,29 +337,47 @@ func (connection *nodeConnection) waitForExit(
 	processID int64,
 	timeout int,
 ) (execStatus, error) {
-	waitContext, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second+pollTimeoutMargin)
+	waitContext, cancel := context.WithTimeout(
+		ctx,
+		time.Duration(timeout)*time.Second+pollTimeoutMargin,
+	)
 	defer cancel()
 
 	query := url.Values{"pid": {strconv.FormatInt(processID, 10)}}
 	delay := pollInitialDelay
+
 	for {
-		data, err := connection.readExecStatus(waitContext, guest, apiRequest{
-			method:    http.MethodGet,
-			operation: "exec-status",
-			query:     query,
-			body:      nil,
-		})
+		data, err := connection.readExecStatus(
+			waitContext,
+			guest,
+			apiRequest{
+				method:    http.MethodGet,
+				operation: "exec-status",
+				query:     query,
+				body:      nil,
+			},
+		)
 		if err != nil {
 			return execStatus{}, err
 		}
+
 		var status execStatus
 		if err := json.Unmarshal(data, &status); err != nil {
-			slog.ErrorContext(ctx, "exec-status response is malformed", "guest", guest.String(), "err", err)
+			slog.ErrorContext(
+				ctx,
+				"exec-status response is malformed",
+				"guest",
+				guest.String(),
+				"err",
+				err,
+			)
 			return execStatus{}, fmt.Errorf("%s: parse exec-status response: %w", guest, err)
 		}
+
 		if status.Exited == nil {
 			return execStatus{}, fmt.Errorf("%s: exec-status response omits the exited flag", guest)
 		}
+
 		if *status.Exited {
 			return status, nil
 		}
@@ -323,13 +386,24 @@ func (connection *nodeConnection) waitForExit(
 		select {
 		case <-waitContext.Done():
 			timer.Stop()
-			slog.ErrorContext(ctx, "wait for command exit ended", "guest", guest.String(), "err", waitContext.Err())
+			slog.ErrorContext(
+				ctx,
+				"wait for command exit ended",
+				"guest",
+				guest.String(),
+				"err",
+				waitContext.Err(),
+			)
+
 			return execStatus{}, fmt.Errorf(
 				"%s: command %s did not exit before the wait ended: %w",
-				guest, QuoteCommand(command.Argv), waitContext.Err(),
+				guest,
+				QuoteCommand(command.Argv),
+				waitContext.Err(),
 			)
 		case <-timer.C:
 		}
+
 		delay = min(delay*2, pollMaximumDelay)
 	}
 }
@@ -341,36 +415,66 @@ func (connection *nodeConnection) readExecStatus(
 ) (json.RawMessage, error) {
 	request.retryAtCaller = true
 	delay := retryInitialDelay
+
 	for attempt := 1; ; attempt++ {
 		data, err := connection.call(ctx, guest, request)
 		if err == nil {
 			return data, nil
 		}
+
 		var closed *closedConnectionError
 		if !errors.As(err, &closed) {
 			return nil, err
 		}
+
 		if attempt >= maxReadAttempts {
-			return nil, &resultReadError{cause: fmt.Errorf("%s: command result read failed after %d attempts; pid %s requires another status read: %w",
-				guest, attempt, request.query.Get("pid"), err)}
+			return nil, &resultReadError{
+				cause: fmt.Errorf(
+					"%s: command result read failed after %d attempts; pid %s requires another status read: %w",
+					guest,
+					attempt,
+					request.query.Get("pid"),
+					err,
+				),
+			}
 		}
-		slog.WarnContext(ctx, "retry command result read after a closed connection",
-			"guest", guest.String(), "attempt", attempt)
+
+		slog.WarnContext(
+			ctx,
+			"retry command result read after a closed connection",
+			"guest",
+			guest.String(),
+			"attempt",
+			attempt,
+		)
 		if err := waitReadCommandRetry(ctx, delay); err != nil {
 			return nil, err
 		}
+
 		delay *= retryDelayFactor
 	}
 }
 
-func (connection *nodeConnection) acknowledgeExec(ctx context.Context, guest Guest, processID int64) error {
+func (connection *nodeConnection) acknowledgeExec(
+	ctx context.Context,
+	guest Guest,
+	processID int64,
+) error {
 	document, err := encodeJSON(&execAckBody{PID: processID})
 	if err != nil {
 		return err
 	}
-	_, err = connection.call(ctx, guest, apiRequest{
-		method: http.MethodPost, operation: "exec-ack", body: document,
-	})
+
+	_, err = connection.call(
+		ctx,
+		guest,
+		apiRequest{
+			method:    http.MethodPost,
+			operation: "exec-ack",
+			body:      document,
+		},
+	)
+
 	return err
 }
 
@@ -379,9 +483,11 @@ func resultError(guest Guest, command Command, status execStatus, timeout int) e
 	if status.TimedOut {
 		return fmt.Errorf("%s: command %s timed out after %d seconds", guest, quoted, timeout)
 	}
+
 	if status.OutTruncated || status.ErrTruncated {
 		return fmt.Errorf("%s: the output of command %s exceeded the capture limit", guest, quoted)
 	}
+
 	return nil
 }
 
@@ -389,6 +495,7 @@ func decodeExecResult(guest Guest, status execStatus) (Result, error) {
 	if status.ExitCode == nil {
 		return Result{}, fmt.Errorf("%s: command exited without an exit code", guest)
 	}
+
 	if status.OutData == nil || status.ErrData == nil {
 		return Result{}, fmt.Errorf("%s: completed command result omits an output stream", guest)
 	}
@@ -397,10 +504,12 @@ func decodeExecResult(guest Guest, status execStatus) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+
 	stderr, err := decodeStream(guest, *status.ErrData)
 	if err != nil {
 		return Result{}, err
 	}
+
 	return Result{Stdout: stdout, Stderr: stderr, ExitCode: *status.ExitCode}, nil
 }
 
@@ -410,5 +519,6 @@ func decodeStream(guest Guest, data string) ([]byte, error) {
 		slog.Error("exec-status stream is not base64", "guest", guest.String(), "err", err)
 		return nil, fmt.Errorf("%s: decode exec-status stream: %w", guest, err)
 	}
+
 	return decoded, nil
 }

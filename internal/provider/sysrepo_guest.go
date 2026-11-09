@@ -26,12 +26,14 @@ var yangIdentifierPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]*$`)
 func sysrepoctlCommand(arguments ...string) transport.Command {
 	command := guestCommand(append([]string{"sysrepoctl"}, arguments...)...)
 	command.TimeoutSeconds = sysrepoTimeoutSeconds
+
 	return command
 }
 
 func sysrepocfgCommand(arguments ...string) transport.Command {
 	command := guestCommand(append([]string{"sysrepocfg"}, arguments...)...)
 	command.TimeoutSeconds = sysrepoTimeoutSeconds
+
 	return command
 }
 
@@ -45,17 +47,29 @@ func listSysrepoModules(
 	if err != nil {
 		return nil, err
 	}
+
 	if result.ExitCode != 0 {
 		return nil, commandFailure(guest, command, result)
 	}
+
 	modules, err := sysrepo.ParseModuleList(string(result.Stdout))
 	if err != nil {
 		slog.ErrorContext(
-			ctx, "sysrepoctl module list is malformed",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err,
+			ctx,
+			"sysrepoctl module list is malformed",
+			"node",
+			guest.Node,
+			"vmid",
+			guest.VMID,
+			"kind",
+			guest.Kind,
+			"err",
+			err,
 		)
+
 		return nil, fmt.Errorf("%s: parse the sysrepoctl module list: %w", guest, err)
 	}
+
 	return modules, nil
 }
 
@@ -63,6 +77,7 @@ func stringValues(ctx context.Context, set types.Set) ([]string, diag.Diagnostic
 	values := make([]string, 0, len(set.Elements()))
 	diagnostics := set.ElementsAs(ctx, &values, false)
 	sort.Strings(values)
+
 	return values, diagnostics
 }
 
@@ -71,17 +86,21 @@ func stringSetOf(ctx context.Context, values []string) (types.Set, diag.Diagnost
 	if sorted == nil {
 		sorted = []string{}
 	}
+
 	sort.Strings(sorted)
+
 	return types.SetValueFrom(ctx, types.StringType, sorted)
 }
 
 func difference(left []string, right []string) []string {
 	var missing []string
+
 	for _, value := range left {
 		if !slices.Contains(right, value) {
 			missing = append(missing, value)
 		}
 	}
+
 	return missing
 }
 
@@ -99,16 +118,25 @@ func runSysrepocfgImport(
 	if err != nil {
 		return err
 	}
+
 	removeCommand := guestCommand("rm", "-f", "--", temporaryPath)
 	if err := writeGuestContent(ctx, client, guest, temporaryPath, []byte(document)); err != nil {
 		// The caller reports the write failure and ignores a failed removal.
 		_, _ = client.Run(ctx, guest, removeCommand)
 		return err
 	}
+
 	importCommand := sysrepocfgCommand(
-		"--import="+temporaryPath, "--datastore", datastore, "--module", module, "--format", "xml",
+		"--import="+temporaryPath,
+		"--datastore",
+		datastore,
+		"--module",
+		module,
+		"--format",
+		"xml",
 	)
 	importErr := runChecked(ctx, client, guest, importCommand)
 	_, _ = client.Run(ctx, guest, removeCommand)
+
 	return importErr
 }

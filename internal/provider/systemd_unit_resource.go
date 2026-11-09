@@ -64,11 +64,19 @@ func newSystemdUnitResource() resource.Resource {
 	return &systemdUnitResource{}
 }
 
-func (r *systemdUnitResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *systemdUnitResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_systemd_unit"
 }
 
-func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *systemdUnitResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "pveguest_systemd_unit sets the enabled state and the active state of a systemd unit inside a guest. " +
 			"The unit file must exist unless allow_missing or masked is true.",
@@ -77,7 +85,10 @@ func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Required:    true,
 				Description: "Full unit name with suffix, for example ssh.service.",
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(unitNamePattern, "must be a unit name with a suffix"),
+					stringvalidator.RegexMatches(
+						unitNamePattern,
+						"must be a unit name with a suffix",
+					),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
@@ -130,7 +141,11 @@ func (r *systemdUnitResource) Schema(_ context.Context, _ resource.SchemaRequest
 
 // ValidateConfig requires enabled = false and active = false when
 // allow_missing or masked is true.
-func (r *systemdUnitResource) ValidateConfig(ctx context.Context, req resource.ValidateConfigRequest, resp *resource.ValidateConfigResponse) {
+func (r *systemdUnitResource) ValidateConfig(
+	ctx context.Context,
+	req resource.ValidateConfigRequest,
+	resp *resource.ValidateConfigResponse,
+) {
 	var config systemdUnitModel
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
@@ -145,6 +160,7 @@ func (r *systemdUnitResource) ValidateConfig(ctx context.Context, req resource.V
 		{name: "masked", value: config.Masked},
 	}
 	wantsRunningOrEnabled := isDeclaredTrue(config.Enabled) || isDeclaredTrue(config.Active)
+
 	for _, control := range controls {
 		if isDeclaredTrue(control.value) && wantsRunningOrEnabled {
 			resp.Diagnostics.AddAttributeError(
@@ -160,22 +176,37 @@ func isDeclaredTrue(value types.Bool) bool {
 	return !value.IsNull() && !value.IsUnknown() && value.ValueBool()
 }
 
-func (r *systemdUnitResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *systemdUnitResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *systemdUnitResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	parsed, isValid := splitGuestImportID(req.ID)
 	if !isValid || strings.Contains(parsed.Rest, "/") {
-		resp.Diagnostics.AddError(systemdUnitImportSummary, importIDError(req.ID, systemdUnitImportFormat))
+		resp.Diagnostics.AddError(
+			systemdUnitImportSummary,
+			importIDError(req.ID, systemdUnitImportFormat),
+		)
 		return
 	}
 
 	var schemaResp resource.SchemaResponse
 	r.Schema(ctx, resource.SchemaRequest{}, &schemaResp)
 	attributes := schemaResp.Schema.Attributes
-	resp.Diagnostics.Append(validateImportedString(ctx, systemdUnitImportSummary, attributes, "kind", parsed.Kind)...)
-	resp.Diagnostics.Append(validateImportedString(ctx, systemdUnitImportSummary, attributes, "name", parsed.Rest)...)
+	resp.Diagnostics.Append(
+		validateImportedString(ctx, systemdUnitImportSummary, attributes, "kind", parsed.Kind)...,
+	)
+	resp.Diagnostics.Append(
+		validateImportedString(ctx, systemdUnitImportSummary, attributes, "name", parsed.Rest)...,
+	)
 	if resp.Diagnostics.HasError() {
 		return
 	}
@@ -200,10 +231,12 @@ func (r *systemdUnitResource) ImportState(ctx context.Context, req resource.Impo
 func hasOnlyImportedWriteIDs(value types.Map) bool {
 	for _, element := range value.Elements() {
 		text, isString := element.(types.String)
-		if !isString || text.IsNull() || text.IsUnknown() || !isImportedWriteID(text.ValueString()) {
+		if !isString || text.IsNull() || text.IsUnknown() ||
+			!isImportedWriteID(text.ValueString()) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -222,10 +255,12 @@ func splitGuestImportID(id string) (guestImportID, bool) {
 	if len(fields) != guestImportFields || slices.Contains(fields, "") {
 		return guestImportID{}, false
 	}
+
 	vmid, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil || vmid < 1 {
 		return guestImportID{}, false
 	}
+
 	return guestImportID{Node: fields[0], VMID: vmid, Kind: fields[2], Rest: fields[3]}, true
 }
 
@@ -245,29 +280,43 @@ func validateImportedString(
 	var diagnostics diag.Diagnostics
 	attribute, isString := attributes[name].(schema.StringAttribute)
 	if !isString {
-		diagnostics.AddError(summary,
-			fmt.Sprintf("The schema does not define the string attribute %s. The provider contains a defect.", name))
+		diagnostics.AddError(
+			summary,
+			fmt.Sprintf(
+				"The schema does not define the string attribute %s. The provider contains a defect.",
+				name,
+			),
+		)
+
 		return diagnostics
 	}
+
 	request := validator.StringRequest{
 		Path:           path.Root(name),
 		PathExpression: path.MatchRoot(name),
 		ConfigValue:    types.StringValue(value),
 	}
+
 	for _, check := range attribute.Validators {
 		var response validator.StringResponse
 		check.ValidateString(ctx, request, &response)
 		diagnostics.Append(response.Diagnostics...)
 	}
+
 	return diagnostics
 }
 
-func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *systemdUnitResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan systemdUnitModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	// A new restart_on map can reference files created before resource adoption.
 	// The first restart applies those file dependencies to an active unit.
 	restart := len(plan.RestartOn.Elements()) > 0
@@ -275,10 +324,15 @@ func (r *systemdUnitResource) Create(ctx context.Context, req resource.CreateReq
 		resp.Diagnostics.AddError("Create systemd unit state", err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *systemdUnitResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state systemdUnitModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
@@ -291,6 +345,7 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 		resp.Diagnostics.AddError("Read systemd unit", err.Error())
 		return
 	}
+
 	if !status.Found {
 		if state.AllowMissing.ValueBool() {
 			// When allow_missing is true and the unit is absent, Read keeps the
@@ -299,9 +354,12 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 			state.Active = types.BoolValue(false)
 			state.Masked = types.BoolValue(false)
 			resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
+
 			return
 		}
+
 		resp.State.RemoveResource(ctx)
+
 		return
 	}
 
@@ -309,28 +367,38 @@ func (r *systemdUnitResource) Read(ctx context.Context, req resource.ReadRequest
 	if state.RemoveOnDelete.IsNull() {
 		state.RemoveOnDelete = types.BoolValue(false)
 	}
+
 	// Read compares masked and reset_failed with the guest only for
 	// attributes that are true in state.
 	isMasked := status.FileState == unitFileMasked || status.FileState == unitFileMaskedRuntime
 	if state.Masked.ValueBool() && !isMasked {
 		state.Masked = types.BoolValue(false)
 	}
+
 	if state.ResetFailed.ValueBool() && status.Active == unitFailed {
 		state.ResetFailed = types.BoolValue(false)
 	}
+
 	if state.AllowMissing.IsNull() {
 		state.AllowMissing = types.BoolValue(false)
 	}
+
 	if state.Masked.IsNull() {
 		state.Masked = types.BoolValue(false)
 	}
+
 	if state.ResetFailed.IsNull() {
 		state.ResetFailed = types.BoolValue(false)
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *systemdUnitResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan systemdUnitModel
 	var state systemdUnitModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -338,6 +406,7 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	imported, diagnostics := req.Private.GetKey(ctx, importedEntry)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
@@ -351,6 +420,7 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 	if imported != nil && state.RestartOn.IsNull() && hasOnlyImportedWriteIDs(plan.RestartOn) {
 		restart = false
 	}
+
 	// Unmask the unit only when masked changes from true in the prior state
 	// to false in the plan.
 	unmask := state.Masked.ValueBool() && !plan.Masked.ValueBool()
@@ -358,19 +428,26 @@ func (r *systemdUnitResource) Update(ctx context.Context, req resource.UpdateReq
 		resp.Diagnostics.AddError("Update systemd unit state", err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, importedEntry, nil)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *systemdUnitResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *systemdUnitResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state systemdUnitModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if !state.RemoveOnDelete.ValueBool() {
 		return
 	}
+
 	target := r.unitTarget(state)
 	if err := removeUnit(ctx, target, state.Name.ValueString()); err != nil {
 		resp.Diagnostics.AddError("Delete systemd unit", err.Error())
@@ -378,10 +455,18 @@ func (r *systemdUnitResource) Delete(ctx context.Context, req resource.DeleteReq
 }
 
 func (r *systemdUnitResource) unitTarget(model systemdUnitModel) guestUnitTarget {
-	return guestUnitTarget{client: r.data.client, guest: guestOf(model.Node, model.VMID, model.Kind)}
+	return guestUnitTarget{
+		client: r.data.client,
+		guest:  guestOf(model.Node, model.VMID, model.Kind),
+	}
 }
 
-func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, restart bool, unmask bool) error {
+func (r *systemdUnitResource) apply(
+	ctx context.Context,
+	plan systemdUnitModel,
+	restart bool,
+	unmask bool,
+) error {
 	target := r.unitTarget(plan)
 	guest := target.guest
 	name := plan.Name.ValueString()
@@ -391,6 +476,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	if err := target.runUnitAction(ctx, unitActionDaemonReload, name); err != nil {
 		return err
 	}
+
 	status, err := readUnitStatus(ctx, r.data.client, guest, name)
 	if err != nil {
 		return err
@@ -408,7 +494,9 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 		if err != nil {
 			return err
 		}
+
 		_, err = r.clearFailed(ctx, plan, guest, name, status)
+
 		return err
 	}
 
@@ -416,6 +504,7 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 		if plan.AllowMissing.ValueBool() {
 			return nil
 		}
+
 		return fmt.Errorf("%s: the unit file of %s does not exist", guest, name)
 	}
 
@@ -423,7 +512,16 @@ func (r *systemdUnitResource) apply(ctx context.Context, plan systemdUnitModel, 
 	if err != nil {
 		return err
 	}
-	return reconcileUnit(ctx, target, name, status, plan.Enabled.ValueBool(), plan.Active.ValueBool(), restart)
+
+	return reconcileUnit(
+		ctx,
+		target,
+		name,
+		status,
+		plan.Enabled.ValueBool(),
+		plan.Active.ValueBool(),
+		restart,
+	)
 }
 
 // mask disables and stops the unit when necessary, masks it, verifies that
@@ -437,8 +535,14 @@ func (r *systemdUnitResource) mask(
 	if err := r.disableAndStop(ctx, guest, name, status); err != nil {
 		return unitStatus{}, err
 	}
+
 	if status.FileState != unitFileMasked {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("mask", "--", name)); err != nil {
+		if err := runChecked(
+			ctx,
+			r.data.client,
+			guest,
+			systemctlCommand("mask", "--", name),
+		); err != nil {
 			return unitStatus{}, err
 		}
 	}
@@ -447,12 +551,16 @@ func (r *systemdUnitResource) mask(
 	if err != nil {
 		return unitStatus{}, err
 	}
+
 	if !after.Found || after.FileState != unitFileMasked {
 		return unitStatus{}, fmt.Errorf(
 			"on guest %s, unit %s reports unit file state %q instead of masked after systemctl mask",
-			guest, name, after.FileState,
+			guest,
+			name,
+			after.FileState,
 		)
 	}
+
 	return after, nil
 }
 
@@ -465,14 +573,22 @@ func (r *systemdUnitResource) disableAndStop(
 	if !status.Found {
 		return nil
 	}
+
 	if classifyEnabledState(status.FileState) == enablementEnabled {
-		if err := runChecked(ctx, r.data.client, guest, systemctlCommand("disable", "--", name)); err != nil {
+		if err := runChecked(
+			ctx,
+			r.data.client,
+			guest,
+			systemctlCommand("disable", "--", name),
+		); err != nil {
 			return err
 		}
 	}
+
 	if !isStoppedState(status.Active) {
 		return runChecked(ctx, r.data.client, guest, systemctlCommand("stop", "--", name))
 	}
+
 	return nil
 }
 
@@ -482,13 +598,26 @@ func (r *systemdUnitResource) unmaskUnit(
 	name string,
 	status unitStatus,
 ) (unitStatus, error) {
-	if !status.Found || (status.FileState != unitFileMasked && status.FileState != unitFileMaskedRuntime) {
+	if !status.Found ||
+		(status.FileState != unitFileMasked && status.FileState != unitFileMaskedRuntime) {
 		return status, nil
 	}
-	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("unmask", "--", name)); err != nil {
+
+	if err := runChecked(
+		ctx,
+		r.data.client,
+		guest,
+		systemctlCommand("unmask", "--", name),
+	); err != nil {
 		return unitStatus{}, err
 	}
-	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("--runtime", "unmask", "--", name)); err != nil {
+
+	if err := runChecked(
+		ctx,
+		r.data.client,
+		guest,
+		systemctlCommand("--runtime", "unmask", "--", name),
+	); err != nil {
 		return unitStatus{}, err
 	}
 
@@ -496,12 +625,17 @@ func (r *systemdUnitResource) unmaskUnit(
 	if err != nil {
 		return unitStatus{}, err
 	}
-	if after.Found && (after.FileState == unitFileMasked || after.FileState == unitFileMaskedRuntime) {
+
+	if after.Found &&
+		(after.FileState == unitFileMasked || after.FileState == unitFileMaskedRuntime) {
 		return unitStatus{}, fmt.Errorf(
 			"on guest %s, unit %s still reports unit file state %s after persistent and runtime unmask commands",
-			guest, name, after.FileState,
+			guest,
+			name,
+			after.FileState,
 		)
 	}
+
 	return after, nil
 }
 
@@ -517,7 +651,13 @@ func (r *systemdUnitResource) clearFailed(
 	if !plan.ResetFailed.ValueBool() || status.Active != unitFailed {
 		return status, nil
 	}
-	if err := runChecked(ctx, r.data.client, guest, systemctlCommand("reset-failed", "--", name)); err != nil {
+
+	if err := runChecked(
+		ctx,
+		r.data.client,
+		guest,
+		systemctlCommand("reset-failed", "--", name),
+	); err != nil {
 		return unitStatus{}, err
 	}
 
@@ -525,35 +665,47 @@ func (r *systemdUnitResource) clearFailed(
 	if err != nil {
 		return unitStatus{}, err
 	}
+
 	if after.Found && after.Active == unitFailed {
 		return unitStatus{}, fmt.Errorf(
 			"on guest %s, unit %s still reports active state failed after systemctl reset-failed",
-			guest, name,
+			guest,
+			name,
 		)
 	}
+
 	return after, nil
 }
 
 func systemctlCommand(arguments ...string) transport.Command {
 	command := guestCommand(append([]string{"systemctl"}, arguments...)...)
 	command.TimeoutSeconds = systemctlTimeoutSeconds
+
 	return command
 }
 
-func readUnitStatus(ctx context.Context, client *transport.Client, guest transport.Guest, name string) (unitStatus, error) {
+func readUnitStatus(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+	name string,
+) (unitStatus, error) {
 	enabledCommand := systemctlCommand("is-enabled", "--", name)
 	enabledResult, err := runGuest(ctx, client, guest, enabledCommand)
 	if err != nil {
 		return unitStatus{}, err
 	}
+
 	fileState := unitFileState(firstLine(enabledResult.Stdout))
 	if fileState == unitFileNotFound {
 		return unitStatus{}, nil
 	}
+
 	if fileState == "" {
 		if reportsMissingUnit(string(enabledResult.Stderr)) {
 			return unitStatus{}, nil
 		}
+
 		return unitStatus{}, commandFailure(guest, enabledCommand, enabledResult)
 	}
 
@@ -564,10 +716,12 @@ func readUnitStatus(ctx context.Context, client *transport.Client, guest transpo
 	if err != nil {
 		return unitStatus{}, err
 	}
+
 	activeState := unitActiveState(firstLine(activeResult.Stdout))
 	if activeState == "" {
 		return unitStatus{}, commandFailure(guest, activeCommand, activeResult)
 	}
+
 	return unitStatus{Found: true, FileState: fileState, Active: activeState}, nil
 }
 
@@ -577,6 +731,7 @@ func reportsMissingUnit(stderr string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -595,10 +750,15 @@ func (target guestUnitTarget) readUnit(ctx context.Context, name string) (unitSt
 	return readUnitStatus(ctx, target.client, target.guest, name)
 }
 
-func (target guestUnitTarget) runUnitAction(ctx context.Context, action unitAction, name string) error {
+func (target guestUnitTarget) runUnitAction(
+	ctx context.Context,
+	action unitAction,
+	name string,
+) error {
 	command := systemctlCommand(string(action), "--", name)
 	if action == unitActionDaemonReload {
 		command = systemctlCommand(string(action))
 	}
+
 	return runChecked(ctx, target.client, target.guest, command)
 }

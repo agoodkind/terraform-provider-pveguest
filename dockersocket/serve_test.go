@@ -33,16 +33,21 @@ const (
 )
 
 func TestServeClosesStalledConnectionAndKeepsReplacementSocket(t *testing.T) {
-	client, err := transport.NewClient(map[string]transport.NodeConfig{
-		testNode: {Endpoint: testEndpoint, APIToken: testToken, Insecure: true},
-	}, transport.DefaultMaxRequests)
+	client, err := transport.NewClient(
+		map[string]transport.NodeConfig{
+			testNode: {Endpoint: testEndpoint, APIToken: testToken, Insecure: true},
+		},
+		transport.DefaultMaxRequests,
+	)
 	if err != nil {
 		t.Fatalf("create transport client: %v", err)
 	}
+
 	directory, err := os.MkdirTemp("", "ds")
 	if err != nil {
 		t.Fatalf("create directory: %v", err)
 	}
+
 	t.Cleanup(func() { _ = os.RemoveAll(directory) })
 	socketPath := filepath.Join(directory, "d.sock")
 
@@ -64,10 +69,12 @@ func TestServeClosesStalledConnectionAndKeepsReplacementSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("set connection deadline: %v", err)
 	}
+
 	_, err = io.WriteString(connection, incompletePost)
 	if err != nil {
 		t.Fatalf("write request headers: %v", err)
 	}
+
 	reader := bufio.NewReader(connection)
 	statusLine, err := reader.ReadString('\n')
 	if err != nil || !strings.HasPrefix(statusLine, continueStatus) {
@@ -81,6 +88,7 @@ func TestServeClosesStalledConnectionAndKeepsReplacementSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen on replacement socket: %v", err)
 	}
+
 	t.Cleanup(func() { _ = replacement.Close() })
 
 	select {
@@ -96,6 +104,7 @@ func TestServeClosesStalledConnectionAndKeepsReplacementSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read original connection after serve returned: %v, want end of file", err)
 	}
+
 	replacementConnection := dialWhenReady(t, socketPath)
 	_ = replacementConnection.Close()
 }
@@ -104,15 +113,18 @@ func dialWhenReady(t *testing.T, socketPath string) net.Conn {
 	t.Helper()
 	var dialer net.Dialer
 	deadline := time.Now().Add(serveWait)
+
 	for {
 		connection, err := dialer.DialContext(t.Context(), "unix", socketPath)
 		if err == nil {
 			t.Cleanup(func() { _ = connection.Close() })
 			return connection
 		}
+
 		if time.Now().After(deadline) {
 			t.Fatalf("socket %s did not accept a connection: %v", socketPath, err)
 		}
+
 		time.Sleep(socketPoll)
 	}
 }
@@ -120,14 +132,17 @@ func dialWhenReady(t *testing.T, socketPath string) net.Conn {
 func waitForRemoval(t *testing.T, socketPath string) {
 	t.Helper()
 	deadline := time.Now().Add(serveWait)
+
 	for {
 		_, err := os.Stat(socketPath)
 		if errors.Is(err, fs.ErrNotExist) {
 			return
 		}
+
 		if time.Now().After(deadline) {
 			t.Fatalf("socket %s still exists after cancellation: err = %v", socketPath, err)
 		}
+
 		time.Sleep(socketPoll)
 	}
 }

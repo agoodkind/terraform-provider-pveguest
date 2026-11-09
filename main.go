@@ -27,8 +27,20 @@ func main() {
 		Address: providerAddress,
 		Debug:   debug,
 	}
-	slog.Info("provider server starting", "address", providerAddress, "version", version, "debug", debug)
-	if err := providerserver.Serve(context.Background(), provider.New(version), options); err != nil {
+	slog.Info(
+		"provider server starting",
+		"address",
+		providerAddress,
+		"version",
+		version,
+		"debug",
+		debug,
+	)
+	if err := providerserver.Serve(
+		context.Background(),
+		provider.New(version),
+		options,
+	); err != nil {
 		slog.Error("provider server stopped", "address", providerAddress, "err", err)
 		os.Exit(1)
 	}
