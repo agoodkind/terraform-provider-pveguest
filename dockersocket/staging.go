@@ -34,7 +34,11 @@ const (
 // handleStaged stages the request body in a guest file, runs curl with that
 // file, and relays the response. It defers removal before creating the
 // directory.
-func (handler *proxy) handleStaged(writer http.ResponseWriter, request *http.Request, body []byte) int {
+func (handler *proxy) handleStaged(
+	writer http.ResponseWriter,
+	request *http.Request,
+	body []byte,
+) int {
 	directory, err := newStagingDirectory()
 	if err != nil {
 		return reject(writer, request, http.StatusBadGateway, err.Error())
@@ -56,6 +60,7 @@ func (handler *proxy) handleStaged(writer http.ResponseWriter, request *http.Req
 	if err != nil {
 		return reject(writer, request, http.StatusBadGateway, err.Error())
 	}
+
 	return relay(writer, request, result.Stdout)
 }
 
@@ -66,27 +71,44 @@ func newStagingDirectory() (string, error) {
 		slog.Error("create staging directory name failed", "err", err)
 		return "", fmt.Errorf("create staging directory name: %w", err)
 	}
+
 	return stagingDirectoryPrefix + hex.EncodeToString(random), nil
 }
 
 // stageBody creates a guest directory with mode 0700 and appends body pieces
 // to bodyPath with dd. Each dd exec reads one piece from standard input,
 // within the guest exec stdin limit. These commands do not use a shell.
-func (handler *proxy) stageBody(ctx context.Context, directory string, bodyPath string, body []byte) error {
+func (handler *proxy) stageBody(
+	ctx context.Context,
+	directory string,
+	bodyPath string,
+	body []byte,
+) error {
 	_, err := handler.runGuest(
-		ctx, []string{"mkdir", "-m", stagingDirectoryMode, "--", directory}, nil, stagingCommandTimeoutSeconds,
+		ctx,
+		[]string{"mkdir", "-m", stagingDirectoryMode, "--", directory},
+		nil,
+		stagingCommandTimeoutSeconds,
 	)
 	if err != nil {
 		return err
 	}
 
-	appendArguments := []string{"dd", "of=" + bodyPath, "oflag=append", "conv=notrunc", "status=none"}
+	appendArguments := []string{
+		"dd",
+		"of=" + bodyPath,
+		"oflag=append",
+		"conv=notrunc",
+		"status=none",
+	}
+
 	for _, piece := range transport.SplitStdin(handler.guest.Kind, body) {
 		_, err = handler.runGuest(ctx, appendArguments, piece, stagingCommandTimeoutSeconds)
 		if err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
@@ -95,7 +117,10 @@ func (handler *proxy) stageBody(ctx context.Context, directory string, bodyPath 
 // changing the response.
 func (handler *proxy) removeStagingDirectory(ctx context.Context, directory string) {
 	_, err := handler.runGuest(
-		context.WithoutCancel(ctx), []string{"rm", "-r", "-f", "--", directory}, nil, cleanupTimeoutSeconds,
+		context.WithoutCancel(ctx),
+		[]string{"rm", "-r", "-f", "--", directory},
+		nil,
+		cleanupTimeoutSeconds,
 	)
 	if err != nil {
 		slog.Error("remove staging directory failed", "directory", directory, "err", err)

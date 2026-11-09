@@ -28,13 +28,19 @@ func TestAccParallelGuestCommands(t *testing.T) {
 	if listed == "" {
 		t.Skipf("%s is not set", parallelVMIDsVariable)
 	}
+
 	var guests []transport.Guest
+
 	for _, field := range strings.Split(listed, ",") {
 		vmid, err := strconv.ParseInt(strings.TrimSpace(field), 10, 64)
 		if err != nil {
 			t.Fatalf("%s: %v", parallelVMIDsVariable, err)
 		}
-		guests = append(guests, transport.Guest{Node: handle.guest.Node, VMID: vmid, Kind: transport.KindLXC})
+
+		guests = append(
+			guests,
+			transport.Guest{Node: handle.guest.Node, VMID: vmid, Kind: transport.KindLXC},
+		)
 	}
 
 	nodes := map[string]transport.NodeConfig{handle.guest.Node: handle.node}
@@ -45,33 +51,45 @@ func TestAccParallelGuestCommands(t *testing.T) {
 
 	var mutex sync.Mutex
 	failures := map[string]int{}
+
 	for round := 0; round < parallelRounds; round++ {
 		var group sync.WaitGroup
+
 		for _, guest := range guests {
 			group.Add(1)
 			go func(guest transport.Guest) {
 				defer group.Done()
-				command := transport.Command{Argv: []string{"cat", "/etc/hostname"}, TimeoutSeconds: 60}
+				command := transport.Command{
+					Argv:           []string{"cat", "/etc/hostname"},
+					TimeoutSeconds: 60,
+				}
 				result, runError := client.Run(context.Background(), guest, command)
 				outcome := ""
 				if runError != nil {
 					outcome = "error: " + runError.Error()
 				} else if result.ExitCode != 0 {
-					outcome = "exit " + strconv.Itoa(result.ExitCode) + " stderr=" + strconv.Quote(string(result.Stderr))
+					outcome = "exit " + strconv.Itoa(result.ExitCode) + " stderr=" + strconv.Quote(
+						string(result.Stderr),
+					)
 				} else if strings.TrimSpace(string(result.Stdout)) == "" {
 					outcome = "exit 0 with empty stdout"
 				}
+
 				if outcome != "" {
 					mutex.Lock()
 					failures[outcome]++
 					mutex.Unlock()
 				}
-			}(guest)
+			}(
+				guest,
+			)
 		}
+
 		group.Wait()
 	}
 
 	total := parallelRounds * len(guests)
+
 	for outcome, count := range failures {
 		t.Errorf("%d of %d commands: %s", count, total, outcome)
 	}

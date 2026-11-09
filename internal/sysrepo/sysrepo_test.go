@@ -40,9 +40,11 @@ func TestParseModuleList(t *testing.T) {
 	if !found {
 		t.Fatal("ietf-nat is not implemented in the parsed list")
 	}
+
 	if nat.Revision != "2019-01-10" {
 		t.Errorf("ietf-nat revision is %q", nat.Revision)
 	}
+
 	if !slices.Equal(nat.Features, []string{"basic-nat44", "napt44"}) {
 		t.Errorf("ietf-nat features are %q", nat.Features)
 	}
@@ -55,6 +57,7 @@ func TestParseModuleList(t *testing.T) {
 	if _, found := sysrepo.FindImplemented(modules, "ietf-yang-types"); found {
 		t.Error("ietf-yang-types counts as implemented, but another module only imports it")
 	}
+
 	if _, found := sysrepo.FindImplemented(modules, "ietf-sub"); found {
 		t.Error("a submodule row counts as a module")
 	}
@@ -72,11 +75,16 @@ func TestParseModuleFileName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if file.Module != "ietf-ip" || file.Revision != "2018-02-22" {
 		t.Errorf("parsed %+v", file)
 	}
 
-	for _, name := range []string{"/x/ietf-ip.yang", "/x/ietf-ip@2018.yang", "/x/ietf-ip@2018-02-22.yin"} {
+	for _, name := range []string{
+		"/x/ietf-ip.yang",
+		"/x/ietf-ip@2018.yang",
+		"/x/ietf-ip@2018-02-22.yin",
+	} {
 		if _, err := sysrepo.ParseModuleFileName(name); err == nil {
 			t.Errorf("%s parsed without an error", name)
 		}
@@ -97,10 +105,12 @@ func TestCanonicalXMLIgnoresInsignificantDifferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	secondCanonical, err := sysrepo.CanonicalXML(second)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if firstCanonical != secondCanonical {
 		t.Errorf("canonical forms differ:\n%s\n%s", firstCanonical, secondCanonical)
 	}
@@ -119,11 +129,13 @@ func TestCanonicalXMLDetectsDataDifferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, variant := range variants {
 		canonical, err := sysrepo.CanonicalXML(variant)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		if canonical == baseCanonical {
 			t.Errorf("%q has the canonical form of %q", variant, base)
 		}
@@ -142,6 +154,7 @@ func TestCanonicalXMLOfWhitespaceOnlyDocumentIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if canonical != "" {
 		t.Errorf("canonical form is %q, want empty", canonical)
 	}

@@ -90,18 +90,33 @@ func (client *Client) GetGuestOptions(
 	if err != nil {
 		return nil, err
 	}
+
 	var members map[string]json.RawMessage
 	if err := json.Unmarshal(data, &members); err != nil {
-		slog.ErrorContext(ctx, "config response contains invalid json",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"config response contains invalid json",
+			"node",
+			guest.Node,
+			"vmid",
+			guest.VMID,
+			"kind",
+			guest.Kind,
+			"err",
+			err,
+		)
+
 		return nil, fmt.Errorf("%s: parse config response: %w", guest, err)
 	}
+
 	options := make(map[string]string)
+
 	for key, raw := range members {
 		if keys.MatchString(key) {
 			options[key] = rawText(raw)
 		}
 	}
+
 	return options, nil
 }
 
@@ -116,17 +131,21 @@ func (client *Client) GetGuestPending(
 	if err != nil {
 		return nil, err
 	}
+
 	pending := make(map[string]string)
+
 	for _, entry := range entries {
 		if !keys.MatchString(entry.Key) {
 			continue
 		}
+
 		if len(entry.Pending) > 0 {
 			pending[entry.Key] = rawText(entry.Pending)
 		} else if len(entry.Delete) > 0 {
 			pending[entry.Key] = ""
 		}
 	}
+
 	return pending, nil
 }
 
@@ -145,6 +164,7 @@ func (client *Client) SetGuestOptions(
 		if err != nil {
 			return err
 		}
+
 		plan = planRemoval(entries, remove)
 	}
 
@@ -159,6 +179,7 @@ func (client *Client) SetGuestOptions(
 	// Proxmox rejects revert and delete for the same key in one request.
 	later := make(containerConfigBody, 1)
 	setListMember(later, deleteMember, plan.deleteLater)
+
 	return client.putConfig(ctx, guest, later)
 }
 
@@ -170,7 +191,9 @@ func planRemoval(entries []pendingEntry, remove []string) removalPlan {
 	for _, entry := range entries {
 		byKey[entry.Key] = entry
 	}
+
 	var plan removalPlan
+
 	for _, key := range remove {
 		entry, found := byKey[key]
 		hasPending := found && len(entry.Pending) > 0
@@ -185,6 +208,7 @@ func planRemoval(entries []pendingEntry, remove []string) removalPlan {
 			plan.delete = append(plan.delete, key)
 		}
 	}
+
 	return plan
 }
 
@@ -199,13 +223,27 @@ func (client *Client) putConfig(ctx context.Context, guest Guest, body container
 	if len(body) == 0 {
 		return nil
 	}
+
 	document, err := encodeJSON(&body)
 	if err != nil {
-		slog.ErrorContext(ctx, "failed to encode config request",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"failed to encode config request",
+			"node",
+			guest.Node,
+			"vmid",
+			guest.VMID,
+			"kind",
+			guest.Kind,
+			"err",
+			err,
+		)
+
 		return fmt.Errorf("%s: %w", guest, err)
 	}
+
 	_, err = client.guestCall(ctx, guest, http.MethodPut, configOperation, document)
+
 	return err
 }
 
@@ -214,12 +252,25 @@ func (client *Client) pendingEntries(ctx context.Context, guest Guest) ([]pendin
 	if err != nil {
 		return nil, err
 	}
+
 	var entries []pendingEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		slog.ErrorContext(ctx, "pending response contains invalid json",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"pending response contains invalid json",
+			"node",
+			guest.Node,
+			"vmid",
+			guest.VMID,
+			"kind",
+			guest.Kind,
+			"err",
+			err,
+		)
+
 		return nil, fmt.Errorf("%s: parse pending response: %w", guest, err)
 	}
+
 	return entries, nil
 }
 
@@ -245,11 +296,16 @@ func (client *Client) guestCall(
 	if !found {
 		return nil, fmt.Errorf("node %q is not in the provider nodes map", guest.Node)
 	}
-	return connection.call(ctx, guest, apiRequest{
-		method:    method,
-		operation: operation,
-		body:      body,
-	})
+
+	return connection.call(
+		ctx,
+		guest,
+		apiRequest{
+			method:    method,
+			operation: operation,
+			body:      body,
+		},
+	)
 }
 
 func containerGuest(node string, vmid int64) Guest {
@@ -263,5 +319,6 @@ func rawText(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &text); err == nil {
 		return text
 	}
+
 	return string(raw)
 }

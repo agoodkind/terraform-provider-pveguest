@@ -32,11 +32,19 @@ func newHostKernelModulesResource() resource.Resource {
 	return &hostKernelModulesResource{}
 }
 
-func (r *hostKernelModulesResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *hostKernelModulesResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_host_kernel_modules"
 }
 
-func (r *hostKernelModulesResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *hostKernelModulesResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "The resource manages a node's kernel module list. The resource never unloads modules. The destroy operation empties the node's module list.",
 		Attributes: map[string]schema.Attribute{
@@ -51,7 +59,10 @@ func (r *hostKernelModulesResource) Schema(_ context.Context, _ resource.SchemaR
 				ElementType: types.StringType,
 				Validators: []validator.Set{
 					setvalidator.ValueStringsAre(
-						stringvalidator.RegexMatches(kernelModuleNamePattern, "must be a kernel module name"),
+						stringvalidator.RegexMatches(
+							kernelModuleNamePattern,
+							"must be a kernel module name",
+						),
 					),
 				},
 			},
@@ -64,42 +75,66 @@ func (r *hostKernelModulesResource) Schema(_ context.Context, _ resource.SchemaR
 	}
 }
 
-func (r *hostKernelModulesResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *hostKernelModulesResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *hostKernelModulesResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *hostKernelModulesResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	resource.ImportStatePassthroughID(ctx, path.Root("node"), req, resp)
 }
 
-func (r *hostKernelModulesResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *hostKernelModulesResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan hostKernelModulesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *hostKernelModulesResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *hostKernelModulesResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan hostKernelModulesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // Read omits unloaded entries from modules to make the next plan propose an update.
-func (r *hostKernelModulesResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *hostKernelModulesResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state hostKernelModulesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
@@ -118,6 +153,7 @@ func (r *hostKernelModulesResource) Read(ctx context.Context, req resource.ReadR
 			present = append(present, name)
 		}
 	}
+
 	modules, diagnostics := types.SetValueFrom(ctx, types.StringType, present)
 	resp.Diagnostics.Append(diagnostics...)
 	loaded, diagnostics := types.MapValueFrom(ctx, types.BoolType, current.Loaded)
@@ -125,24 +161,33 @@ func (r *hostKernelModulesResource) Read(ctx context.Context, req resource.ReadR
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	state.Modules = modules
 	state.Loaded = loaded
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *hostKernelModulesResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *hostKernelModulesResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state hostKernelModulesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	_, err := r.data.client.SetKernelModules(ctx, state.Node.ValueString(), []string{})
 	if err != nil {
 		resp.Diagnostics.AddError("Clear host kernel modules", err.Error())
 	}
 }
 
-func (r *hostKernelModulesResource) apply(ctx context.Context, plan *hostKernelModulesModel) diag.Diagnostics {
+func (r *hostKernelModulesResource) apply(
+	ctx context.Context,
+	plan *hostKernelModulesModel,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	var declared []string
 	diagnostics.Append(plan.Modules.ElementsAs(ctx, &declared, false)...)
@@ -155,8 +200,10 @@ func (r *hostKernelModulesResource) apply(ctx context.Context, plan *hostKernelM
 		diagnostics.AddError("Set host kernel modules", err.Error())
 		return diagnostics
 	}
+
 	loaded, loadedDiagnostics := types.MapValueFrom(ctx, types.BoolType, current.Loaded)
 	diagnostics.Append(loadedDiagnostics...)
 	plan.Loaded = loaded
+
 	return diagnostics
 }

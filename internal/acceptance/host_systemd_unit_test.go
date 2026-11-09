@@ -36,7 +36,10 @@ type hostUnitTest struct {
 
 func TestAccHostSystemdUnit(t *testing.T) {
 	artifact, unrelated := prepareSelectedFixtures(t, caseUnitV1, caseUnitV2)
-	secret := &hostSecretTest{hostArtifactTest: artifact, target: transport.HostArtifactTarget(fixtureWorkspace)}
+	secret := &hostSecretTest{
+		hostArtifactTest: artifact,
+		target:           transport.HostArtifactTarget(fixtureWorkspace),
+	}
 	test := &hostUnitTest{hostSecretTest: secret, unrelated: unrelated}
 	t.Cleanup(test.removeFixtureUnit)
 	test.removeFixtureUnit()
@@ -66,7 +69,12 @@ func TestAccHostSystemdUnit(t *testing.T) {
 	test.expectUnchangedRepeat(restarted)
 
 	test.workspace.mustRun("state", "rm", hostUnitAddress)
-	test.workspace.mustRun("import", "-no-color", hostUnitAddress, test.node+":"+fixtureWorkspace+":"+hostUnitFixture)
+	test.workspace.mustRun(
+		"import",
+		"-no-color",
+		hostUnitAddress,
+		test.node+":"+fixtureWorkspace+":"+hostUnitFixture,
+	)
 	test.expectInvocation(restarted)
 	test.expectUnrelated()
 	test.workspace.writeConfig(test.unitConfig(caseUnitV2, hostUnitFixture, ""))
@@ -75,8 +83,14 @@ func TestAccHostSystemdUnit(t *testing.T) {
 	test.workspace.writeConfig(test.unitConfig(caseUnitV2, hostUnitUnlisted, ""))
 	output, exitCode := test.workspace.run("apply", "-no-color", "-auto-approve")
 	if exitCode == 0 || !strings.Contains(collapseWhitespace(output), hostUnitUnlistedErr) {
-		t.Fatalf("apply of an unlisted unit exited with status %d, want a failure that contains %q:\n%s", exitCode, hostUnitUnlistedErr, output)
+		t.Fatalf(
+			"apply of an unlisted unit exited with status %d, want a failure that contains %q:\n%s",
+			exitCode,
+			hostUnitUnlistedErr,
+			output,
+		)
 	}
+
 	test.expectInvocation(restarted)
 	test.expectUnrelated()
 
@@ -93,7 +107,9 @@ func (u *hostUnitTest) expectSerializedMutations(invocation string) {
 	u.t.Helper()
 	marker := u.newMarker()
 	u.workspace.variableValue = marker
-	u.workspace.writeConfig(u.unitConfig(caseUnitV1, hostUnitFixture, hostUnitRestartOn) + fmt.Sprintf(`
+	u.workspace.writeConfig(
+		u.unitConfig(caseUnitV1, hostUnitFixture, hostUnitRestartOn) + fmt.Sprintf(
+			`
 variable "secret" {
   type      = string
   sensitive = true
@@ -109,7 +125,13 @@ resource "pveguest_host_secret" "test" {
 
   depends_on = [pveguest_host_artifact.test]
 }
-`, u.node, fixtureWorkspace, hostSecretField, hostSecretValueArgument))
+`,
+			u.node,
+			fixtureWorkspace,
+			hostSecretField,
+			hostSecretValueArgument,
+		),
+	)
 	before := strings.Fields(u.taskRecords(u.target))
 	u.mustTofu("apply", "-no-color", "-auto-approve")
 	u.expectUnrelated()
@@ -117,33 +139,49 @@ resource "pveguest_host_secret" "test" {
 	u.expectNewInvocation(invocation)
 	entry := u.secretEntry()
 	if !entry.Configured || entry.Version != 1 || entry.RestartPending {
-		u.t.Fatalf("the GET secrets[] entry reports configured as %t, version as %d, and restart_pending as %t instead of configured true, version 1, and restart_pending false",
-			entry.Configured, entry.Version, entry.RestartPending)
+		u.t.Fatalf(
+			"the GET secrets[] entry reports configured as %t, version as %d, and restart_pending as %t instead of configured true, version 1, and restart_pending false",
+			entry.Configured,
+			entry.Version,
+			entry.RestartPending,
+		)
 	}
+
 	u.expectFileContent(marker)
 
 	taskTypes := map[string]bool{}
+
 	for _, record := range strings.Fields(u.taskRecords(u.target)) {
 		if slices.Contains(before, record) {
 			continue
 		}
+
 		for _, taskType := range []string{hostSecretTaskType, hostUnitTaskType} {
 			if strings.Contains(record, ":"+taskType+":") {
 				taskTypes[taskType] = true
 			}
 		}
+
 		if strings.Contains(u.hostMustRun("cat", "--", record), hostLockWaitText) {
 			u.t.Fatalf("task log %s shows that the task waited for the target lock", record)
 		}
 	}
+
 	if !taskTypes[hostSecretTaskType] || !taskTypes[hostUnitTaskType] {
-		u.t.Fatalf("the apply created task types %v on the fixture target, want %s and %s", taskTypes, hostSecretTaskType, hostUnitTaskType)
+		u.t.Fatalf(
+			"the apply created task types %v on the fixture target, want %s and %s",
+			taskTypes,
+			hostSecretTaskType,
+			hostUnitTaskType,
+		)
 	}
+
 	u.mustTofu("state", "rm", hostSecretAddress)
 }
 
 func (u *hostUnitTest) unitConfig(fixtureCase string, unit string, extra string) string {
-	return u.config(fixtureCase) + fmt.Sprintf(`
+	return u.config(fixtureCase) + fmt.Sprintf(
+		`
 resource "pveguest_host_systemd_unit" "test" {
   node      = %q
   workspace = %q
@@ -151,7 +189,12 @@ resource "pveguest_host_systemd_unit" "test" {
   enabled   = true
   active    = true%s
 }
-`, u.node, fixtureWorkspace, unit, extra)
+`,
+		u.node,
+		fixtureWorkspace,
+		unit,
+		extra,
+	)
 }
 
 func (u *hostUnitTest) applyUnit() {
@@ -166,6 +209,7 @@ func (u *hostUnitTest) expectUnchangedRepeat(invocation string) {
 	if exitCode != 0 {
 		u.t.Fatalf("plan exited with status %d, want 0:\n%s", exitCode, output)
 	}
+
 	u.applyUnit()
 	u.expectInvocation(invocation)
 }
@@ -174,7 +218,12 @@ func (u *hostUnitTest) expectPlannedChange() {
 	u.t.Helper()
 	output, exitCode := u.workspace.run("plan", "-no-color", "-detailed-exitcode")
 	if exitCode != planChangesExitCode {
-		u.t.Fatalf("plan exited with status %d, want %d:\n%s", exitCode, planChangesExitCode, output)
+		u.t.Fatalf(
+			"plan exited with status %d, want %d:\n%s",
+			exitCode,
+			planChangesExitCode,
+			output,
+		)
 	}
 }
 
@@ -183,7 +232,14 @@ func (u *hostUnitTest) expectUnitState(fileState string, activeState string) {
 	enabled := strings.TrimSpace(u.hostStdout("systemctl", "is-enabled", "--", hostUnitFixture))
 	active := strings.TrimSpace(u.hostStdout("systemctl", "is-active", "--", hostUnitFixture))
 	if enabled != fileState || active != activeState {
-		u.t.Fatalf("%s is %s and %s, want %s and %s", hostUnitFixture, enabled, active, fileState, activeState)
+		u.t.Fatalf(
+			"%s is %s and %s, want %s and %s",
+			hostUnitFixture,
+			enabled,
+			active,
+			fileState,
+			activeState,
+		)
 	}
 }
 
@@ -192,6 +248,7 @@ func (u *hostUnitTest) expectUnitState(fileState string, activeState string) {
 func (u *hostUnitTest) hostStdout(argv ...string) string {
 	u.t.Helper()
 	stdout, _, _ := u.hostRun(nil, argv...)
+
 	return stdout
 }
 
@@ -208,12 +265,17 @@ func (u *hostUnitTest) expectNewInvocation(before string) string {
 	if after == before {
 		u.t.Fatalf("%s kept InvocationID %s", hostUnitFixture, before)
 	}
+
 	return after
 }
 
 func (u *hostUnitTest) expectUnrelated() {
 	u.t.Helper()
-	u.expectSnapshot(u.unrelated, transport.HostArtifactTarget(unrelatedFixtureWorkspace), unrelatedFixtureDirectory)
+	u.expectSnapshot(
+		u.unrelated,
+		transport.HostArtifactTarget(unrelatedFixtureWorkspace),
+		unrelatedFixtureDirectory,
+	)
 	u.expectUnrelatedInvocation()
 }
 

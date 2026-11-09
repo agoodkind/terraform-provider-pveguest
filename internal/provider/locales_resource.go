@@ -50,11 +50,19 @@ func newLocalesResource() resource.Resource {
 	return &localesResource{}
 }
 
-func (r *localesResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *localesResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_locales"
 }
 
-func (r *localesResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *localesResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "The resource declares a set of generated locales inside a guest. " +
 			"Apply runs locale-gen when a declared locale is absent. " +
@@ -68,7 +76,10 @@ func (r *localesResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
 					setvalidator.ValueStringsAre(
-						stringvalidator.RegexMatches(localeEntryPattern, "must be a locale with optional .codeset and @modifier, followed by one space and a charmap"),
+						stringvalidator.RegexMatches(
+							localeEntryPattern,
+							"must be a locale with optional .codeset and @modifier, followed by one space and a charmap",
+						),
 					),
 				},
 			},
@@ -83,29 +94,44 @@ func (r *localesResource) Schema(_ context.Context, _ resource.SchemaRequest, re
 	}
 }
 
-func (r *localesResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *localesResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
-func (r *localesResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *localesResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan localesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.generate(ctx, plan, false)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *localesResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *localesResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state localesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	declared, diagnostics := stringValues(ctx, state.Locales)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
@@ -125,16 +151,22 @@ func (r *localesResource) Read(ctx context.Context, req resource.ReadRequest, re
 			present = append(present, entry)
 		}
 	}
+
 	presentSet, diagnostics := stringSetOf(ctx, present)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	state.Locales = presentSet
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *localesResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *localesResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan localesModel
 	var state localesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
@@ -142,19 +174,29 @@ func (r *localesResource) Update(ctx context.Context, req resource.UpdateRequest
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	regenerate := !plan.GenerateOn.Equal(state.GenerateOn)
 	resp.Diagnostics.Append(r.generate(ctx, plan, regenerate)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // Delete relies on the framework to remove the resource from state without deleting guest locales.
-func (r *localesResource) Delete(_ context.Context, _ resource.DeleteRequest, _ *resource.DeleteResponse) {
+func (r *localesResource) Delete(
+	_ context.Context,
+	_ resource.DeleteRequest,
+	_ *resource.DeleteResponse,
+) {
 }
 
-func (r *localesResource) generate(ctx context.Context, plan localesModel, regenerate bool) diag.Diagnostics {
+func (r *localesResource) generate(
+	ctx context.Context,
+	plan localesModel,
+	regenerate bool,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	declared, valueDiagnostics := stringValues(ctx, plan.Locales)
 	diagnostics.Append(valueDiagnostics...)
@@ -168,6 +210,7 @@ func (r *localesResource) generate(ctx context.Context, plan localesModel, regen
 		diagnostics.AddError(readLocalesSummary, err.Error())
 		return diagnostics
 	}
+
 	if len(missingLocales(declared, generated)) == 0 && !regenerate {
 		return diagnostics
 	}
@@ -186,6 +229,7 @@ func (r *localesResource) generate(ctx context.Context, plan localesModel, regen
 		diagnostics.AddError(readLocalesSummary, err.Error())
 		return diagnostics
 	}
+
 	stillMissing := missingLocales(declared, generated)
 	if len(stillMissing) > 0 {
 		diagnostics.AddError(
@@ -193,6 +237,7 @@ func (r *localesResource) generate(ctx context.Context, plan localesModel, regen
 			fmt.Sprintf("%s: %s", guest, strings.Join(stillMissing, ", ")),
 		)
 	}
+
 	return diagnostics
 }
 
@@ -203,6 +248,7 @@ func missingLocales(declared []string, generated map[string]bool) []string {
 			missing = append(missing, entry)
 		}
 	}
+
 	return missing
 }
 
@@ -216,16 +262,20 @@ func readGeneratedLocales(
 	if err != nil {
 		return nil, err
 	}
+
 	if result.ExitCode != 0 {
 		return nil, commandFailure(guest, command, result)
 	}
+
 	generated := make(map[string]bool)
+
 	for line := range strings.SplitSeq(string(result.Stdout), "\n") {
 		name := strings.TrimSpace(line)
 		if name != "" {
 			generated[name] = true
 		}
 	}
+
 	return generated, nil
 }
 
@@ -237,10 +287,12 @@ func archivedLocaleName(entry string) string {
 	if !hasCodeset {
 		return name
 	}
+
 	archived := stem + localeCodesetSeparator + normalizedCodeset(codeset)
 	if hasModifier {
 		archived += localeModifierSeparator + modifier
 	}
+
 	return archived
 }
 
@@ -248,18 +300,22 @@ func archivedLocaleName(entry string) string {
 func normalizedCodeset(codeset string) string {
 	var builder strings.Builder
 	hasLetter := false
+
 	for _, character := range strings.ToLower(codeset) {
 		isLetter := character >= 'a' && character <= 'z'
 		isDigit := character >= '0' && character <= '9'
 		if isLetter {
 			hasLetter = true
 		}
+
 		if isLetter || isDigit {
 			builder.WriteRune(character)
 		}
 	}
+
 	if hasLetter {
 		return builder.String()
 	}
+
 	return digitCodesetPrefix + builder.String()
 }

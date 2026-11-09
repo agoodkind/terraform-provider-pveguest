@@ -37,10 +37,13 @@ func CanonicalXML(content string) (string, error) {
 		if text == "" {
 			return nil
 		}
+
 		if depth == 0 {
 			return fmt.Errorf("%w: text outside the top-level elements", ErrMalformedXML)
 		}
+
 		canonical.WriteString("text " + strconv.Quote(text) + "\n")
+
 		return nil
 	}
 
@@ -49,30 +52,36 @@ func CanonicalXML(content string) (string, error) {
 		if errors.Is(err, io.EOF) {
 			break
 		}
+
 		if err != nil {
 			slog.Error("parse XML content failed", "err", err)
 			return "", fmt.Errorf("%w: %w", ErrMalformedXML, err)
 		}
+
 		switch typed := token.(type) {
 		case xml.StartElement:
 			if err := flushText(); err != nil {
 				return "", err
 			}
+
 			writeStartElement(&canonical, typed)
 			depth++
 		case xml.EndElement:
 			if err := flushText(); err != nil {
 				return "", err
 			}
+
 			depth--
 			canonical.WriteString("end\n")
 		case xml.CharData:
 			pendingText.Write(typed)
 		}
 	}
+
 	if err := flushText(); err != nil {
 		return "", err
 	}
+
 	return canonical.String(), nil
 }
 
@@ -85,21 +94,31 @@ func writeStartElement(canonical *strings.Builder, element xml.StartElement) {
 			attributes = append(attributes, attribute)
 		}
 	}
-	sort.Slice(attributes, func(i int, j int) bool {
-		left := attributes[i].Name
-		right := attributes[j].Name
-		if left.Space != right.Space {
-			return left.Space < right.Space
-		}
-		return left.Local < right.Local
-	})
+
+	sort.Slice(
+		attributes,
+		func(i int, j int) bool {
+			left := attributes[i].Name
+			right := attributes[j].Name
+			if left.Space != right.Space {
+				return left.Space < right.Space
+			}
+
+			return left.Local < right.Local
+		},
+	)
 
 	fmt.Fprintf(canonical, "start {%s}%s", element.Name.Space, element.Name.Local)
+
 	for _, attribute := range attributes {
 		fmt.Fprintf(
-			canonical, " {%s}%s=%s",
-			attribute.Name.Space, attribute.Name.Local, strconv.Quote(attribute.Value),
+			canonical,
+			" {%s}%s=%s",
+			attribute.Name.Space,
+			attribute.Name.Local,
+			strconv.Quote(attribute.Value),
 		)
 	}
+
 	canonical.WriteString("\n")
 }

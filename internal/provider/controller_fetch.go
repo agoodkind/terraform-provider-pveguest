@@ -53,8 +53,10 @@ func (h *hashLocks) lock(hash string) func() {
 		entry = &sync.Mutex{}
 		h.locks[hash] = entry
 	}
+
 	h.mutex.Unlock()
 	entry.Lock()
+
 	return entry.Unlock
 }
 
@@ -70,12 +72,15 @@ func validateArchiveMember(member string) error {
 	if member == "" || strings.ContainsRune(member, 0) {
 		return errors.New("archive_member must be a non-empty path without NUL characters")
 	}
+
 	if strings.HasPrefix(member, "/") {
 		return fmt.Errorf("archive_member %q must be a relative path", member)
 	}
+
 	if slices.Contains(strings.Split(member, "/"), "..") {
 		return fmt.Errorf("archive_member %q must not contain a .. component", member)
 	}
+
 	return nil
 }
 
@@ -87,8 +92,10 @@ func cacheDirectory() (string, error) {
 			slog.Error("find the home directory for the download cache failed", "err", err)
 			return "", fmt.Errorf("find the home directory for the download cache: %w", err)
 		}
+
 		base = filepath.Join(home, ".cache")
 	}
+
 	return filepath.Join(base, cacheDirectoryName), nil
 }
 
@@ -99,11 +106,13 @@ func fileHasHash(filePath string, wantHash string) bool {
 	if err != nil {
 		return false
 	}
+
 	defer func() { _ = file.Close() }()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
 		return false
 	}
+
 	return hex.EncodeToString(hasher.Sum(nil)) == wantHash
 }
 
@@ -115,13 +124,16 @@ func dropHeadersOnOtherOrigin(names []string) func(*http.Request, []*http.Reques
 		if len(via) >= maximumRedirects {
 			return fmt.Errorf("stopped after %d redirects", maximumRedirects)
 		}
+
 		first := via[0].URL
 		if request.URL.Scheme == first.Scheme && request.URL.Host == first.Host {
 			return nil
 		}
+
 		for _, name := range names {
 			request.Header.Del(name)
 		}
+
 		return nil
 	}
 }
@@ -132,20 +144,24 @@ func newControllerHTTPClient(caFile string, headerNames []string) (*http.Client,
 		slog.Error("load the system certificate pool failed", "err", err)
 		return nil, fmt.Errorf("load the system certificate pool: %w", err)
 	}
+
 	if caFile != "" {
 		pem, err := os.ReadFile(caFile)
 		if err != nil {
 			slog.Error("read controller_ca_file failed", "err", err)
 			return nil, fmt.Errorf("read controller_ca_file: %w", err)
 		}
+
 		if !roots.AppendCertsFromPEM(pem) {
 			return nil, fmt.Errorf("controller_ca_file %s has no PEM certificate", caFile)
 		}
 	}
+
 	transport := &http.Transport{
 		Proxy:           http.ProxyFromEnvironment,
 		TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12},
 	}
+
 	return &http.Client{
 		Transport:     transport,
 		Timeout:       controllerDownloadTimeout,
@@ -166,10 +182,12 @@ func cachedArchive(
 	if err != nil {
 		return "", err
 	}
+
 	if err := os.MkdirAll(directory, cacheDirectoryMode); err != nil {
 		slog.ErrorContext(ctx, "create the download cache directory failed", "err", err)
 		return "", fmt.Errorf("create the download cache directory: %w", err)
 	}
+
 	cachedPath := filepath.Join(directory, wantHash)
 	// Check the cache after acquiring the hash lock; another request may have filled it.
 	unlock := downloadLocks.lock(wantHash)
@@ -182,29 +200,39 @@ func cachedArchive(
 	if err != nil {
 		return "", err
 	}
+
 	shownURL := headers.redactText(url)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", headers.redact(fmt.Errorf("build the request for %s: %w", url, err))
 	}
+
 	for _, name := range headers.sortedNames() {
 		request.Header.Set(name, headers[name])
 	}
+
 	response, err := client.Do(request)
 	if err != nil {
 		redacted := headers.redact(err)
 		slog.ErrorContext(ctx, "controller download failed", "url", shownURL, "err", redacted)
+
 		return "", fmt.Errorf("download %s on the controller: %w", shownURL, redacted)
 	}
+
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s on the controller: HTTP status %d", shownURL, response.StatusCode)
+		return "", fmt.Errorf(
+			"download %s on the controller: HTTP status %d",
+			shownURL,
+			response.StatusCode,
+		)
 	}
 
 	part, err := os.CreateTemp(directory, cachePartPattern)
 	if err != nil {
 		return "", fmt.Errorf("create a cache file: %w", err)
 	}
+
 	partPath := part.Name()
 	hasher := sha256.New()
 	_, copyErr := io.Copy(io.MultiWriter(part, hasher), response.Body)
@@ -212,21 +240,35 @@ func cachedArchive(
 	if err := errors.Join(copyErr, closeErr); err != nil {
 		_ = os.Remove(partPath)
 		redacted := headers.redact(err)
-		slog.ErrorContext(ctx, "write the download cache file failed", "url", shownURL, "err", redacted)
+		slog.ErrorContext(
+			ctx,
+			"write the download cache file failed",
+			"url",
+			shownURL,
+			"err",
+			redacted,
+		)
+
 		return "", fmt.Errorf("download %s on the controller: %w", shownURL, redacted)
 	}
+
 	receivedHash := hex.EncodeToString(hasher.Sum(nil))
 	if receivedHash != wantHash {
 		_ = os.Remove(partPath)
+
 		return "", fmt.Errorf(
 			"the download of %s has sha256 %s, but the configuration expects %s",
-			shownURL, receivedHash, wantHash,
+			shownURL,
+			receivedHash,
+			wantHash,
 		)
 	}
+
 	if err := os.Rename(partPath, cachedPath); err != nil {
 		_ = os.Remove(partPath)
 		return "", fmt.Errorf("move the download into the cache: %w", err)
 	}
+
 	return cachedPath, nil
 }
 
@@ -239,37 +281,50 @@ func extractArchiveMember(archivePath string, member string) ([]byte, error) {
 	if err := validateArchiveMember(member); err != nil {
 		return nil, err
 	}
+
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return nil, archiveStepError("open the archive", err)
 	}
+
 	defer func() { _ = file.Close() }()
 	decompressed, err := gzip.NewReader(file)
 	if err != nil {
 		return nil, archiveStepError("read the gzip stream of the archive", err)
 	}
+
 	defer func() { _ = decompressed.Close() }()
 
 	wanted := path.Clean(member)
 	reader := tar.NewReader(decompressed)
+
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("the archive has no member %q", member)
 		}
+
 		if err != nil {
 			return nil, archiveStepError("read the tar stream of the archive", err)
 		}
+
 		if header.Typeflag != tar.TypeReg || path.Clean(header.Name) != wanted {
 			continue
 		}
+
 		content, err := io.ReadAll(io.LimitReader(reader, maximumArchiveMemberBytes+1))
 		if err != nil {
 			return nil, archiveStepError("read the archive member "+member, err)
 		}
+
 		if len(content) > maximumArchiveMemberBytes {
-			return nil, fmt.Errorf("the archive member %q exceeds %d bytes", member, maximumArchiveMemberBytes)
+			return nil, fmt.Errorf(
+				"the archive member %q exceeds %d bytes",
+				member,
+				maximumArchiveMemberBytes,
+			)
 		}
+
 		return content, nil
 	}
 }
@@ -288,18 +343,29 @@ func fetchControllerPayload(
 	if err != nil {
 		return controllerPayload{}, err
 	}
+
 	var content []byte
 	if member == "" {
 		content, err = os.ReadFile(archivePath)
 	} else {
 		content, err = extractArchiveMember(archivePath, member)
 	}
+
 	if err != nil {
 		shownURL := headers.redactText(url)
 		redacted := headers.redact(err)
-		slog.ErrorContext(ctx, "read the controller payload failed", "url", shownURL, "err", redacted)
+		slog.ErrorContext(
+			ctx,
+			"read the controller payload failed",
+			"url",
+			shownURL,
+			"err",
+			redacted,
+		)
+
 		return controllerPayload{}, fmt.Errorf("read the payload of %s: %w", shownURL, redacted)
 	}
+
 	return controllerPayload{Content: content, SHA256: hashHex(content)}, nil
 }
 
@@ -310,9 +376,11 @@ func gzipContent(content []byte) ([]byte, error) {
 		slog.Error("compress the payload failed", "err", err)
 		return nil, fmt.Errorf("compress the payload: %w", err)
 	}
+
 	if err := writer.Close(); err != nil {
 		slog.Error("compress the payload failed", "err", err)
 		return nil, fmt.Errorf("compress the payload: %w", err)
 	}
+
 	return compressed.Bytes(), nil
 }

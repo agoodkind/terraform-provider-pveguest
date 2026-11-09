@@ -69,11 +69,19 @@ func newHostSecretResource() resource.Resource {
 	return &hostSecretResource{}
 }
 
-func (r *hostSecretResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *hostSecretResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_host_secret"
 }
 
-func (r *hostSecretResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *hostSecretResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "The resource sets one secret field of one workspace selector on a Proxmox node " +
 			"through the overlay host artifact API. The node validates the value against the target policy " +
@@ -94,7 +102,10 @@ func (r *hostSecretResource) Schema(_ context.Context, _ resource.SchemaRequest,
 				Description: "The field argument selects a secret field in the target policy. Changing field replaces the resource.",
 				Required:    true,
 				Validators: []validator.String{
-					stringvalidator.RegexMatches(hostSecretFieldPattern, "must contain only uppercase letters, digits, and underscores"),
+					stringvalidator.RegexMatches(
+						hostSecretFieldPattern,
+						"must contain only uppercase letters, digits, and underscores",
+					),
 				},
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
@@ -123,18 +134,31 @@ func (r *hostSecretResource) Schema(_ context.Context, _ resource.SchemaRequest,
 	}
 }
 
-func (r *hostSecretResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *hostSecretResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
 // ImportState calls only GET. It sets value_wo_version to the recorded version
 // and stores the storage file SHA-256 as the applied SHA-256.
-func (r *hostSecretResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *hostSecretResource) ImportState(
+	ctx context.Context,
+	req resource.ImportStateRequest,
+	resp *resource.ImportStateResponse,
+) {
 	node, workspace, field, isValid := splitHostSecretImportID(req.ID)
 	if !isValid {
-		resp.Diagnostics.AddError(hostFieldImportSummary, importIDError(req.ID, hostFieldImportFormat))
+		resp.Diagnostics.AddError(
+			hostFieldImportSummary,
+			importIDError(req.ID, hostFieldImportFormat),
+		)
+
 		return
 	}
+
 	state := hostSecretModel{
 		Node:           types.StringValue(node),
 		Workspace:      types.StringValue(workspace),
@@ -147,9 +171,11 @@ func (r *hostSecretResource) ImportState(ctx context.Context, req resource.Impor
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if entry.Version >= hostSecretMinimumVersion {
 		state.ValueWOVersion = types.Int64Value(entry.Version)
 	}
+
 	setHostSecretObservation(&state, entry)
 	resp.Diagnostics.Append(storeHostSecretApplied(ctx, resp.Private, entry)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
@@ -160,6 +186,7 @@ func splitHostSecretImportID(id string) (string, string, string, bool) {
 	if !isValid || !hostSecretFieldPattern.MatchString(field) {
 		return "", "", "", false
 	}
+
 	return node, workspace, field, true
 }
 
@@ -170,27 +197,36 @@ func splitHostImportID(id string) (string, string, string, bool) {
 	if !found {
 		return "", "", "", false
 	}
+
 	separator := strings.LastIndex(rest, hostSecretImportSep)
 	if separator < 0 {
 		return "", "", "", false
 	}
+
 	workspace := rest[:separator]
 	last := rest[separator+len(hostSecretImportSep):]
 	if node == "" || workspace == "" || last == "" {
 		return "", "", "", false
 	}
+
 	return node, workspace, last, true
 }
 
-func (r *hostSecretResource) ModifyPlan(ctx context.Context, req resource.ModifyPlanRequest, resp *resource.ModifyPlanResponse) {
+func (r *hostSecretResource) ModifyPlan(
+	ctx context.Context,
+	req resource.ModifyPlanRequest,
+	resp *resource.ModifyPlanResponse,
+) {
 	if req.Plan.Raw.IsNull() {
 		return
 	}
+
 	var plan hostSecretModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	var state hostSecretModel
 	write := true
 	if !req.State.Raw.IsNull() {
@@ -200,29 +236,45 @@ func (r *hostSecretResource) ModifyPlan(ctx context.Context, req resource.Modify
 		if resp.Diagnostics.HasError() {
 			return
 		}
+
 		write = hostSecretWritePlanned(plan, state, decodeMismatch(drift))
 	}
+
 	if !write {
-		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("configured"), state.Configured)...)
-		resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("version"), state.Version)...)
+		resp.Diagnostics.Append(
+			resp.Plan.SetAttribute(ctx, fwpath.Root("configured"), state.Configured)...,
+		)
+		resp.Diagnostics.Append(
+			resp.Plan.SetAttribute(ctx, fwpath.Root("version"), state.Version)...,
+		)
+
 		return
 	}
 
 	var value types.String
-	resp.Diagnostics.Append(req.Config.GetAttribute(ctx, fwpath.Root(hostSecretValueAttribute), &value)...)
+	resp.Diagnostics.Append(
+		req.Config.GetAttribute(ctx, fwpath.Root(hostSecretValueAttribute), &value)...,
+	)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if value.IsNull() {
 		resp.Diagnostics.AddAttributeError(
 			fwpath.Root(hostSecretValueAttribute),
 			"Missing value_wo",
 			"The plan must write the secret field to the node. Set value_wo in the configuration.",
 		)
+
 		return
 	}
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("configured"), types.BoolUnknown())...)
-	resp.Diagnostics.Append(resp.Plan.SetAttribute(ctx, fwpath.Root("version"), types.Int64Unknown())...)
+
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(ctx, fwpath.Root("configured"), types.BoolUnknown())...,
+	)
+	resp.Diagnostics.Append(
+		resp.Plan.SetAttribute(ctx, fwpath.Root("version"), types.Int64Unknown())...,
+	)
 }
 
 // hostSecretWritePlanned returns true when the resource needs replacement,
@@ -230,37 +282,53 @@ func (r *hostSecretResource) ModifyPlan(ctx context.Context, req resource.Modify
 // argument records whether the storage file SHA-256 differs from the applied
 // SHA-256 or GET reports restart_pending.
 func hostSecretWritePlanned(plan hostSecretModel, state hostSecretModel, drift bool) bool {
-	replaced := !plan.Node.Equal(state.Node) || !plan.Workspace.Equal(state.Workspace) || !plan.Field.Equal(state.Field)
-	return replaced || !plan.ValueWOVersion.Equal(state.ValueWOVersion) || !state.Configured.ValueBool() || drift
+	replaced := !plan.Node.Equal(state.Node) || !plan.Workspace.Equal(state.Workspace) ||
+		!plan.Field.Equal(state.Field)
+
+	return replaced || !plan.ValueWOVersion.Equal(state.ValueWOVersion) ||
+		!state.Configured.ValueBool() ||
+		drift
 }
 
-func (r *hostSecretResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *hostSecretResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan hostSecretModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	entry, diagnostics := r.write(ctx, plan, req.Config)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	setHostSecretObservation(&plan, entry)
 	resp.Diagnostics.Append(storeHostSecretApplied(ctx, resp.Private, entry)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *hostSecretResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *hostSecretResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan hostSecretModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	entry, diagnostics := r.write(ctx, plan, req.Config)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	setHostSecretObservation(&plan, entry)
 	resp.Diagnostics.Append(storeHostSecretApplied(ctx, resp.Private, entry)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
@@ -269,7 +337,11 @@ func (r *hostSecretResource) Update(ctx context.Context, req resource.UpdateRequ
 // Read calls only GET. It sets the private Boolean content_drift to true when
 // the storage file SHA-256 differs from the applied SHA-256 or GET reports
 // restart_pending. It does not store either SHA-256 in an attribute.
-func (r *hostSecretResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *hostSecretResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state hostSecretModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	applied, diagnostics := req.Private.GetKey(ctx, hostSecretAppliedEntry)
@@ -277,45 +349,66 @@ func (r *hostSecretResource) Read(ctx context.Context, req resource.ReadRequest,
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	entry, diagnostics := r.readEntry(ctx, state, hostSecretReadSummary)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	setHostSecretObservation(&state, entry)
-	drift, err := encodeHostSecretDrift(ctx, entry.RestartPending || entry.SHA256 != decodeAppliedHash(applied))
+	drift, err := encodeHostSecretDrift(
+		ctx,
+		entry.RestartPending || entry.SHA256 != decodeAppliedHash(applied),
+	)
 	if err != nil {
 		resp.Diagnostics.AddError(hostSecretReadSummary, err.Error())
 		return
 	}
+
 	resp.Diagnostics.Append(resp.Private.SetKey(ctx, hostSecretDriftEntry, drift)...)
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *hostSecretResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *hostSecretResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state hostSecretModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.destroyField(ctx, state)...)
 }
 
 // destroyField uses only GET and never changes the node. It returns an error
 // while the node stores the field. OpenTofu keeps the resource in state on
 // error and removes it on success.
-func (r *hostSecretResource) destroyField(ctx context.Context, state hostSecretModel) diag.Diagnostics {
+func (r *hostSecretResource) destroyField(
+	ctx context.Context,
+	state hostSecretModel,
+) diag.Diagnostics {
 	entry, diagnostics := r.readEntry(ctx, state, hostSecretDestroySummary)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
+
 	if entry.Version >= hostSecretMinimumVersion || entry.SHA256 != "" {
-		diagnostics.AddError(hostSecretDestroySummary, fmt.Sprintf(
-			"Node %q stores secret field %s of workspace %q. The API does not delete a secret field. "+
-				"Run tofu state rm to stop managing the field.",
-			state.Node.ValueString(), state.Field.ValueString(), state.Workspace.ValueString(),
-		))
+		diagnostics.AddError(
+			hostSecretDestroySummary,
+			fmt.Sprintf(
+				"Node %q stores secret field %s of workspace %q. The API does not delete a secret field. "+
+					"Run tofu state rm to stop managing the field.",
+				state.Node.ValueString(),
+				state.Field.ValueString(),
+				state.Workspace.ValueString(),
+			),
+		)
 	}
+
 	return diagnostics
 }
 
@@ -328,23 +421,40 @@ func (r *hostSecretResource) readEntry(
 	var diagnostics diag.Diagnostics
 	workspace := model.Workspace.ValueString()
 	field := model.Field.ValueString()
-	current, err := r.data.client.GetHostArtifact(ctx, model.Node.ValueString(), transport.HostArtifactTarget(workspace))
+	current, err := r.data.client.GetHostArtifact(
+		ctx,
+		model.Node.ValueString(),
+		transport.HostArtifactTarget(workspace),
+	)
 	if err != nil {
 		diagnostics.AddError(summary, err.Error())
 		return transport.HostSecretState{}, diagnostics
 	}
+
 	if current.Workspace != workspace {
-		diagnostics.AddError(summary, fmt.Sprintf(
-			"The node reports workspace %q for the target of workspace %q.", current.Workspace, workspace,
-		))
+		diagnostics.AddError(
+			summary,
+			fmt.Sprintf(
+				"The node reports workspace %q for the target of workspace %q.",
+				current.Workspace,
+				workspace,
+			),
+		)
+
 		return transport.HostSecretState{}, diagnostics
 	}
+
 	for _, entry := range current.Secrets {
 		if entry.Field == field {
 			return entry, diagnostics
 		}
 	}
-	diagnostics.AddError(summary, fmt.Sprintf("The policy for workspace %q does not list secret field %s.", workspace, field))
+
+	diagnostics.AddError(
+		summary,
+		fmt.Sprintf("The policy for workspace %q does not list secret field %s.", workspace, field),
+	)
+
 	return transport.HostSecretState{}, diagnostics
 }
 
@@ -361,12 +471,14 @@ func (r *hostSecretResource) write(
 	if diagnostics.HasError() {
 		return transport.HostSecretState{}, diagnostics
 	}
+
 	if value.IsNull() || value.IsUnknown() {
 		diagnostics.AddAttributeError(
 			fwpath.Root(hostSecretValueAttribute),
 			"Missing value_wo",
 			"The apply must write the secret field to the node. Set value_wo to a value that is known during apply.",
 		)
+
 		return transport.HostSecretState{}, diagnostics
 	}
 
@@ -380,6 +492,7 @@ func (r *hostSecretResource) write(
 		diagnostics.AddError(hostSecretWriteSummary, err.Error())
 		return transport.HostSecretState{}, diagnostics
 	}
+
 	if err := r.data.client.WaitTaskWithin(ctx, node, upid, hostSecretTaskTimeout); err != nil {
 		diagnostics.AddError(hostSecretWriteSummary, redactSecret(err.Error(), value.ValueString()))
 		return transport.HostSecretState{}, diagnostics
@@ -390,13 +503,24 @@ func (r *hostSecretResource) write(
 	if diagnostics.HasError() {
 		return transport.HostSecretState{}, diagnostics
 	}
+
 	if !entry.Configured || entry.Version != version || entry.RestartPending {
-		diagnostics.AddError(hostSecretWriteSummary, fmt.Sprintf(
-			"After the hostsecret task succeeds, node %q reports configured as %t, version as %d, and restart_pending as %t for secret field %s. "+
-				"The apply requires configured to be true, version to be %d, and restart_pending to be false.",
-			node, entry.Configured, entry.Version, entry.RestartPending, field, version,
-		))
+		diagnostics.AddError(
+			hostSecretWriteSummary,
+			fmt.Sprintf(
+				"After the hostsecret task succeeds, node %q reports configured as %t, version as %d, "+
+					"and restart_pending as %t for secret field %s. "+
+					"The apply requires configured to be true, version to be %d, and restart_pending to be false.",
+				node,
+				entry.Configured,
+				entry.Version,
+				entry.RestartPending,
+				field,
+				version,
+			),
+		)
 	}
+
 	return entry, diagnostics
 }
 
@@ -411,20 +535,27 @@ func setHostSecretObservation(model *hostSecretModel, entry transport.HostSecret
 
 // storeHostSecretApplied stores the storage file SHA-256 from GET as the applied
 // SHA-256 in private state. It sets content_drift to the GET restart_pending value.
-func storeHostSecretApplied(ctx context.Context, private privateSetter, entry transport.HostSecretState) diag.Diagnostics {
+func storeHostSecretApplied(
+	ctx context.Context,
+	private privateSetter,
+	entry transport.HostSecretState,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	applied, err := encodeAppliedHash(entry.SHA256)
 	if err != nil {
 		diagnostics.AddError(hostSecretWriteSummary, err.Error())
 		return diagnostics
 	}
+
 	drift, err := encodeHostSecretDrift(ctx, entry.RestartPending)
 	if err != nil {
 		diagnostics.AddError(hostSecretWriteSummary, err.Error())
 		return diagnostics
 	}
+
 	diagnostics.Append(private.SetKey(ctx, hostSecretAppliedEntry, applied)...)
 	diagnostics.Append(private.SetKey(ctx, hostSecretDriftEntry, drift)...)
+
 	return diagnostics
 }
 
@@ -434,5 +565,6 @@ func encodeHostSecretDrift(ctx context.Context, drift bool) ([]byte, error) {
 		slog.ErrorContext(ctx, "encode host secret drift failed", "err", err)
 		return nil, fmt.Errorf("encode host secret drift: %w", err)
 	}
+
 	return document, nil
 }

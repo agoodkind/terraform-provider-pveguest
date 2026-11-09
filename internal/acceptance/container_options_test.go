@@ -21,8 +21,14 @@ const (
 	hostNicName             = "pveguestacc"
 )
 
-func containerOptionsConfig(node string, nodeConfig transport.NodeConfig, vmid int64, value string) string {
-	return fmt.Sprintf(`
+func containerOptionsConfig(
+	node string,
+	nodeConfig transport.NodeConfig,
+	vmid int64,
+	value string,
+) string {
+	return fmt.Sprintf(
+		`
 terraform {
   required_providers {
     pveguest = {
@@ -48,24 +54,40 @@ resource "pveguest_container_options" "test" {
     %s = %q
   }
 }
-`, providerSource, node, nodeConfig.Endpoint, nodeConfig.APIToken, nodeConfig.Insecure, node, vmid, hostNicKey, value)
+`,
+		providerSource,
+		node,
+		nodeConfig.Endpoint,
+		nodeConfig.APIToken,
+		nodeConfig.Insecure,
+		node,
+		vmid,
+		hostNicKey,
+		value,
+	)
 }
 
 func TestAccContainerOptions(t *testing.T) {
 	if os.Getenv(acceptanceVariable) == "" {
 		t.Skipf("%s is not set", acceptanceVariable)
 	}
+
 	link := os.Getenv(hostNicLinkVariable)
 	if link == "" {
 		t.Skipf("%s is not set", hostNicLinkVariable)
 	}
+
 	node := requireVariable(t, nodeVariable)
 	vmid, err := strconv.ParseInt(requireVariable(t, vmidVariable), 10, 64)
 	if err != nil {
 		t.Fatalf("%s: %v", vmidVariable, err)
 	}
+
 	nodeConfig := nodeConfigFromEnvironment(t)
-	client, err := transport.NewClient(map[string]transport.NodeConfig{node: nodeConfig}, transport.DefaultMaxRequests)
+	client, err := transport.NewClient(
+		map[string]transport.NodeConfig{node: nodeConfig},
+		transport.DefaultMaxRequests,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,56 +96,87 @@ func TestAccContainerOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if _, found := before[hostNicKey]; found {
-		t.Fatalf("container %d already has %s; the test requires a container without it", vmid, hostNicKey)
+		t.Fatalf(
+			"container %d already has %s; the test requires a container without it",
+			vmid,
+			hostNicKey,
+		)
 	}
 
 	value := fmt.Sprintf("link=%s,name=%s", link, hostNicName)
 	config := containerOptionsConfig(node, nodeConfig, vmid, value)
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy: func(_ *terraform.State) error {
-			after, err := client.GetContainerOptions(context.Background(), node, vmid)
-			if err != nil {
-				return err
-			}
-			if _, found := after[hostNicKey]; found {
-				return fmt.Errorf("container %d still has %s after destroy", vmid, hostNicKey)
-			}
-			pending, err := client.GetContainerPending(context.Background(), node, vmid)
-			if err != nil {
-				return err
-			}
-			if _, found := pending[hostNicKey]; found {
-				return fmt.Errorf("container %d still lists %s as pending after destroy", vmid, hostNicKey)
-			}
-			return nil
-		},
-		Steps: []resource.TestStep{
-			{
-				Config: config,
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr(containerOptionsAddress, "options."+hostNicKey, value),
-					func(_ *terraform.State) error {
-						current, err := client.GetContainerOptions(context.Background(), node, vmid)
-						if err != nil {
-							return err
-						}
-						if current[hostNicKey] != value {
-							return fmt.Errorf("%s = %q on the node, want %q", hostNicKey, current[hostNicKey], value)
-						}
-						return nil
-					},
-				),
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy: func(_ *terraform.State) error {
+				after, err := client.GetContainerOptions(context.Background(), node, vmid)
+				if err != nil {
+					return err
+				}
+
+				if _, found := after[hostNicKey]; found {
+					return fmt.Errorf("container %d still has %s after destroy", vmid, hostNicKey)
+				}
+
+				pending, err := client.GetContainerPending(context.Background(), node, vmid)
+				if err != nil {
+					return err
+				}
+
+				if _, found := pending[hostNicKey]; found {
+					return fmt.Errorf(
+						"container %d still lists %s as pending after destroy",
+						vmid,
+						hostNicKey,
+					)
+				}
+
+				return nil
 			},
-			{
-				Config:                               config,
-				ResourceName:                         containerOptionsAddress,
-				ImportState:                          true,
-				ImportStateId:                        node + "/" + strconv.FormatInt(vmid, 10),
-				ImportStateVerify:                    true,
-				ImportStateVerifyIdentifierAttribute: "vmid",
+			Steps: []resource.TestStep{
+				{
+					Config: config,
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							containerOptionsAddress,
+							"options."+hostNicKey,
+							value,
+						),
+						func(_ *terraform.State) error {
+							current, err := client.GetContainerOptions(
+								context.Background(),
+								node,
+								vmid,
+							)
+							if err != nil {
+								return err
+							}
+
+							if current[hostNicKey] != value {
+								return fmt.Errorf(
+									"%s = %q on the node, want %q",
+									hostNicKey,
+									current[hostNicKey],
+									value,
+								)
+							}
+
+							return nil
+						},
+					),
+				},
+				{
+					Config:                               config,
+					ResourceName:                         containerOptionsAddress,
+					ImportState:                          true,
+					ImportStateId:                        node + "/" + strconv.FormatInt(vmid, 10),
+					ImportStateVerify:                    true,
+					ImportStateVerifyIdentifierAttribute: "vmid",
+				},
 			},
 		},
-	})
+	)
 }

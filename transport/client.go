@@ -115,6 +115,7 @@ func (request apiRequest) apiPath(guest Guest, nodeName string) string {
 	if request.path != "" {
 		return request.path
 	}
+
 	return guest.apiPath(nodeName, request.operation)
 }
 
@@ -129,14 +130,17 @@ func NewClient(nodes map[string]NodeConfig, maxRequests int) (*Client, error) {
 	if maxRequests < 1 {
 		return nil, fmt.Errorf("max_requests must be at least 1, got %d", maxRequests)
 	}
+
 	client := &Client{nodes: make(map[string]*nodeConnection, len(nodes))}
 	for name, config := range nodes {
 		connection, err := newNodeConnection(name, config, maxRequests)
 		if err != nil {
 			return nil, err
 		}
+
 		client.nodes[name] = connection
 	}
+
 	return client, nil
 }
 
@@ -146,22 +150,33 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 		slog.Error("parse node endpoint failed", "node", name, "err", err)
 		return nil, fmt.Errorf("node %q: parse endpoint: %w", name, err)
 	}
+
 	if endpoint.Scheme != "https" && endpoint.Scheme != "http" {
 		return nil, fmt.Errorf("node %q: endpoint must start with https:// or http://", name)
 	}
+
 	if endpoint.Host == "" {
 		return nil, fmt.Errorf("node %q: endpoint has no host", name)
 	}
+
 	if !tokenPattern.MatchString(config.APIToken) {
-		return nil, fmt.Errorf("node %q: api_token must have the form user@realm!tokenid=secret", name)
+		return nil, fmt.Errorf(
+			"node %q: api_token must have the form user@realm!tokenid=secret",
+			name,
+		)
 	}
 
 	maxExecRequests := config.MaxExecRequests
 	if maxExecRequests == 0 {
 		maxExecRequests = DefaultMaxExecRequests
 	}
+
 	if maxExecRequests < 1 {
-		return nil, fmt.Errorf("node %q: max_exec_requests must be at least 1, got %d", name, maxExecRequests)
+		return nil, fmt.Errorf(
+			"node %q: max_exec_requests must be at least 1, got %d",
+			name,
+			maxExecRequests,
+		)
 	}
 
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
@@ -178,6 +193,7 @@ func newNodeConnection(name string, config NodeConfig, maxRequests int) (*nodeCo
 	if nodeName == "" {
 		nodeName = name
 	}
+
 	return &nodeConnection{
 		nodeName:      nodeName,
 		endpoint:      strings.TrimRight(config.Endpoint, "/"),
@@ -202,40 +218,88 @@ func (connection *nodeConnection) call(
 	select {
 	case connection.slots <- struct{}{}:
 	case <-ctx.Done():
-		slog.ErrorContext(ctx, "wait for a request slot ended", "node", guest.Node, "err", ctx.Err())
-		return nil, fmt.Errorf("%s: wait for a request slot for %s %s: %w", guest, request.method, apiPath, ctx.Err())
+		slog.ErrorContext(
+			ctx,
+			"wait for a request slot ended",
+			"node",
+			guest.Node,
+			"err",
+			ctx.Err(),
+		)
+
+		return nil, fmt.Errorf(
+			"%s: wait for a request slot for %s %s: %w",
+			guest,
+			request.method,
+			apiPath,
+			ctx.Err(),
+		)
 	}
+
 	defer func() { <-connection.slots }()
 
 	response, err := connection.send(ctx, guest, request, apiPath)
 	if err != nil {
 		return nil, err
 	}
+
 	defer func() { _ = response.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, responseBodyLimit+1))
 	if err != nil {
-		slog.ErrorContext(ctx, "read api response failed", "guest", guest.String(), "path", apiPath, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"read api response failed",
+			"guest",
+			guest.String(),
+			"path",
+			apiPath,
+			"err",
+			err,
+		)
 		if isConnectionClosed(err) {
 			err = &closedConnectionError{cause: err}
 		}
+
 		return nil, fmt.Errorf("%s: %s %s: read response: %w", guest, request.method, apiPath, err)
 	}
+
 	if len(body) > responseBodyLimit {
-		return nil, fmt.Errorf("%s: %s %s: response exceeds the body limit", guest, request.method, apiPath)
+		return nil, fmt.Errorf(
+			"%s: %s %s: response exceeds the body limit",
+			guest,
+			request.method,
+			apiPath,
+		)
 	}
+
 	if response.StatusCode/statusClassDivisor != statusClassSuccess {
 		return nil, apiFailure(guest, request.method, apiPath, response, body)
 	}
 
 	var envelope apiEnvelope
 	if err := json.Unmarshal(body, &envelope); err != nil {
-		slog.ErrorContext(ctx, "api response is not a JSON document", "guest", guest.String(), "path", apiPath, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"api response is not a JSON document",
+			"guest",
+			guest.String(),
+			"path",
+			apiPath,
+			"err",
+			err,
+		)
+
 		return nil, fmt.Errorf(
 			"%s: %s %s returned HTTP %d with a response that is not a JSON document: %w",
-			guest, request.method, apiPath, response.StatusCode, err,
+			guest,
+			request.method,
+			apiPath,
+			response.StatusCode,
+			err,
 		)
 	}
+
 	return envelope.Data, nil
 }
 
@@ -267,53 +331,138 @@ func (connection *nodeConnection) send(
 	if request.method == http.MethodGet && !request.retryAtCaller {
 		maxAttempts = maxReadAttempts
 	}
+
 	client := connection.httpClient
 	delay := retryInitialDelay
+
 	for attempt := 1; ; attempt++ {
 		httpRequest, err := connection.newHTTPRequest(ctx, guest, request, apiPath)
 		if err != nil {
 			return nil, err
 		}
+
 		response, err := client.Do(httpRequest)
 		if err == nil {
 			return response, nil
 		}
+
 		if !isConnectionClosed(err) {
-			slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "err", err)
+			slog.ErrorContext(
+				ctx,
+				"api request failed",
+				"guest",
+				guest.String(),
+				"path",
+				apiPath,
+				"err",
+				err,
+			)
+
 			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, err)
 		}
+
 		closed := &closedConnectionError{cause: err}
 		if request.method == http.MethodPost && request.operation == execStartOperation {
-			slog.ErrorContext(ctx, "exec start request lost its connection before a response", "guest", guest.String(), "path", apiPath, "err", err)
-			return nil, fmt.Errorf("%s: %s %s: guest command may have started; the next plan reads the guest state again: %w", guest, request.method, apiPath, closed)
+			slog.ErrorContext(
+				ctx,
+				"exec start request lost its connection before a response",
+				"guest",
+				guest.String(),
+				"path",
+				apiPath,
+				"err",
+				err,
+			)
+
+			return nil, fmt.Errorf(
+				"%s: %s %s: guest command may have started; the next plan reads the guest state again: %w",
+				guest,
+				request.method,
+				apiPath,
+				closed,
+			)
 		}
+
 		if attempt >= maxAttempts {
-			slog.ErrorContext(ctx, "api request failed", "guest", guest.String(), "path", apiPath, "attempt", attempt, "err", err)
+			slog.ErrorContext(
+				ctx,
+				"api request failed",
+				"guest",
+				guest.String(),
+				"path",
+				apiPath,
+				"attempt",
+				attempt,
+				"err",
+				err,
+			)
+
 			return nil, fmt.Errorf("%s: %s %s: %w", guest, request.method, apiPath, closed)
 		}
 
 		slog.WarnContext(
-			ctx, "provider retries api read after a closed connection",
-			"method", request.method, "path", apiPath, "attempt", attempt, "err", err,
+			ctx,
+			"provider retries api read after a closed connection",
+			"method",
+			request.method,
+			"path",
+			apiPath,
+			"attempt",
+			attempt,
+			"err",
+			err,
 		)
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			slog.ErrorContext(ctx, "context ended during the retry delay", "guest", guest.String(), "path", apiPath, "err", ctx.Err())
-			return nil, fmt.Errorf("%s: %s %s: retry stopped because the context ended: %w", guest, request.method, apiPath, ctx.Err())
-		case <-timer.C:
+		if err := waitForReadRetry(ctx, guest, request, apiPath, delay); err != nil {
+			return nil, err
 		}
+
 		delay *= retryDelayFactor
 	}
+}
+
+func waitForReadRetry(
+	ctx context.Context,
+	guest Guest,
+	request apiRequest,
+	apiPath string,
+	delay time.Duration,
+) error {
+	timer := time.NewTimer(delay)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		slog.ErrorContext(
+			ctx,
+			"context ended during the retry delay",
+			"guest",
+			guest.String(),
+			"path",
+			apiPath,
+			"err",
+			ctx.Err(),
+		)
+
+		return fmt.Errorf(
+			"%s: %s %s: retry stopped because the context ended: %w",
+			guest,
+			request.method,
+			apiPath,
+			ctx.Err(),
+		)
+	case <-timer.C:
+	}
+
+	return nil
 }
 
 // isConnectionClosed returns true for a connection reset, an EOF, an
 // unexpected EOF, or a closed idle connection.
 func isConnectionClosed(err error) bool {
-	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
+
 	return strings.Contains(err.Error(), closedIdleConnectionText)
 }
 
@@ -327,27 +476,43 @@ func (connection *nodeConnection) newHTTPRequest(
 	if len(request.query) > 0 {
 		address += "?" + request.query.Encode()
 	}
+
 	var bodyReader io.Reader
 	if request.body != nil {
 		bodyReader = bytes.NewReader(request.body)
 	}
+
 	httpRequest, err := http.NewRequestWithContext(ctx, request.method, address, bodyReader)
 	if err != nil {
-		slog.ErrorContext(ctx, "build api request failed", "guest", guest.String(), "path", apiPath, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"build api request failed",
+			"guest",
+			guest.String(),
+			"path",
+			apiPath,
+			"err",
+			err,
+		)
+
 		return nil, fmt.Errorf("%s: %s %s: build request: %w", guest, request.method, apiPath, err)
 	}
+
 	httpRequest.Header.Set(authorizationHeader, connection.authorization)
 	httpRequest.Header.Set("Accept", jsonContentType)
 	if bodyReader != nil {
 		httpRequest.Header.Set("Content-Type", jsonContentType)
 	}
+
 	return httpRequest, nil
 }
 
 // encodeJSON leaves the characters <, >, and & unescaped, because the request
 // body limit of the API counts the encoded size.
 func encodeJSON[T execStartBody | execAckBody | kernelModulesBody | containerConfigBody | containerShutdownBody |
-	hostArtifactStageBody | HostArtifactInstall | hostSecretBody | hostUnitActionBody](value *T) ([]byte, error) {
+	hostArtifactStageBody | HostArtifactInstall | hostSecretBody | hostUnitActionBody](
+	value *T,
+) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	encoder.SetEscapeHTML(false)
@@ -355,6 +520,7 @@ func encodeJSON[T execStartBody | execAckBody | kernelModulesBody | containerCon
 		slog.Error("encode api request body failed", "err", err)
 		return nil, fmt.Errorf("encode request body: %w", err)
 	}
+
 	return buffer.Bytes(), nil
 }
 
@@ -367,20 +533,26 @@ func apiFailure(
 	response *http.Response,
 	body []byte,
 ) error {
-	reason := strings.TrimSpace(strings.TrimPrefix(response.Status, strconv.Itoa(response.StatusCode)))
+	reason := strings.TrimSpace(
+		strings.TrimPrefix(response.Status, strconv.Itoa(response.StatusCode)),
+	)
 	text := reason
 	bodyText := strings.TrimSpace(string(body))
 	if bodyText != "" {
 		if text != "" {
 			text += "; "
 		}
+
 		text += bodyText
 	}
+
 	detail := fmt.Sprintf("%s %s returned HTTP %d: %s", method, apiPath, response.StatusCode, text)
+
 	for _, pattern := range unreachablePatterns {
 		if pattern.MatchString(text) {
 			return &UnreachableError{guest: guest, detail: detail}
 		}
 	}
+
 	return fmt.Errorf("%s: %s", guest, detail)
 }

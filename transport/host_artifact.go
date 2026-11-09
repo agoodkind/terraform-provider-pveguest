@@ -70,16 +70,26 @@ type HostProgramStage struct {
 // contain ',', '=', or ':'.
 func FormatProgramStages(stages []HostProgramStage) (string, error) {
 	separators := hostArtifactProgramStageEntrySep + hostArtifactProgramStageNameSep + hostArtifactProgramStagePairSep
+
 	entries := make([]string, 0, len(stages))
 	for _, stage := range stages {
 		for _, value := range []string{stage.Name, stage.ArchiveStage, stage.BundleStage} {
 			if value == "" || strings.ContainsAny(value, separators) {
-				return "", fmt.Errorf("program %q stage value %q must be nonempty and must not contain ',', '=', or ':'", stage.Name, value)
+				return "", fmt.Errorf(
+					"program %q stage value %q must be nonempty and must not contain ',', '=', or ':'",
+					stage.Name,
+					value,
+				)
 			}
 		}
-		entries = append(entries, stage.Name+hostArtifactProgramStageNameSep+
-			stage.ArchiveStage+hostArtifactProgramStagePairSep+stage.BundleStage)
+
+		entries = append(
+			entries,
+			stage.Name+hostArtifactProgramStageNameSep+
+				stage.ArchiveStage+hostArtifactProgramStagePairSep+stage.BundleStage,
+		)
 	}
+
 	return strings.Join(entries, hostArtifactProgramStageEntrySep), nil
 }
 
@@ -240,33 +250,75 @@ func (client *Client) StageHostArtifactProgram(
 	buffer := make([]byte, hostArtifactChunkBytes)
 	stage := ""
 	var offset int64
+
 	for {
 		count, readErr := io.ReadFull(content, buffer)
-		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) && !errors.Is(readErr, io.EOF) {
-			slog.ErrorContext(ctx, "read host artifact content failed", "node", node, "target", target, "kind", kind, "err", readErr)
+		if readErr != nil && !errors.Is(readErr, io.ErrUnexpectedEOF) &&
+			!errors.Is(readErr, io.EOF) {
+			slog.ErrorContext(
+				ctx,
+				"read host artifact content failed",
+				"node",
+				node,
+				"target",
+				target,
+				"kind",
+				kind,
+				"err",
+				readErr,
+			)
 			return "", fmt.Errorf("node %q target %s: read the %s: %w", node, target, kind, readErr)
 		}
+
 		// The chunk at offset 0 creates the stage. Empty content sends one
 		// empty chunk at offset 0.
 		if count == 0 && offset > 0 {
 			break
 		}
-		length, nextStage, err := client.stageChunk(ctx, node, target, kind, program, offset, buffer[:count], stage)
+
+		length, nextStage, err := client.stageChunk(
+			ctx,
+			node,
+			target,
+			kind,
+			program,
+			offset,
+			buffer[:count],
+			stage,
+		)
 		if err != nil {
 			return "", err
 		}
+
 		offset += int64(count)
 		if length != offset {
-			return "", fmt.Errorf("node %q target %s: stage %s has %d bytes after a chunk, want %d", node, target, nextStage, length, offset)
+			return "", fmt.Errorf(
+				"node %q target %s: stage %s has %d bytes after a chunk, want %d",
+				node,
+				target,
+				nextStage,
+				length,
+				offset,
+			)
 		}
+
 		stage = nextStage
 		if count < hostArtifactChunkBytes || offset >= size {
 			break
 		}
 	}
+
 	if offset != size {
-		return "", fmt.Errorf("node %q target %s: the %s has %d bytes, want %d", node, target, kind, offset, size)
+		return "", fmt.Errorf(
+			"node %q target %s: the %s has %d bytes, want %d",
+			node,
+			target,
+			kind,
+			offset,
+			size,
+		)
 	}
+
 	return stage, nil
 }
 
@@ -292,20 +344,49 @@ func (client *Client) stageChunk(
 	if err != nil {
 		return 0, "", fmt.Errorf("node %q target %s: %w", node, target, err)
 	}
-	data, err := client.hostArtifactCall(ctx, node, http.MethodPost, target, hostArtifactStageSub, document)
+
+	data, err := client.hostArtifactCall(
+		ctx,
+		node,
+		http.MethodPost,
+		target,
+		hostArtifactStageSub,
+		document,
+	)
 	if err != nil {
 		return 0, "", err
 	}
+
 	var parsed hostArtifactStageData
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		slog.ErrorContext(ctx, "host artifact stage response is malformed", "node", node, "target", target, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"host artifact stage response is malformed",
+			"node",
+			node,
+			"target",
+			target,
+			"err",
+			err,
+		)
 		return 0, "", fmt.Errorf("node %q target %s: parse stage response: %w", node, target, err)
 	}
+
 	length, err := parsed.Length.Int64()
 	if err != nil {
-		slog.ErrorContext(ctx, "host artifact stage length is malformed", "node", node, "target", target, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"host artifact stage length is malformed",
+			"node",
+			node,
+			"target",
+			target,
+			"err",
+			err,
+		)
 		return 0, "", fmt.Errorf("node %q target %s: parse stage length: %w", node, target, err)
 	}
+
 	return length, parsed.Stage, nil
 }
 
@@ -321,38 +402,77 @@ func (client *Client) InstallHostArtifact(
 	if err != nil {
 		return "", fmt.Errorf("node %q target %s: %w", node, target, err)
 	}
+
 	data, err := client.hostArtifactCall(ctx, node, http.MethodPost, target, "", document)
 	if err != nil {
 		return "", err
 	}
+
 	var upid string
 	if err := json.Unmarshal(data, &upid); err != nil {
-		slog.ErrorContext(ctx, "host artifact install response is malformed", "node", node, "target", target, "err", err)
+		slog.ErrorContext(
+			ctx,
+			"host artifact install response is malformed",
+			"node",
+			node,
+			"target",
+			target,
+			"err",
+			err,
+		)
 		return "", fmt.Errorf("node %q target %s: parse task identifier: %w", node, target, err)
 	}
+
 	return upid, nil
 }
 
 // GetHostArtifact returns the installed record of the target and the live
 // state of its files and owned directories. The request does not change the
 // node.
-func (client *Client) GetHostArtifact(ctx context.Context, node string, target string) (HostArtifactState, error) {
+func (client *Client) GetHostArtifact(
+	ctx context.Context,
+	node string,
+	target string,
+) (HostArtifactState, error) {
 	data, err := client.hostArtifactCall(ctx, node, http.MethodGet, target, "", nil)
 	if err != nil {
 		return HostArtifactState{}, err
 	}
+
 	state, err := DecodeHostArtifactState(data)
 	if err != nil {
 		var decodeError *hostArtifactDecodeError
 		if errors.As(err, &decodeError) {
 			if decodeError.key == "" {
-				slog.ErrorContext(ctx, decodeError.message, "node", node, "target", target, "err", decodeError.cause)
+				slog.ErrorContext(
+					ctx,
+					decodeError.message,
+					"node",
+					node,
+					"target",
+					target,
+					"err",
+					decodeError.cause,
+				)
 			} else {
-				slog.ErrorContext(ctx, decodeError.message, "node", node, "target", target, decodeError.key, decodeError.value, "err", decodeError.cause)
+				slog.ErrorContext(
+					ctx,
+					decodeError.message,
+					"node",
+					node,
+					"target",
+					target,
+					decodeError.key,
+					decodeError.value,
+					"err",
+					decodeError.cause,
+				)
 			}
 		}
+
 		return HostArtifactState{}, fmt.Errorf("node %q target %s: %w", node, target, err)
 	}
+
 	return state, nil
 }
 
@@ -378,9 +498,12 @@ func DecodeHostArtifactState(data []byte) (HostArtifactState, error) {
 	var parsed hostArtifactStateData
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return HostArtifactState{}, &hostArtifactDecodeError{
-			prefix: "parse host artifact response", message: "host artifact response is malformed", cause: err,
+			prefix:  "parse host artifact response",
+			message: "host artifact response is malformed",
+			cause:   err,
 		}
 	}
+
 	state := HostArtifactState{
 		Workspace:      parsed.Workspace,
 		Node:           parsed.Node,
@@ -396,32 +519,47 @@ func DecodeHostArtifactState(data []byte) (HostArtifactState, error) {
 		file, err := entry.convert()
 		if err != nil {
 			return HostArtifactState{}, &hostArtifactDecodeError{
-				prefix: "file " + entry.Path, message: "host artifact file entry is malformed",
-				key: "path", value: entry.Path, cause: err,
+				prefix:  "file " + entry.Path,
+				message: "host artifact file entry is malformed",
+				key:     "path",
+				value:   entry.Path,
+				cause:   err,
 			}
 		}
+
 		state.Files = append(state.Files, file)
 	}
+
 	for _, entry := range parsed.Directories {
 		directory, err := entry.convert()
 		if err != nil {
 			return HostArtifactState{}, &hostArtifactDecodeError{
-				prefix: "directory " + entry.Path, message: "host artifact directory entry is malformed",
-				key: "path", value: entry.Path, cause: err,
+				prefix:  "directory " + entry.Path,
+				message: "host artifact directory entry is malformed",
+				key:     "path",
+				value:   entry.Path,
+				cause:   err,
 			}
 		}
+
 		state.Directories = append(state.Directories, directory)
 	}
+
 	for _, entry := range parsed.Secrets {
 		secret, err := entry.convert()
 		if err != nil {
 			return HostArtifactState{}, &hostArtifactDecodeError{
-				prefix: "secret field " + entry.Field, message: "host secret entry is malformed",
-				key: "field", value: entry.Field, cause: err,
+				prefix:  "secret field " + entry.Field,
+				message: "host secret entry is malformed",
+				key:     "field",
+				value:   entry.Field,
+				cause:   err,
 			}
 		}
+
 		state.Secrets = append(state.Secrets, secret)
 	}
+
 	return state, nil
 }
 
@@ -430,6 +568,7 @@ func (entry hostArtifactFileData) convert() (HostArtifactFile, error) {
 	if err != nil {
 		return HostArtifactFile{}, err
 	}
+
 	file := HostArtifactFile{
 		Path:    entry.Path,
 		Present: bool(entry.Present),
@@ -446,6 +585,7 @@ func (entry hostArtifactFileData) convert() (HostArtifactFile, error) {
 		file.HasMatches = true
 		file.Matches = bool(*entry.Matches)
 	}
+
 	return file, nil
 }
 
@@ -454,6 +594,7 @@ func (entry hostArtifactDirectoryData) convert() (HostArtifactDirectory, error) 
 	if err != nil {
 		return HostArtifactDirectory{}, err
 	}
+
 	directory := HostArtifactDirectory{
 		Path:    entry.Path,
 		Present: bool(entry.Present),
@@ -467,6 +608,7 @@ func (entry hostArtifactDirectoryData) convert() (HostArtifactDirectory, error) 
 		directory.HasMatches = true
 		directory.Matches = bool(*entry.Matches)
 	}
+
 	return directory, nil
 }
 
@@ -478,13 +620,16 @@ func optionalIntegers(values ...json.Number) ([]int64, error) {
 			numbers = append(numbers, 0)
 			continue
 		}
+
 		number, err := value.Int64()
 		if err != nil {
 			slog.Error("host artifact integer is malformed", "value", value.String(), "err", err)
 			return nil, fmt.Errorf("parse integer %q: %w", value, err)
 		}
+
 		numbers = append(numbers, number)
 	}
+
 	return numbers, nil
 }
 
@@ -500,10 +645,14 @@ func (client *Client) hostArtifactCall(
 	if !found {
 		return nil, fmt.Errorf("node %q is not in the provider nodes map", node)
 	}
+
 	request := apiRequest{
 		method: method,
-		path:   "/api2/json/nodes/" + url.PathEscape(connection.nodeName) + hostArtifactsPath + url.PathEscape(target) + suffix,
-		body:   body,
+		path: "/api2/json/nodes/" + url.PathEscape(
+			connection.nodeName,
+		) + hostArtifactsPath + url.PathEscape(target) + suffix,
+		body: body,
 	}
+
 	return connection.call(ctx, Guest{Node: node}, request)
 }

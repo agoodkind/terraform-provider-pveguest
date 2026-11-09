@@ -106,11 +106,19 @@ func newAptPackagesResource() resource.Resource {
 	return &aptPackagesResource{}
 }
 
-func (r *aptPackagesResource) Metadata(_ context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *aptPackagesResource) Metadata(
+	_ context.Context,
+	req resource.MetadataRequest,
+	resp *resource.MetadataResponse,
+) {
 	resp.TypeName = req.ProviderTypeName + "_apt_packages"
 }
 
-func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest, resp *resource.SchemaResponse) {
+func (r *aptPackagesResource) Schema(
+	_ context.Context,
+	_ resource.SchemaRequest,
+	resp *resource.SchemaResponse,
+) {
 	resp.Schema = schema.Schema{
 		Description: "A set of apt packages that are installed inside a guest. " +
 			"The resource installs each missing package.",
@@ -122,7 +130,10 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Validators: []validator.Set{
 					setvalidator.SizeAtLeast(1),
 					setvalidator.ValueStringsAre(
-						stringvalidator.RegexMatches(packageNamePattern, "must be a Debian package name"),
+						stringvalidator.RegexMatches(
+							packageNamePattern,
+							"must be a Debian package name",
+						),
 					),
 				},
 			},
@@ -131,9 +142,18 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 				ElementType: types.StringType,
 				Description: "The versions map associates package names with exact Debian versions. Every key must also appear in packages.",
 				Validators: []validator.Map{
-					mapvalidator.KeysAre(stringvalidator.RegexMatches(packageNamePattern, "must be a Debian package name")),
+					mapvalidator.KeysAre(
+						stringvalidator.RegexMatches(
+							packageNamePattern,
+							"must be a Debian package name",
+						),
+					),
 					mapvalidator.ValueStringsAre(
-						stringvalidator.RegexMatches(packageVersionPattern, "must start with a digit after an optional numeric epoch and colon, with only letters, digits, periods, plus signs, tildes, or hyphens after that digit"),
+						stringvalidator.RegexMatches(
+							packageVersionPattern,
+							"must start with a digit after an optional numeric epoch and colon, "+
+								"with only letters, digits, periods, plus signs, tildes, or hyphens after that digit",
+						),
 					),
 				},
 			},
@@ -143,7 +163,10 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 				Description: "The provider runs apt-mark hold on the guest for each package in locked. Every package name must also appear in packages.",
 				Validators: []validator.Set{
 					setvalidator.ValueStringsAre(
-						stringvalidator.RegexMatches(packageNamePattern, "must be a Debian package name"),
+						stringvalidator.RegexMatches(
+							packageNamePattern,
+							"must be a Debian package name",
+						),
 					),
 				},
 			},
@@ -159,7 +182,11 @@ func (r *aptPackagesResource) Schema(_ context.Context, _ resource.SchemaRequest
 	}
 }
 
-func (r *aptPackagesResource) Configure(_ context.Context, req resource.ConfigureRequest, resp *resource.ConfigureResponse) {
+func (r *aptPackagesResource) Configure(
+	_ context.Context,
+	req resource.ConfigureRequest,
+	resp *resource.ConfigureResponse,
+) {
 	r.data = providerDataFrom(req, resp)
 }
 
@@ -173,9 +200,11 @@ func (r *aptPackagesResource) ValidateConfig(
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if config.Packages.IsUnknown() {
 		return
 	}
+
 	declared, hasUnknown := knownStrings(config.Packages.Elements())
 	if hasUnknown {
 		return
@@ -185,16 +214,21 @@ func (r *aptPackagesResource) ValidateConfig(
 	for name := range config.Versions.Elements() {
 		versionKeys = append(versionKeys, name)
 	}
+
 	for _, name := range subtractNames(versionKeys, declared) {
 		resp.Diagnostics.AddAttributeError(
-			path.Root("versions").AtMapKey(name), "versions key missing from packages", "versions key missing from packages: "+name,
+			path.Root("versions").AtMapKey(name),
+			"versions key missing from packages",
+			"versions key missing from packages: "+name,
 		)
 	}
 
 	lockedNames, _ := knownStrings(config.Locked.Elements())
 	for _, name := range subtractNames(lockedNames, declared) {
 		resp.Diagnostics.AddAttributeError(
-			path.Root("locked"), "locked package missing from packages", "locked package missing from packages: "+name,
+			path.Root("locked"),
+			"locked package missing from packages",
+			"locked package missing from packages: "+name,
 		)
 	}
 }
@@ -209,11 +243,13 @@ func (r *aptPackagesResource) ModifyPlan(
 	if req.State.Raw.IsNull() {
 		return
 	}
+
 	var state aptPackagesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	prior, diagnostics := desiredFrom(ctx, state)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
@@ -222,45 +258,63 @@ func (r *aptPackagesResource) ModifyPlan(
 
 	if req.Plan.Raw.IsNull() {
 		if prior.RemoveOnDelete && len(prior.Packages) > 0 {
-			resp.Diagnostics.AddWarning("Destroy will remove these packages", strings.Join(prior.Packages, ", "))
+			resp.Diagnostics.AddWarning(
+				"Destroy will remove these packages",
+				strings.Join(prior.Packages, ", "),
+			)
 		}
+
 		return
 	}
 
 	var plan aptPackagesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
-	if resp.Diagnostics.HasError() || plan.Packages.IsUnknown() || !plan.RemoveOnDelete.ValueBool() {
+	if resp.Diagnostics.HasError() || plan.Packages.IsUnknown() ||
+		!plan.RemoveOnDelete.ValueBool() {
 		return
 	}
+
 	planned, hasUnknown := knownStrings(plan.Packages.Elements())
 	if hasUnknown {
 		return
 	}
+
 	dropped := subtractNames(prior.Packages, planned)
 	if len(dropped) > 0 {
 		resp.Diagnostics.AddWarning("Apply will remove these packages", strings.Join(dropped, ", "))
 	}
 }
 
-func (r *aptPackagesResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+func (r *aptPackagesResource) Create(
+	ctx context.Context,
+	req resource.CreateRequest,
+	resp *resource.CreateResponse,
+) {
 	var plan aptPackagesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, plan, nil)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
-func (r *aptPackagesResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *aptPackagesResource) Read(
+	ctx context.Context,
+	req resource.ReadRequest,
+	resp *resource.ReadResponse,
+) {
 	var state aptPackagesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	desired, diagnostics := desiredFrom(ctx, state)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
@@ -268,7 +322,13 @@ func (r *aptPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 	}
 
 	guest := guestOf(state.Node, state.VMID, state.Kind)
-	installed, err := readInstalledState(ctx, r.data.client, guest, desired.Packages, len(desired.Versions) > 0)
+	installed, err := readInstalledState(
+		ctx,
+		r.data.client,
+		guest,
+		desired.Packages,
+		len(desired.Versions) > 0,
+	)
 	if err != nil {
 		resp.Diagnostics.AddError("Read apt packages", err.Error())
 		return
@@ -281,11 +341,13 @@ func (r *aptPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 			present = append(present, name)
 		}
 	}
+
 	presentSet, diagnostics := types.SetValueFrom(ctx, types.StringType, present)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	state.Packages = presentSet
 
 	if !state.Versions.IsNull() {
@@ -296,6 +358,7 @@ func (r *aptPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 				reported[name] = installedVersion
 			}
 		}
+
 		versions, versionDiagnostics := types.MapValueFrom(ctx, types.StringType, reported)
 		resp.Diagnostics.Append(versionDiagnostics...)
 		state.Versions = versions
@@ -307,23 +370,31 @@ func (r *aptPackagesResource) Read(ctx context.Context, req resource.ReadRequest
 			resp.Diagnostics.AddError("apt-mark showhold failed", holdErr.Error())
 			return
 		}
+
 		stillLocked := make([]string, 0, len(desired.Locked))
 		for _, name := range desired.Locked {
 			if held[name] {
 				stillLocked = append(stillLocked, name)
 			}
 		}
+
 		locked, lockedDiagnostics := types.SetValueFrom(ctx, types.StringType, stillLocked)
 		resp.Diagnostics.Append(lockedDiagnostics...)
 		state.Locked = locked
 	}
+
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &state)...)
 }
 
-func (r *aptPackagesResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *aptPackagesResource) Update(
+	ctx context.Context,
+	req resource.UpdateRequest,
+	resp *resource.UpdateResponse,
+) {
 	var plan aptPackagesModel
 	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	var state aptPackagesModel
@@ -331,23 +402,31 @@ func (r *aptPackagesResource) Update(ctx context.Context, req resource.UpdateReq
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(r.apply(ctx, plan, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 // The framework removes the resource from state after Delete returns.
-func (r *aptPackagesResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *aptPackagesResource) Delete(
+	ctx context.Context,
+	req resource.DeleteRequest,
+	resp *resource.DeleteResponse,
+) {
 	var state aptPackagesModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
+
 	if !state.RemoveOnDelete.ValueBool() {
 		return
 	}
+
 	desired, diagnostics := desiredFrom(ctx, state)
 	resp.Diagnostics.Append(diagnostics...)
 	if resp.Diagnostics.HasError() {
@@ -366,11 +445,16 @@ func (r *aptPackagesResource) Delete(ctx context.Context, req resource.DeleteReq
 // or corrects version differences. The provider removes dropped packages when
 // remove_on_delete is true. The provider runs apt-mark hold for the packages in
 // locked.
-func (r *aptPackagesResource) apply(ctx context.Context, plan aptPackagesModel, prior *aptPackagesModel) diag.Diagnostics {
+func (r *aptPackagesResource) apply(
+	ctx context.Context,
+	plan aptPackagesModel,
+	prior *aptPackagesModel,
+) diag.Diagnostics {
 	desired, diagnostics := desiredFrom(ctx, plan)
 	if diagnostics.HasError() {
 		return diagnostics
 	}
+
 	var previous aptDesired
 	if prior != nil {
 		var priorDiagnostics diag.Diagnostics
@@ -413,10 +497,15 @@ func (r *aptPackagesResource) apply(ctx context.Context, plan aptPackagesModel, 
 			diagnostics.AddError("apt-mark hold failed", err.Error())
 		}
 	}
+
 	return diagnostics
 }
 
-func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest, desired aptDesired) diag.Diagnostics {
+func (r *aptPackagesResource) install(
+	ctx context.Context,
+	guest transport.Guest,
+	desired aptDesired,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	versioned := len(desired.Versions) > 0
 	installed, err := readInstalledState(ctx, r.data.client, guest, desired.Packages, versioned)
@@ -424,6 +513,7 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 		diagnostics.AddError("Read apt packages", err.Error())
 		return diagnostics
 	}
+
 	pending := pendingPackages(desired.Packages, desired.Versions, installed)
 	if len(pending) == 0 {
 		return diagnostics
@@ -439,7 +529,13 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 
 	changesVersions := versioned || len(desired.Locked) > 0
 	installCommand := aptInstallCommand(installSpecs(pending, desired.Versions), changesVersions)
-	if err := runInstallCommand(ctx, r.data.client, guest, installCommand, desired.StartServices); err != nil {
+	if err := runInstallCommand(
+		ctx,
+		r.data.client,
+		guest,
+		installCommand,
+		desired.StartServices,
+	); err != nil {
 		diagnostics.AddError("apt-get install failed", err.Error())
 		return diagnostics
 	}
@@ -449,8 +545,10 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 		diagnostics.AddError("Read apt packages", err.Error())
 		return diagnostics
 	}
+
 	var stillMissing []string
 	var wrongVersion []string
+
 	for _, name := range pendingPackages(desired.Packages, desired.Versions, installed) {
 		installedVersion, isInstalled := installed[name]
 		if isInstalled {
@@ -460,12 +558,14 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 			stillMissing = append(stillMissing, name)
 		}
 	}
+
 	if len(stillMissing) > 0 {
 		diagnostics.AddError(
 			"Packages are not installed after apt-get install",
 			fmt.Sprintf("%s: %s", guest, strings.Join(stillMissing, ", ")),
 		)
 	}
+
 	if len(wrongVersion) > 0 {
 		diagnostics.AddError(
 			"Installed package versions differ from requested versions.",
@@ -473,45 +573,65 @@ func (r *aptPackagesResource) install(ctx context.Context, guest transport.Guest
 				"After apt-get install, some packages on guest %s have installed versions that differ "+
 					"from their requested versions: %s. "+
 					"Each entry lists the package name, installed version, and requested version.",
-				guest, strings.Join(wrongVersion, "; "),
+				guest,
+				strings.Join(wrongVersion, "; "),
 			),
 		)
 	}
+
 	return diagnostics
 }
 
-func (r *aptPackagesResource) removePackages(ctx context.Context, guest transport.Guest, names []string) diag.Diagnostics {
+func (r *aptPackagesResource) removePackages(
+	ctx context.Context,
+	guest transport.Guest,
+	names []string,
+) diag.Diagnostics {
 	var diagnostics diag.Diagnostics
 	if len(names) == 0 {
 		return diagnostics
 	}
+
 	installed, err := readInstalledPackages(ctx, r.data.client, guest, names)
 	if err != nil {
 		diagnostics.AddError("Read apt packages", err.Error())
 		return diagnostics
 	}
+
 	present := make([]string, 0, len(names))
 	for _, name := range names {
 		if installed[name] {
 			present = append(present, name)
 		}
 	}
+
 	if len(present) == 0 {
 		return diagnostics
 	}
 
-	if err := runChecked(ctx, r.data.client, guest, aptMarkCommand(aptMarkUnhold, present)); err != nil {
+	if err := runChecked(
+		ctx,
+		r.data.client,
+		guest,
+		aptMarkCommand(aptMarkUnhold, present),
+	); err != nil {
 		diagnostics.AddError("apt-mark unhold failed", err.Error())
 		return diagnostics
 	}
+
 	if err := runChecked(ctx, r.data.client, guest, aptRemoveCommand(present)); err != nil {
 		diagnostics.AddError("apt-get remove failed", err.Error())
 	}
+
 	return diagnostics
 }
 
 func aptCommand(arguments ...string) transport.Command {
-	argv := append([]string{"env", "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive", "apt-get"}, arguments...)
+	argv := append(
+		[]string{"env", "LC_ALL=C", "DEBIAN_FRONTEND=noninteractive", "apt-get"},
+		arguments...,
+	)
+
 	return transport.Command{Argv: argv, TimeoutSeconds: aptTimeoutSeconds}
 }
 
@@ -522,7 +642,9 @@ func aptInstallCommand(specs []string, changesVersions bool) transport.Command {
 	if changesVersions {
 		arguments = append(arguments, "--allow-downgrades", "--allow-change-held-packages")
 	}
+
 	arguments = append(arguments, "-o", "DPkg::Lock::Timeout=300", "--")
+
 	return aptCommand(append(arguments, specs...)...)
 }
 
@@ -531,6 +653,7 @@ func startServicesEnabled(value types.Bool) bool {
 	if value.IsNull() {
 		return true
 	}
+
 	return value.ValueBool()
 }
 
@@ -549,8 +672,14 @@ func runInstallCommand(
 	}
 
 	argv := []string{
-		"bash", "-c", policyRCInstallScript, "bash",
-		policyRCPath, policyRCLockPath, strconv.Itoa(policyRCLockWaitSeconds), policyRCMarker,
+		"bash",
+		"-c",
+		policyRCInstallScript,
+		"bash",
+		policyRCPath,
+		policyRCLockPath,
+		strconv.Itoa(policyRCLockWaitSeconds),
+		policyRCMarker,
 	}
 	argv = append(argv, command.Argv...)
 	wrapped := transport.Command{
@@ -562,6 +691,7 @@ func runInstallCommand(
 	if err != nil {
 		return err
 	}
+
 	switch result.ExitCode {
 	case 0:
 		return nil
@@ -569,12 +699,15 @@ func runInstallCommand(
 		return fmt.Errorf(
 			"%s: %s exists without the pveguest marker; the provider will not change it; "+
 				"delete the file or set start_services to true",
-			guest, policyRCPath,
+			guest,
+			policyRCPath,
 		)
 	case policyRCLockTimeoutStatus:
 		return fmt.Errorf(
 			"%s: the wait for lock %s timed out after %d seconds; another package install may still be running",
-			guest, policyRCLockPath, policyRCLockWaitSeconds,
+			guest,
+			policyRCLockPath,
+			policyRCLockWaitSeconds,
 		)
 	default:
 		return commandFailure(guest, command, result)
@@ -599,10 +732,15 @@ func installSpecs(names []string, versions map[string]string) []string {
 			specs = append(specs, name)
 		}
 	}
+
 	return specs
 }
 
-func pendingPackages(declared []string, versions map[string]string, installed map[string]string) []string {
+func pendingPackages(
+	declared []string,
+	versions map[string]string,
+	installed map[string]string,
+) []string {
 	pending := make([]string, 0, len(declared))
 	for _, name := range declared {
 		installedVersion, isInstalled := installed[name]
@@ -611,6 +749,7 @@ func pendingPackages(declared []string, versions map[string]string, installed ma
 			pending = append(pending, name)
 		}
 	}
+
 	return pending
 }
 
@@ -625,28 +764,35 @@ func desiredFrom(ctx context.Context, model aptPackagesModel) (aptDesired, diag.
 	if !model.Versions.IsNull() {
 		diagnostics.Append(model.Versions.ElementsAs(ctx, &desired.Versions, false)...)
 	}
+
 	if !model.Locked.IsNull() {
 		diagnostics.Append(model.Locked.ElementsAs(ctx, &desired.Locked, false)...)
 	}
+
 	sort.Strings(desired.Packages)
 	sort.Strings(desired.Locked)
+
 	return desired, diagnostics
 }
 
 func knownStrings(elements []attr.Value) ([]string, bool) {
 	names := make([]string, 0, len(elements))
 	hasUnknown := false
+
 	for _, element := range elements {
 		text, isString := element.(types.String)
 		if !isString || text.IsNull() {
 			continue
 		}
+
 		if text.IsUnknown() {
 			hasUnknown = true
 			continue
 		}
+
 		names = append(names, text.ValueString())
 	}
+
 	return names, hasUnknown
 }
 
@@ -657,7 +803,9 @@ func subtractNames(names []string, removed []string) []string {
 			result = append(result, name)
 		}
 	}
+
 	sort.Strings(result)
+
 	return result
 }
 
@@ -673,39 +821,50 @@ func readInstalledState(
 	if withVersions {
 		return readInstalledVersions(ctx, client, guest, names)
 	}
+
 	installed, err := readInstalledPackages(ctx, client, guest, names)
 	if err != nil {
 		return nil, err
 	}
+
 	result := make(map[string]string, len(installed))
 	for name, isInstalled := range installed {
 		if isInstalled {
 			result[name] = ""
 		}
 	}
+
 	return result, nil
 }
 
-func readHeldPackages(ctx context.Context, client *transport.Client, guest transport.Guest) (map[string]bool, error) {
+func readHeldPackages(
+	ctx context.Context,
+	client *transport.Client,
+	guest transport.Guest,
+) (map[string]bool, error) {
 	command := guestCommand("apt-mark", "showhold")
 	result, err := runGuest(ctx, client, guest, command)
 	if err != nil {
 		return nil, err
 	}
+
 	if result.ExitCode != 0 {
 		return nil, commandFailure(guest, command, result)
 	}
+
 	return parseHeldPackages(string(result.Stdout)), nil
 }
 
 func parseHeldPackages(output string) map[string]bool {
 	held := make(map[string]bool)
+
 	for line := range strings.SplitSeq(output, "\n") {
 		name, _, _ := strings.Cut(strings.TrimSpace(line), architectureSeparator)
 		if name != "" {
 			held[name] = true
 		}
 	}
+
 	return held
 }
 
@@ -718,35 +877,45 @@ func readInstalledPackages(
 	if len(names) == 0 {
 		return map[string]bool{}, nil
 	}
-	arguments := append([]string{"dpkg-query", "--show", "--showformat", dpkgQueryFormat, "--"}, names...)
+
+	arguments := append(
+		[]string{"dpkg-query", "--show", "--showformat", dpkgQueryFormat, "--"},
+		names...,
+	)
 	command := guestCommand(arguments...)
 	result, err := runGuest(ctx, client, guest, command)
 	if err != nil {
 		return nil, err
 	}
+
 	// dpkg-query returns status 1 when a requested package is not installed.
 	// Its output still includes the installed packages.
 	noMatch := result.ExitCode == 1 && strings.Contains(string(result.Stderr), dpkgNoMatchMessage)
 	if result.ExitCode != 0 && !noMatch {
 		return nil, commandFailure(guest, command, result)
 	}
+
 	return parseDpkgQueryOutput(string(result.Stdout)), nil
 }
 
 func dpkgStatusInstalled(status string) bool {
-	return strings.HasPrefix(status, dpkgInstalledPrefix) || strings.HasPrefix(status, dpkgHeldInstalledPrefix)
+	return strings.HasPrefix(status, dpkgInstalledPrefix) ||
+		strings.HasPrefix(status, dpkgHeldInstalledPrefix)
 }
 
 func parseDpkgQueryOutput(output string) map[string]bool {
 	installed := make(map[string]bool)
+
 	for line := range strings.SplitSeq(output, "\n") {
 		name, status, hasStatus := strings.Cut(line, "\t")
 		if !hasStatus {
 			continue
 		}
+
 		if dpkgStatusInstalled(status) {
 			installed[name] = true
 		}
 	}
+
 	return installed
 }

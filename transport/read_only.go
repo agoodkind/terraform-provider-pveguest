@@ -25,29 +25,53 @@ func (failure *closedConnectionError) Unwrap() error {
 
 // RunReadOnly retries a read-only command after a closed API connection.
 // The caller must guarantee that repeating the command cannot change the guest.
-func (client *Client) RunReadOnly(ctx context.Context, guest Guest, command Command) (Result, error) {
+func (client *Client) RunReadOnly(
+	ctx context.Context,
+	guest Guest,
+	command Command,
+) (Result, error) {
 	delay := retryInitialDelay
+
 	for attempt := 1; ; attempt++ {
 		result, err := client.run(ctx, guest, command)
 		if err == nil {
 			return result, nil
 		}
+
 		var resultRead *resultReadError
 		if errors.As(err, &resultRead) {
 			return Result{}, err
 		}
+
 		var closed *closedConnectionError
 		if !errors.As(err, &closed) {
 			return Result{}, err
 		}
+
 		if attempt >= maximumReadCommandAttempts {
-			return Result{}, fmt.Errorf("read-only guest command failed after %d attempts: %w", attempt, err)
+			return Result{}, fmt.Errorf(
+				"read-only guest command failed after %d attempts: %w",
+				attempt,
+				err,
+			)
 		}
-		slog.WarnContext(ctx, "retry read-only guest command after closed API connection",
-			"node", guest.Node, "vmid", guest.VMID, "kind", guest.Kind, "attempt", attempt)
+
+		slog.WarnContext(
+			ctx,
+			"retry read-only guest command after closed API connection",
+			"node",
+			guest.Node,
+			"vmid",
+			guest.VMID,
+			"kind",
+			guest.Kind,
+			"attempt",
+			attempt,
+		)
 		if err := waitReadCommandRetry(ctx, delay); err != nil {
 			return Result{}, fmt.Errorf("%s: stop retrying read-only command: %w", guest, err)
 		}
+
 		delay *= retryDelayFactor
 	}
 }

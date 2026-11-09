@@ -20,7 +20,8 @@ const (
 )
 
 func (g *testGuest) downloadConfig(path string, hash string, extra string) string {
-	return g.providerBlock() + fmt.Sprintf(`
+	return g.providerBlock() + fmt.Sprintf(
+		`
 resource "pveguest_download" "test" {
   node   = local.node
   vmid   = local.vmid
@@ -30,7 +31,12 @@ resource "pveguest_download" "test" {
   path   = %q
   %s
 }
-`, downloadURL, hash, path, extra)
+`,
+		downloadURL,
+		hash,
+		path,
+		extra,
+	)
 }
 
 func (g *testGuest) expectFileHash(path string, want string) func() error {
@@ -39,6 +45,7 @@ func (g *testGuest) expectFileHash(path string, want string) func() error {
 		if len(fields) == 0 || fields[0] != want {
 			return fmt.Errorf("sha256sum of %s reports %q, want %s", path, fields, want)
 		}
+
 		return nil
 	}
 }
@@ -49,46 +56,66 @@ func TestAccDownload(t *testing.T) {
 	path := testDirectory + "/download/rfc1149.txt"
 	config := guest.downloadConfig(path, downloadSHA256, "")
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		CheckDestroy: checkGuest(func() error {
-			if guest.exists(path) {
-				return fmt.Errorf("%s still exists after destroy", path)
-			}
-			return nil
-		}),
-		Steps: []resource.TestStep{
-			{
-				Config: config,
-				Check: resource.ComposeAggregateTestCheckFunc(
-					resource.TestCheckResourceAttr("pveguest_download.test", "sha256", downloadSHA256),
-					resource.TestCheckResourceAttr("pveguest_download.test", "mode", "0644"),
-					checkGuest(guest.expectFileHash(path, downloadSHA256)),
-					checkGuest(func() error {
-						listing := strings.TrimSpace(guest.mustRun("ls", "-A", "--", testDirectory+"/download"))
-						if listing != "rfc1149.txt" {
-							return fmt.Errorf("directory contains %q, want only rfc1149.txt", listing)
-						}
-						return nil
-					}),
-				),
-			},
-			{
-				// A hand edit produces a planned rewrite.
-				PreConfig:        func() { guest.writeFile(path, "edited by hand\n") },
-				Config:           config,
-				ConfigPlanChecks: expectAction("pveguest_download.test", plancheck.ResourceActionUpdate),
-				Check:            checkGuest(guest.expectFileHash(path, downloadSHA256)),
-			},
-			{
-				// A missing file is a normal Read result: the plan creates it.
-				PreConfig:        func() { guest.mustRun("rm", "-f", "--", path) },
-				Config:           config,
-				ConfigPlanChecks: expectAction("pveguest_download.test", plancheck.ResourceActionCreate),
-				Check:            checkGuest(guest.expectFileHash(path, downloadSHA256)),
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			CheckDestroy: checkGuest(func() error {
+				if guest.exists(path) {
+					return fmt.Errorf("%s still exists after destroy", path)
+				}
+
+				return nil
+			}),
+			Steps: []resource.TestStep{
+				{
+					Config: config,
+					Check: resource.ComposeAggregateTestCheckFunc(
+						resource.TestCheckResourceAttr(
+							"pveguest_download.test",
+							"sha256",
+							downloadSHA256,
+						),
+						resource.TestCheckResourceAttr("pveguest_download.test", "mode", "0644"),
+						checkGuest(guest.expectFileHash(path, downloadSHA256)),
+						checkGuest(func() error {
+							listing := strings.TrimSpace(
+								guest.mustRun("ls", "-A", "--", testDirectory+"/download"),
+							)
+							if listing != "rfc1149.txt" {
+								return fmt.Errorf(
+									"directory contains %q, want only rfc1149.txt",
+									listing,
+								)
+							}
+
+							return nil
+						}),
+					),
+				},
+				{
+					// A hand edit produces a planned rewrite.
+					PreConfig: func() { guest.writeFile(path, "edited by hand\n") },
+					Config:    config,
+					ConfigPlanChecks: expectAction(
+						"pveguest_download.test",
+						plancheck.ResourceActionUpdate,
+					),
+					Check: checkGuest(guest.expectFileHash(path, downloadSHA256)),
+				},
+				{
+					// A missing file is a normal Read result: the plan creates it.
+					PreConfig: func() { guest.mustRun("rm", "-f", "--", path) },
+					Config:    config,
+					ConfigPlanChecks: expectAction(
+						"pveguest_download.test",
+						plancheck.ResourceActionCreate,
+					),
+					Check: checkGuest(guest.expectFileHash(path, downloadSHA256)),
+				},
 			},
 		},
-	})
+	)
 }
 
 func TestAccDownloadHashMismatch(t *testing.T) {
@@ -98,33 +125,37 @@ func TestAccDownloadHashMismatch(t *testing.T) {
 	original := "original content\n"
 	guest.writeFile(path, original)
 
-	resource.Test(t, resource.TestCase{
-		ProtoV6ProviderFactories: protoV6ProviderFactories,
-		Steps: []resource.TestStep{
-			{
-				// OpenTofu wraps the diagnostic text, and each gap in the
-				// pattern matches a line break.
-				Config: guest.downloadConfig(path, wrongSHA256, ""),
-				ExpectError: regexp.MustCompile(
-					`(?s)the\s+download\s+of\s+` + regexp.QuoteMeta(downloadURL) +
-						`\s+has\s+sha256\s+` + downloadSHA256 +
-						`,\s+but\s+the\s+configuration\s+expects\s+` + wrongSHA256,
-				),
-			},
-			{
-				PreConfig: func() {
-					if err := guest.expectFileContent(path, original)(); err != nil {
-						t.Fatal(err)
-					}
-					listing := strings.TrimSpace(guest.mustRun("ls", "-A", "--", testDirectory))
-					if listing != "mismatch.txt" {
-						t.Fatalf("directory contains %q after the failed apply", listing)
-					}
+	resource.Test(
+		t,
+		resource.TestCase{
+			ProtoV6ProviderFactories: protoV6ProviderFactories,
+			Steps: []resource.TestStep{
+				{
+					// OpenTofu wraps the diagnostic text, and each gap in the
+					// pattern matches a line break.
+					Config: guest.downloadConfig(path, wrongSHA256, ""),
+					ExpectError: regexp.MustCompile(
+						`(?s)the\s+download\s+of\s+` + regexp.QuoteMeta(downloadURL) +
+							`\s+has\s+sha256\s+` + downloadSHA256 +
+							`,\s+but\s+the\s+configuration\s+expects\s+` + wrongSHA256,
+					),
 				},
-				Config:             guest.downloadConfig(path, wrongSHA256, ""),
-				PlanOnly:           true,
-				ExpectNonEmptyPlan: true,
+				{
+					PreConfig: func() {
+						if err := guest.expectFileContent(path, original)(); err != nil {
+							t.Fatal(err)
+						}
+
+						listing := strings.TrimSpace(guest.mustRun("ls", "-A", "--", testDirectory))
+						if listing != "mismatch.txt" {
+							t.Fatalf("directory contains %q after the failed apply", listing)
+						}
+					},
+					Config:             guest.downloadConfig(path, wrongSHA256, ""),
+					PlanOnly:           true,
+					ExpectNonEmptyPlan: true,
+				},
 			},
 		},
-	})
+	)
 }

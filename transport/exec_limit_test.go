@@ -42,6 +42,7 @@ func (api *execCountingAPI) ServeHTTP(writer http.ResponseWriter, request *http.
 			writeAPIDocument(writer, execStatusDocument{Exited: 0})
 			return
 		}
+
 		api.active--
 		writeAPIDocument(writer, execStatusDocument{Exited: 1})
 	default:
@@ -69,6 +70,7 @@ func TestRunLimitsConcurrentExecCommandsPerNode(t *testing.T) {
 	guest := transport.Guest{Node: testNode, VMID: testVMID, Kind: transport.KindQEMU}
 	failures := make(chan error, execLimitTestCallers)
 	var group sync.WaitGroup
+
 	for caller := range execLimitTestCallers {
 		group.Add(1)
 		go func() {
@@ -81,6 +83,7 @@ func TestRunLimitsConcurrentExecCommandsPerNode(t *testing.T) {
 			failures <- runErr
 		}()
 	}
+
 	group.Wait()
 	close(failures)
 
@@ -89,10 +92,20 @@ func TestRunLimitsConcurrentExecCommandsPerNode(t *testing.T) {
 			t.Fatalf("a Run call returned an error: %v", runErr)
 		}
 	}
+
 	if api.maxActive > execLimitTestLimit {
-		t.Fatalf("the API saw %d commands at once, want at most %d", api.maxActive, execLimitTestLimit)
+		t.Fatalf(
+			"the API saw %d commands at once, want at most %d",
+			api.maxActive,
+			execLimitTestLimit,
+		)
 	}
+
 	if api.maxActive < execLimitTestLimit {
-		t.Fatalf("the API saw %d commands at once, want the limit of %d to be used", api.maxActive, execLimitTestLimit)
+		t.Fatalf(
+			"the API saw %d commands at once, want the limit of %d to be used",
+			api.maxActive,
+			execLimitTestLimit,
+		)
 	}
 }

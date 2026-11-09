@@ -81,6 +81,7 @@ type stateDocument struct {
 
 func newHostSecretTest(t *testing.T) *hostSecretTest {
 	t.Helper()
+
 	return &hostSecretTest{
 		hostArtifactTest: newHostArtifactTest(t),
 		target:           transport.HostArtifactTarget(fixtureWorkspace),
@@ -136,9 +137,25 @@ func TestAccHostSecret(t *testing.T) {
 	consumer = test.expectRestart(consumer)
 	test.expectUnrelated()
 
-	test.expectMetadataRepair(second, storagePath, consumer, "chmod", hostSecretDriftMode, "--", storagePath)
+	test.expectMetadataRepair(
+		second,
+		storagePath,
+		consumer,
+		"chmod",
+		hostSecretDriftMode,
+		"--",
+		storagePath,
+	)
 	test.expectUnrelated()
-	test.expectMetadataRepair(second, storagePath, consumer, "chown", hostSecretDriftOwner, "--", storagePath)
+	test.expectMetadataRepair(
+		second,
+		storagePath,
+		consumer,
+		"chown",
+		hostSecretDriftOwner,
+		"--",
+		storagePath,
+	)
 	test.expectUnrelated()
 
 	test.expectRestartFailureRetried(second, storagePath)
@@ -203,13 +220,23 @@ func (s *hostSecretTest) expectPendingRestartImported() {
 	s.useSecretWithoutValue(thirdVersion)
 	s.mustTofu("init", "-no-color")
 	release := s.acquireTargetLock(s.target)
-	s.mustTofu("import", "-no-color", hostSecretAddress, s.node+":"+fixtureWorkspace+":"+hostSecretField)
+	s.mustTofu(
+		"import",
+		"-no-color",
+		hostSecretAddress,
+		s.node+":"+fixtureWorkspace+":"+hostSecretField,
+	)
 	s.expectFixture(pending)
 	output, exitCode := s.tofu("plan", "-no-color")
 	if exitCode == 0 || !strings.Contains(collapseWhitespace(output), hostSecretMissingValueText) {
-		s.t.Fatalf("plan exited with status %d; it must fail with diagnostic %q:\n%s",
-			exitCode, hostSecretMissingValueText, output)
+		s.t.Fatalf(
+			"plan exited with status %d; it must fail with diagnostic %q:\n%s",
+			exitCode,
+			hostSecretMissingValueText,
+			output,
+		)
 	}
+
 	s.useSecret(marker, thirdVersion)
 	s.expectWritePlanned()
 	release()
@@ -227,13 +254,25 @@ func (s *hostSecretTest) expectPendingRestartImported() {
 // that the task reports a consumer restart failure after writing the file.
 func (s *hostSecretTest) setSecretWithFailedRestart(marker string, version int64) {
 	s.t.Helper()
-	upid, err := s.client.SetHostSecret(context.Background(), s.node, s.target, hostSecretField, marker, version)
+	upid, err := s.client.SetHostSecret(
+		context.Background(),
+		s.node,
+		s.target,
+		hostSecretField,
+		marker,
+		version,
+	)
 	if err != nil {
 		s.t.Fatalf("the transport could not set the fixture target's secret field: %v", err)
 	}
-	if status := s.waitTaskStopped(upid); !strings.Contains(status.ExitStatus, hostSecretRestartFailureText) {
+
+	if status := s.waitTaskStopped(upid); !strings.Contains(
+		status.ExitStatus,
+		hostSecretRestartFailureText,
+	) {
 		s.t.Fatalf("task %s did not report a consumer restart failure", upid)
 	}
+
 	s.expectFileContent(marker)
 	s.expectRestartPending()
 }
@@ -241,7 +280,9 @@ func (s *hostSecretTest) setSecretWithFailedRestart(marker string, version int64
 func (s *hostSecretTest) expectRestartPending() {
 	s.t.Helper()
 	if !s.secretEntry().RestartPending {
-		s.t.Fatal("the GET secrets[] entry reports restart_pending as false after the consumer restart failed")
+		s.t.Fatal(
+			"the GET secrets[] entry reports restart_pending as false after the consumer restart failed",
+		)
 	}
 }
 
@@ -254,25 +295,34 @@ func (s *hostSecretTest) restoreConsumer() {
 // without changing the target files or consumer InvocationID. The node creates
 // one task log. A plan with the recorded version is empty. The function returns
 // the target snapshot after the task.
-func (s *hostSecretTest) expectLowerVersionRejected(lower string, recorded string) map[string]string {
+func (s *hostSecretTest) expectLowerVersionRejected(
+	lower string,
+	recorded string,
+) map[string]string {
 	s.t.Helper()
 	before := s.fixtureSnapshot()
 	s.useSecret(lower, 1)
 	s.expectWritePlanned()
 	s.expectApplyFailure(hostSecretLowerVersionText)
 	after := s.fixtureSnapshot()
+
 	for _, key := range slices.Sorted(maps.Keys(before)) {
 		if key != hostTaskRecordsKey && after[key] != before[key] {
 			s.t.Fatalf("%s changed after the node rejected the lower version", key)
 		}
 	}
-	created := len(strings.Fields(after[hostTaskRecordsKey])) - len(strings.Fields(before[hostTaskRecordsKey]))
+
+	created := len(strings.Fields(after[hostTaskRecordsKey])) - len(
+		strings.Fields(before[hostTaskRecordsKey]),
+	)
 	if created != 1 {
 		s.t.Fatalf("the rejected write created %d task logs instead of 1", created)
 	}
+
 	s.expectUnrelated()
 	s.useSecret(recorded, secondVersion)
 	s.expectEmptyPlan()
+
 	return after
 }
 
@@ -280,9 +330,14 @@ func (s *hostSecretTest) expectDestroyRefused(stable map[string]string) {
 	s.t.Helper()
 	output, exitCode := s.tofu("destroy", "-no-color", "-auto-approve")
 	if exitCode == 0 || !strings.Contains(collapseWhitespace(output), hostSecretDestroyText) {
-		s.t.Fatalf("destroy exited with status %d, want a failure that contains %q:\n%s",
-			exitCode, hostSecretDestroyText, output)
+		s.t.Fatalf(
+			"destroy exited with status %d, want a failure that contains %q:\n%s",
+			exitCode,
+			hostSecretDestroyText,
+			output,
+		)
 	}
+
 	s.expectFixture(stable)
 	s.expectUnrelated()
 	s.expectStateOmitsMarkers()
@@ -299,7 +354,12 @@ func (s *hostSecretTest) expectImportWithoutWrite(marker string, stable map[stri
 	s.useSecret(marker, secondVersion)
 	s.mustTofu("init", "-no-color")
 	release := s.acquireTargetLock(s.target)
-	s.mustTofu("import", "-no-color", hostSecretAddress, s.node+":"+fixtureWorkspace+":"+hostSecretField)
+	s.mustTofu(
+		"import",
+		"-no-color",
+		hostSecretAddress,
+		s.node+":"+fixtureWorkspace+":"+hostSecretField,
+	)
 	s.expectFixture(stable)
 	s.expectEmptyPlan()
 	s.mustTofu("apply", "-no-color", "-auto-approve")
@@ -317,36 +377,48 @@ func (s *hostSecretTest) expectImportWithoutWrite(marker string, stable map[stri
 func (s *hostSecretTest) acquireTargetLock(target string) func() {
 	s.t.Helper()
 	lockPath := hostLockPrefix + target + hostLockSuffix
-	arguments := append(hostSSHOptions(s.sshControlPath), s.ssh, "--",
-		"flock", "--nonblock", "--exclusive", transport.Quote(lockPath), "cat")
-	command := exec.CommandContext(
-		context.Background(), "ssh", arguments...,
+	arguments := append(
+		hostSSHOptions(s.sshControlPath),
+		s.ssh,
+		"--",
+		"flock",
+		"--nonblock",
+		"--exclusive",
+		transport.Quote(lockPath),
+		"cat",
 	)
+	command := exec.CommandContext(context.Background(), "ssh", arguments...)
 	input, err := command.StdinPipe()
 	if err != nil {
 		s.t.Fatal(err)
 	}
+
 	output, err := command.StdoutPipe()
 	if err != nil {
 		s.t.Fatal(err)
 	}
+
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Start(); err != nil {
 		s.t.Fatalf("acquire %s: %v", lockPath, err)
 	}
+
 	if _, err := io.WriteString(input, hostLockAcquiredLine); err != nil {
 		s.t.Fatalf("acquire %s: %v", lockPath, err)
 	}
+
 	// cat returns the line only after flock acquires the lock.
 	if _, err := bufio.NewReader(output).ReadString('\n'); err != nil {
 		s.t.Fatalf("acquire %s: %v: %s", lockPath, err, stderr.String())
 	}
+
 	released := false
 	release := func() {
 		if released {
 			return
 		}
+
 		released = true
 		closeErr := input.Close()
 		if err := errors.Join(closeErr, command.Wait()); err != nil {
@@ -354,6 +426,7 @@ func (s *hostSecretTest) acquireTargetLock(target string) func() {
 		}
 	}
 	s.t.Cleanup(release)
+
 	return release
 }
 
@@ -365,8 +438,10 @@ func (s *hostSecretTest) newMarker() string {
 	if _, err := rand.Read(random); err != nil {
 		s.t.Fatal(err)
 	}
+
 	marker := hostSecretMarkerPrefix + hex.EncodeToString(random)
 	s.markers = append(s.markers, marker)
+
 	return marker
 }
 
@@ -377,13 +452,17 @@ func (s *hostSecretTest) forbiddenTexts() []string {
 		sum := sha256.Sum256([]byte(marker))
 		texts = append(texts, marker, hex.EncodeToString(sum[:]))
 	}
+
 	return texts
 }
 
 func (s *hostSecretTest) containsForbidden(content []byte) bool {
-	return slices.ContainsFunc(s.forbiddenTexts(), func(text string) bool {
-		return bytes.Contains(content, []byte(text))
-	})
+	return slices.ContainsFunc(
+		s.forbiddenTexts(),
+		func(text string) bool {
+			return bytes.Contains(content, []byte(text))
+		},
+	)
 }
 
 // tofu runs OpenTofu and fails without printing the output when the output
@@ -394,6 +473,7 @@ func (s *hostSecretTest) tofu(arguments ...string) (string, int) {
 	if s.containsForbidden([]byte(output)) {
 		s.t.Fatalf("the output of tofu %s contains a secret marker", arguments[0])
 	}
+
 	return output, exitCode
 }
 
@@ -401,8 +481,14 @@ func (s *hostSecretTest) mustTofu(arguments ...string) string {
 	s.t.Helper()
 	output, exitCode := s.tofu(arguments...)
 	if exitCode != 0 {
-		s.t.Fatalf("tofu %s exited with status %d:\n%s", strings.Join(arguments, " "), exitCode, output)
+		s.t.Fatalf(
+			"tofu %s exited with status %d:\n%s",
+			strings.Join(arguments, " "),
+			exitCode,
+			output,
+		)
 	}
+
 	return output
 }
 
@@ -422,7 +508,9 @@ func (s *hostSecretTest) useSecretWithoutValue(version int) {
 
 func (s *hostSecretTest) writeSecretConfig(valueArgument string, version int) {
 	s.t.Helper()
-	s.workspace.writeConfig(fmt.Sprintf(`
+	s.workspace.writeConfig(
+		fmt.Sprintf(
+			`
 terraform {
   required_providers {
     pveguest = {
@@ -455,8 +543,20 @@ resource "pveguest_host_secret" "test" {
   %s
   value_wo_version = %d
 }
-`, providerSource, candidateInstalledVersion, s.node, s.nodeConfig.Endpoint, s.nodeConfig.APIToken, s.nodeConfig.Insecure,
-		s.node, fixtureWorkspace, hostSecretField, valueArgument, version))
+`,
+			providerSource,
+			candidateInstalledVersion,
+			s.node,
+			s.nodeConfig.Endpoint,
+			s.nodeConfig.APIToken,
+			s.nodeConfig.Insecure,
+			s.node,
+			fixtureWorkspace,
+			hostSecretField,
+			valueArgument,
+			version,
+		),
+	)
 }
 
 // expectWritePlanned checks that the plan proposes a change and that the saved
@@ -465,11 +565,18 @@ func (s *hostSecretTest) expectWritePlanned() {
 	s.t.Helper()
 	output, exitCode := s.tofu("plan", "-no-color", "-detailed-exitcode", "-out", planFileName)
 	if exitCode != planChangesExitCode {
-		s.t.Fatalf("plan exited with status %d, want %d:\n%s", exitCode, planChangesExitCode, output)
+		s.t.Fatalf(
+			"plan exited with status %d, want %d:\n%s",
+			exitCode,
+			planChangesExitCode,
+			output,
+		)
 	}
+
 	for _, text := range s.forbiddenTexts() {
 		s.workspace.requirePlanArchiveOmits(planFileName, text)
 	}
+
 	s.mustTofu("show", "-json", planFileName)
 }
 
@@ -489,9 +596,15 @@ func (s *hostSecretTest) applySecret(marker string, version int64) {
 	s.mustTofu("apply", "-no-color", planFileName)
 	entry := s.secretEntry()
 	if !entry.Configured || entry.Version != version || entry.RestartPending {
-		s.t.Fatalf("the GET secrets[] entry reports configured as %t, version as %d, and restart_pending as %t instead of configured true, version %d, and restart_pending false",
-			entry.Configured, entry.Version, entry.RestartPending, version)
+		s.t.Fatalf(
+			"the GET secrets[] entry reports configured as %t, version as %d, and restart_pending as %t instead of configured true, version %d, and restart_pending false",
+			entry.Configured,
+			entry.Version,
+			entry.RestartPending,
+			version,
+		)
 	}
+
 	s.expectFileContent(marker)
 	s.expectEmptyPlan()
 	s.expectStateOmitsMarkers()
@@ -503,7 +616,9 @@ func (s *hostSecretTest) expectFileContent(marker string) {
 	s.t.Helper()
 	sum := sha256.Sum256([]byte(hostSecretField + "=" + marker + "\n"))
 	if s.secretEntry().SHA256 != hex.EncodeToString(sum[:]) {
-		s.t.Fatal("storage file SHA-256 differs from the expected SHA-256 for the complete FIELD=value file with a final newline")
+		s.t.Fatal(
+			"storage file SHA-256 differs from the expected SHA-256 for the complete FIELD=value file with a final newline",
+		)
 	}
 }
 
@@ -513,25 +628,38 @@ func (s *hostSecretTest) expectApplyFailure(text string) {
 	s.t.Helper()
 	output, exitCode := s.tofu("apply", "-no-color", planFileName)
 	if exitCode == 0 || !strings.Contains(collapseWhitespace(output), text) {
-		s.t.Fatalf("apply exited with status %d, want a failure that contains %q:\n%s", exitCode, text, output)
+		s.t.Fatalf(
+			"apply exited with status %d, want a failure that contains %q:\n%s",
+			exitCode,
+			text,
+			output,
+		)
 	}
 }
 
 func (s *hostSecretTest) secretEntry() transport.HostSecretState {
 	s.t.Helper()
+
 	for _, entry := range s.get(s.target).Secrets {
 		if entry.Field == hostSecretField {
 			return entry
 		}
 	}
+
 	s.t.Fatalf("the GET response of the fixture target does not list the field %s", hostSecretField)
+
 	return transport.HostSecretState{}
 }
 
 // expectMetadataRepair runs the drift command, checks that the plan proposes a
 // repair, and checks that the apply restores the storage file without a
 // consumer restart.
-func (s *hostSecretTest) expectMetadataRepair(marker string, storagePath string, consumer string, drift ...string) {
+func (s *hostSecretTest) expectMetadataRepair(
+	marker string,
+	storagePath string,
+	consumer string,
+	drift ...string,
+) {
 	s.t.Helper()
 	before := s.hostPathState(storagePath)
 	s.hostMustRun(drift...)
@@ -540,8 +668,14 @@ func (s *hostSecretTest) expectMetadataRepair(marker string, storagePath string,
 	if s.hostPathState(storagePath) != before {
 		s.t.Fatalf("storage file state for %s differs from its state before the drift", storagePath)
 	}
+
 	if after := s.invocationID(hostSecretConsumer); after != consumer {
-		s.t.Fatalf("%s has InvocationID %s after the metadata repair, want %s", hostSecretConsumer, after, consumer)
+		s.t.Fatalf(
+			"%s has InvocationID %s after the metadata repair, want %s",
+			hostSecretConsumer,
+			after,
+			consumer,
+		)
 	}
 }
 
@@ -550,10 +684,18 @@ func (s *hostSecretTest) expectMetadataRepair(marker string, storagePath string,
 func (s *hostSecretTest) setUnrelatedSecret() {
 	s.t.Helper()
 	ctx := context.Background()
-	upid, err := s.client.SetHostSecret(ctx, s.node, s.unrelatedTarget, hostSecretField, s.newMarker(), 1)
+	upid, err := s.client.SetHostSecret(
+		ctx,
+		s.node,
+		s.unrelatedTarget,
+		hostSecretField,
+		s.newMarker(),
+		1,
+	)
 	if err != nil {
 		s.t.Fatalf("set the secret field of the unrelated target: %v", err)
 	}
+
 	if err := s.client.WaitTaskWithin(ctx, s.node, upid, hostTaskTimeout); err != nil {
 		s.t.Fatalf("set the secret field of the unrelated target: %v", err)
 	}
@@ -563,15 +705,21 @@ func (s *hostSecretTest) setUnrelatedSecret() {
 // report an empty value.
 func (s *hostSecretTest) unitInvocation(unit string) string {
 	s.t.Helper()
-	return strings.TrimSpace(s.hostMustRun("systemctl", "show", "--property=InvocationID", "--value", "--", unit))
+	return strings.TrimSpace(
+		s.hostMustRun("systemctl", "show", "--property=InvocationID", "--value", "--", unit),
+	)
 }
 
 func (s *hostSecretTest) invocationID(unit string) string {
 	s.t.Helper()
 	identifier := s.unitInvocation(unit)
 	if identifier == "" {
-		s.t.Fatalf("%s does not have an InvocationID; start the consumer unit before the test", unit)
+		s.t.Fatalf(
+			"%s does not have an InvocationID; start the consumer unit before the test",
+			unit,
+		)
 	}
+
 	return identifier
 }
 
@@ -582,20 +730,31 @@ func (s *hostSecretTest) expectRestart(before string) string {
 	if after == before {
 		s.t.Fatalf("%s kept InvocationID %s after the write", hostSecretConsumer, before)
 	}
+
 	return after
 }
 
 // secretSnapshot adds the storage file, secret record, consumer InvocationID,
 // and target task log file names to the target snapshot. An idempotent PUT
 // does not change existing files and creates one task log.
-func (s *hostSecretTest) secretSnapshot(target string, directory string, unit string) map[string]string {
+func (s *hostSecretTest) secretSnapshot(
+	target string,
+	directory string,
+	unit string,
+) map[string]string {
 	s.t.Helper()
+
 	snapshot := s.snapshot(target, directory)
-	for _, path := range []string{directory + "/" + hostSecretFile, hostStateDirectory + target + "/" + hostSecretRecord} {
+	for _, path := range []string{
+		directory + "/" + hostSecretFile,
+		hostStateDirectory + target + "/" + hostSecretRecord,
+	} {
 		snapshot[path] = s.hostPathState(path)
 	}
+
 	snapshot["InvocationID "+unit] = s.unitInvocation(unit)
 	snapshot[hostTaskRecordsKey] = s.taskRecords(target)
+
 	return snapshot
 }
 
@@ -603,8 +762,11 @@ func (s *hostSecretTest) secretSnapshot(target string, directory string, unit st
 // name is its UPID. Each host artifact task uses the target as its ID.
 func (s *hostArtifactTest) taskRecords(target string) string {
 	s.t.Helper()
-	records := strings.Fields(s.hostMustRun("find", hostTaskLogDirectory, "-type", "f", "-name", "*:"+target+":*"))
+	records := strings.Fields(
+		s.hostMustRun("find", hostTaskLogDirectory, "-type", "f", "-name", "*:"+target+":*"),
+	)
 	slices.Sort(records)
+
 	return strings.Join(records, "\n")
 }
 
@@ -615,15 +777,25 @@ func (s *hostSecretTest) fixtureSnapshot() map[string]string {
 
 func (s *hostSecretTest) unrelatedSnapshot() map[string]string {
 	s.t.Helper()
-	return s.secretSnapshot(s.unrelatedTarget, unrelatedFixtureDirectory, unrelatedHostSecretConsumer)
+	return s.secretSnapshot(
+		s.unrelatedTarget,
+		unrelatedFixtureDirectory,
+		unrelatedHostSecretConsumer,
+	)
 }
 
 // expectSecretSnapshot compares target snapshots and reports only the changed
 // key. It does not print snapshot values, which can contain the storage file
 // SHA-256.
-func (s *hostSecretTest) expectSecretSnapshot(want map[string]string, target string, directory string, unit string) {
+func (s *hostSecretTest) expectSecretSnapshot(
+	want map[string]string,
+	target string,
+	directory string,
+	unit string,
+) {
 	s.t.Helper()
 	got := s.secretSnapshot(target, directory, unit)
+
 	for _, key := range slices.Sorted(maps.Keys(want)) {
 		if got[key] != want[key] {
 			s.t.Fatalf("%s changed", key)
@@ -638,7 +810,12 @@ func (s *hostSecretTest) expectFixture(want map[string]string) {
 
 func (s *hostSecretTest) expectUnrelated() {
 	s.t.Helper()
-	s.expectSecretSnapshot(s.unrelated, s.unrelatedTarget, unrelatedFixtureDirectory, unrelatedHostSecretConsumer)
+	s.expectSecretSnapshot(
+		s.unrelated,
+		s.unrelatedTarget,
+		unrelatedFixtureDirectory,
+		unrelatedHostSecretConsumer,
+	)
 }
 
 // expectStateOmitsMarkers scans the raw bytes of each state file and the
@@ -659,13 +836,16 @@ func (s *hostSecretTest) expectStateFileOmitsMarkers(path string) {
 	if err != nil {
 		s.t.Fatal(err)
 	}
+
 	if s.containsForbidden(content) {
 		s.t.Fatalf("%s contains a secret marker", path)
 	}
+
 	var document stateDocument
 	if err := json.Unmarshal(content, &document); err != nil {
 		s.t.Fatalf("parse %s: %v", path, err)
 	}
+
 	for _, resourceState := range document.Resources {
 		for _, instance := range resourceState.Instances {
 			s.expectPrivateOmitsMarkers(path, instance.Private)
@@ -681,16 +861,20 @@ func (s *hostSecretTest) expectPrivateOmitsMarkers(path string, private string) 
 	if err != nil {
 		s.t.Fatalf("decode the private data in %s: %v", path, err)
 	}
+
 	if s.containsForbidden(decoded) {
 		s.t.Fatalf("the private data in %s contains a secret marker", path)
 	}
+
 	var entries map[string][]byte
 	if err := json.Unmarshal(decoded, &entries); err != nil {
 		s.t.Fatalf("parse the private data in %s: %v", path, err)
 	}
+
 	if _, found := entries[hostSecretAppliedKey]; !found {
 		s.t.Fatalf("the private data in %s does not contain %s", path, hostSecretAppliedKey)
 	}
+
 	for key, value := range entries {
 		if s.containsForbidden(value) {
 			s.t.Fatalf("the value for private key %s in %s contains a secret marker", key, path)
@@ -702,13 +886,19 @@ func (s *hostSecretTest) expectPrivateOmitsMarkers(path string, private string) 
 // through root ssh and checks each log in memory.
 func (s *hostSecretTest) expectTaskLogsOmitMarkers() {
 	s.t.Helper()
+
 	for _, target := range []string{s.target, s.unrelatedTarget} {
 		pattern := "*:" + hostSecretTaskType + ":" + target + ":*"
 		listing := s.hostMustRun("find", hostTaskLogDirectory, "-type", "f", "-name", pattern)
 		logs := strings.Fields(listing)
 		if len(logs) == 0 {
-			s.t.Fatalf("%s does not contain a hostsecret task log of target %s", hostTaskLogDirectory, target)
+			s.t.Fatalf(
+				"%s does not contain a hostsecret task log of target %s",
+				hostTaskLogDirectory,
+				target,
+			)
 		}
+
 		for _, log := range logs {
 			if s.containsForbidden([]byte(s.hostMustRun("cat", "--", log))) {
 				s.t.Fatalf("task log %s contains a secret marker", log)

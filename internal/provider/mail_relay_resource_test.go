@@ -96,20 +96,25 @@ func (api *relayGuestAPI) ServeHTTP(writer http.ResponseWriter, request *http.Re
 			http.Error(writer, err.Error(), http.StatusBadRequest)
 			return
 		}
+
 		stdin, err := base64.StdEncoding.DecodeString(body.InputData)
 		if err != nil {
 			http.Error(writer, err.Error(), http.StatusBadRequest)
 			return
 		}
+
 		api.started++
 		api.results[strconv.Itoa(api.started)] = api.run(body.Command, stdin)
-		_ = json.NewEncoder(writer).Encode(localeExecStartEnvelope{Data: localeExecStart{PID: api.started}})
+		_ = json.NewEncoder(writer).Encode(localeExecStartEnvelope{
+			Data: localeExecStart{PID: api.started},
+		})
 	case request.Method == http.MethodGet && request.URL.Path == localesExecStatusPath:
 		status, found := api.results[request.URL.Query().Get("pid")]
 		if !found {
 			http.NotFound(writer, request)
 			return
 		}
+
 		_ = json.NewEncoder(writer).Encode(localeExecStatusEnvelope{Data: status})
 	default:
 		http.NotFound(writer, request)
@@ -120,6 +125,7 @@ func (api *relayGuestAPI) run(argv []string, stdin []byte) localeExecStatus {
 	if len(argv) <= relayProgramIndex {
 		return localeExecStatus{Exited: 1, ExitCode: unknownCommandExitCode}
 	}
+
 	arguments := argv[relayProgramIndex:]
 	target := arguments[len(arguments)-1]
 	switch arguments[0] {
@@ -127,6 +133,7 @@ func (api *relayGuestAPI) run(argv []string, stdin []byte) localeExecStatus {
 		if strings.Contains(arguments[relayScriptIndex], "cat >") {
 			api.files[target] = stdin
 		}
+
 		return localeExecStatus{Exited: 1}
 	case "chmod":
 		api.modes[target] = arguments[relayModeIndex]
@@ -140,6 +147,7 @@ func (api *relayGuestAPI) run(argv []string, stdin []byte) localeExecStatus {
 	case "rm":
 		delete(api.files, target)
 		delete(api.modes, target)
+
 		return localeExecStatus{Exited: 1}
 	default:
 		return localeExecStatus{Exited: 1, ExitCode: unknownCommandExitCode}
@@ -150,13 +158,20 @@ func (api *relayGuestAPI) rename(source string, destination string) localeExecSt
 	if api.failRenames > 0 {
 		api.failRenames--
 		message := "mv: cannot move '" + source + "': Read-only file system"
-		return localeExecStatus{Exited: 1, ExitCode: 1, ErrData: base64.StdEncoding.EncodeToString([]byte(message))}
+
+		return localeExecStatus{
+			Exited:   1,
+			ExitCode: 1,
+			ErrData:  base64.StdEncoding.EncodeToString([]byte(message)),
+		}
 	}
+
 	api.files[destination] = api.files[source]
 	api.modes[destination] = api.modes[source]
 	delete(api.files, source)
 	delete(api.modes, source)
 	api.renames++
+
 	return localeExecStatus{Exited: 1}
 }
 
@@ -164,9 +179,15 @@ func (api *relayGuestAPI) hash(filePath string) localeExecStatus {
 	content, found := api.files[filePath]
 	if !found {
 		message := "sha256sum: " + filePath + ": No such file or directory"
-		return localeExecStatus{Exited: 1, ExitCode: 1, ErrData: base64.StdEncoding.EncodeToString([]byte(message))}
+		return localeExecStatus{
+			Exited:   1,
+			ExitCode: 1,
+			ErrData:  base64.StdEncoding.EncodeToString([]byte(message)),
+		}
 	}
+
 	output := relayHash(content) + "  " + filePath + "\n"
+
 	return localeExecStatus{Exited: 1, OutData: base64.StdEncoding.EncodeToString([]byte(output))}
 }
 
@@ -174,6 +195,7 @@ func (api *relayGuestAPI) file(filePath string) ([]byte, bool) {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
 	content, found := api.files[filePath]
+
 	return slices.Clone(content), found
 }
 
@@ -192,12 +214,14 @@ func (api *relayGuestAPI) removeFile(filePath string) {
 func (api *relayGuestAPI) mode(filePath string) string {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
+
 	return api.modes[filePath]
 }
 
 func (api *relayGuestAPI) renameCount() int {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
+
 	return api.renames
 }
 
@@ -234,15 +258,18 @@ type relayMailAPI struct {
 func (api *relayMailAPI) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
-	if request.Method != http.MethodPost || request.Header.Get(relayHeaderName) != relayHeaderValue {
+	if request.Method != http.MethodPost ||
+		request.Header.Get(relayHeaderName) != relayHeaderValue {
 		writer.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+
 	var body relayUserBody
 	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 		writer.WriteHeader(http.StatusBadRequest)
 		return
 	}
+
 	existing, exists := api.users[body.Username]
 	switch request.URL.Path {
 	case relayAddPath:
@@ -250,8 +277,10 @@ func (api *relayMailAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if exists {
 			writer.WriteHeader(http.StatusBadRequest)
 			_, _ = writer.Write([]byte(relayExistingUserJSON))
+
 			return
 		}
+
 		api.users[body.Username] = body
 		api.issued = append(api.issued, body.Generated)
 		api.adds++
@@ -261,8 +290,10 @@ func (api *relayMailAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if !exists {
 			writer.WriteHeader(http.StatusBadRequest)
 			_, _ = writer.Write([]byte(relayUnknownUserJSON))
+
 			return
 		}
+
 		existing.Generated = body.Generated
 		existing.Status = body.Status
 		api.users[body.Username] = existing
@@ -274,6 +305,7 @@ func (api *relayMailAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 		if exists {
 			results = append(results, existing)
 		}
+
 		_ = json.NewEncoder(writer).Encode(relayViewEnvelope{Data: relayViewData{Results: results}})
 	default:
 		http.NotFound(writer, request)
@@ -283,6 +315,7 @@ func (api *relayMailAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 func (api *relayMailAPI) user(username string) relayUserBody {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
+
 	return api.users[username]
 }
 
@@ -303,12 +336,14 @@ func (api *relayMailAPI) setStatus(username string, status string) {
 func (api *relayMailAPI) secrets() []string {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
+
 	return append([]string{relayHeaderValue}, api.issued...)
 }
 
 func (api *relayMailAPI) counts() (int, int, int) {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
+
 	return api.adds, api.edits, api.writeRequests
 }
 
@@ -339,64 +374,97 @@ func newRelayHarness(t *testing.T) *relayHarness {
 	t.Cleanup(mailServer.Close)
 
 	server := configuredProviderServer(
-		t, guestServer.URL,
+		t,
+		guestServer.URL,
 		tftypes.NewValue(tftypes.String, relayHeaderValue),
 		tftypes.NewValue(tftypes.String, mailServer.URL),
 	)
-	response, err := server.GetProviderSchema(context.Background(), &tfprotov6.GetProviderSchemaRequest{})
+	response, err := server.GetProviderSchema(
+		context.Background(),
+		&tfprotov6.GetProviderSchemaRequest{},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	resourceSchema, found := response.ResourceSchemas[relayType]
 	requireRelay(t, "resource_schema", found)
-	return &relayHarness{server: server, resourceType: resourceSchema.ValueType(), guest: guest, mail: mail}
+
+	return &relayHarness{
+		server:       server,
+		resourceType: resourceSchema.ValueType(),
+		guest:        guest,
+		mail:         mail,
+	}
 }
 
-func (harness *relayHarness) value(t *testing.T, version int64, computed relayComputed) *tfprotov6.DynamicValue {
+func (harness *relayHarness) value(
+	t *testing.T,
+	version int64,
+	computed relayComputed,
+) *tfprotov6.DynamicValue {
 	t.Helper()
 	resourceType := harness.resourceType
-	value, err := tfprotov6.NewDynamicValue(resourceType, tftypes.NewValue(resourceType, map[string]tftypes.Value{
-		"node":             tftypes.NewValue(tftypes.String, optionsNode),
-		"vmid":             tftypes.NewValue(tftypes.Number, optionsVMID),
-		"kind":             tftypes.NewValue(tftypes.String, relayKind),
-		"username":         tftypes.NewValue(tftypes.String, relayUsername),
-		"description":      tftypes.NewValue(tftypes.String, relayDescription),
-		"host":             tftypes.NewValue(tftypes.String, relayHost),
-		"port":             tftypes.NewValue(tftypes.Number, relayPort),
-		"from":             tftypes.NewValue(tftypes.String, relayFrom),
-		"path":             computed.path,
-		"password_version": tftypes.NewValue(tftypes.Number, version),
-		"sha256":           computed.sha256,
-		"write_id":         computed.writeID,
-	}))
+	value, err := tfprotov6.NewDynamicValue(
+		resourceType,
+		tftypes.NewValue(
+			resourceType,
+			map[string]tftypes.Value{
+				"node":             tftypes.NewValue(tftypes.String, optionsNode),
+				"vmid":             tftypes.NewValue(tftypes.Number, optionsVMID),
+				"kind":             tftypes.NewValue(tftypes.String, relayKind),
+				"username":         tftypes.NewValue(tftypes.String, relayUsername),
+				"description":      tftypes.NewValue(tftypes.String, relayDescription),
+				"host":             tftypes.NewValue(tftypes.String, relayHost),
+				"port":             tftypes.NewValue(tftypes.Number, relayPort),
+				"from":             tftypes.NewValue(tftypes.String, relayFrom),
+				"path":             computed.path,
+				"password_version": tftypes.NewValue(tftypes.Number, version),
+				"sha256":           computed.sha256,
+				"write_id":         computed.writeID,
+			},
+		),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return &value
 }
 
 func (harness *relayHarness) config(t *testing.T, version int64) *tfprotov6.DynamicValue {
 	t.Helper()
-	return harness.value(t, version, relayComputed{
-		path:    tftypes.NewValue(tftypes.String, nil),
-		sha256:  tftypes.NewValue(tftypes.String, nil),
-		writeID: tftypes.NewValue(tftypes.String, nil),
-	})
+
+	return harness.value(
+		t,
+		version,
+		relayComputed{
+			path:    tftypes.NewValue(tftypes.String, nil),
+			sha256:  tftypes.NewValue(tftypes.String, nil),
+			writeID: tftypes.NewValue(tftypes.String, nil),
+		},
+	)
 }
 
-func (harness *relayHarness) attributes(t *testing.T, state *tfprotov6.DynamicValue) map[string]tftypes.Value {
+func (harness *relayHarness) attributes(
+	t *testing.T,
+	state *tfprotov6.DynamicValue,
+) map[string]tftypes.Value {
 	t.Helper()
 	value, err := state.Unmarshal(harness.resourceType)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if value.IsNull() {
 		return nil
 	}
+
 	attributes := make(map[string]tftypes.Value)
 	if err := value.As(&attributes); err != nil {
 		t.Fatal(err)
 	}
+
 	return attributes
 }
 
@@ -406,19 +474,26 @@ func (harness *relayHarness) text(t *testing.T, state *tfprotov6.DynamicValue, n
 	if err := harness.attributes(t, state)[name].As(&text); err != nil {
 		t.Fatal(err)
 	}
+
 	return text
 }
 
-func (harness *relayHarness) equal(t *testing.T, left *tfprotov6.DynamicValue, right *tfprotov6.DynamicValue) bool {
+func (harness *relayHarness) equal(
+	t *testing.T,
+	left *tfprotov6.DynamicValue,
+	right *tfprotov6.DynamicValue,
+) bool {
 	t.Helper()
 	leftValue, err := left.Unmarshal(harness.resourceType)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	rightValue, err := right.Unmarshal(harness.resourceType)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return leftValue.Equal(rightValue)
 }
 
@@ -442,19 +517,28 @@ func (harness *relayHarness) plan(
 			writeID: priorAttributes["write_id"],
 		}
 	}
-	plan, err := harness.server.PlanResourceChange(context.Background(), &tfprotov6.PlanResourceChangeRequest{
-		TypeName:         relayType,
-		PriorState:       prior,
-		ProposedNewState: harness.value(t, version, proposed),
-		Config:           harness.config(t, version),
-		PriorPrivate:     priorPrivate,
-	})
+
+	plan, err := harness.server.PlanResourceChange(
+		context.Background(),
+		&tfprotov6.PlanResourceChangeRequest{
+			TypeName:         relayType,
+			PriorState:       prior,
+			ProposedNewState: harness.value(t, version, proposed),
+			Config:           harness.config(t, version),
+			PriorPrivate:     priorPrivate,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	harness.requireSecretFree(
-		t, relayDynamicBytes(plan.PlannedState), plan.PlannedPrivate, relayDiagnosticBytes(plan.Diagnostics),
+		t,
+		relayDynamicBytes(plan.PlannedState),
+		plan.PlannedPrivate,
+		relayDiagnosticBytes(plan.Diagnostics),
 	)
+
 	return plan
 }
 
@@ -465,19 +549,27 @@ func (harness *relayHarness) apply(
 	version int64,
 ) *tfprotov6.ApplyResourceChangeResponse {
 	t.Helper()
-	applied, err := harness.server.ApplyResourceChange(context.Background(), &tfprotov6.ApplyResourceChangeRequest{
-		TypeName:       relayType,
-		PriorState:     prior,
-		PlannedState:   plan.PlannedState,
-		Config:         harness.config(t, version),
-		PlannedPrivate: plan.PlannedPrivate,
-	})
+	applied, err := harness.server.ApplyResourceChange(
+		context.Background(),
+		&tfprotov6.ApplyResourceChangeRequest{
+			TypeName:       relayType,
+			PriorState:     prior,
+			PlannedState:   plan.PlannedState,
+			Config:         harness.config(t, version),
+			PlannedPrivate: plan.PlannedPrivate,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	harness.requireSecretFree(
-		t, relayDynamicBytes(applied.NewState), applied.Private, relayDiagnosticBytes(applied.Diagnostics),
+		t,
+		relayDynamicBytes(applied.NewState),
+		applied.Private,
+		relayDiagnosticBytes(applied.Diagnostics),
 	)
+
 	return applied
 }
 
@@ -494,6 +586,7 @@ func (harness *relayHarness) planAndApply(
 	requireRelay(t, "plan_differs_from_prior", !harness.equal(t, plan.PlannedState, prior))
 	applied := harness.apply(t, prior, plan, version)
 	requireNoLocaleDiagnostics(t, applied.Diagnostics)
+
 	return applied
 }
 
@@ -508,22 +601,31 @@ func (harness *relayHarness) read(
 	private []byte,
 ) *tfprotov6.ReadResourceResponse {
 	t.Helper()
-	read, err := harness.server.ReadResource(context.Background(), &tfprotov6.ReadResourceRequest{
-		TypeName:     relayType,
-		CurrentState: state,
-		Private:      private,
-	})
+	read, err := harness.server.ReadResource(
+		context.Background(),
+		&tfprotov6.ReadResourceRequest{
+			TypeName:     relayType,
+			CurrentState: state,
+			Private:      private,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	harness.requireSecretFree(
-		t, relayDynamicBytes(read.NewState), read.Private, relayDiagnosticBytes(read.Diagnostics),
+		t,
+		relayDynamicBytes(read.NewState),
+		read.Private,
+		relayDiagnosticBytes(read.Diagnostics),
 	)
+
 	return read
 }
 
 func (harness *relayHarness) requireSecretFree(t *testing.T, documents ...[]byte) {
 	t.Helper()
+
 	for index, secret := range harness.mail.secrets() {
 		for _, document := range documents {
 			if bytes.Contains(document, []byte(secret)) {
@@ -569,7 +671,11 @@ func requireRelayCount(t *testing.T, name string, got int, want int) {
 func requireRelayWarning(t *testing.T, diagnostics []*tfprotov6.Diagnostic, summary string) {
 	t.Helper()
 	requireRelayCount(t, "diagnostics", len(diagnostics), 1)
-	requireRelay(t, "warning_severity", diagnostics[0].Severity == tfprotov6.DiagnosticSeverityWarning)
+	requireRelay(
+		t,
+		"warning_severity",
+		diagnostics[0].Severity == tfprotov6.DiagnosticSeverityWarning,
+	)
 	requireRelay(t, "warning_summary", diagnostics[0].Summary == summary)
 }
 
@@ -577,15 +683,18 @@ func relayDynamicBytes(value *tfprotov6.DynamicValue) []byte {
 	if value == nil {
 		return nil
 	}
+
 	return slices.Concat(value.MsgPack, value.JSON)
 }
 
 func relayDiagnosticBytes(diagnostics []*tfprotov6.Diagnostic) []byte {
 	var text bytes.Buffer
+
 	for _, diagnostic := range diagnostics {
 		text.WriteString(diagnostic.Summary)
 		text.WriteString(diagnostic.Detail)
 	}
+
 	return text.Bytes()
 }
 
@@ -605,7 +714,11 @@ func TestMailRelayFirstApplyCreatesUserAndWritesFile(t *testing.T) {
 	requireRelay(t, "user_description", user.Description == relayDescription)
 	requireRelayCount(t, "password_length", len(user.Generated), relayPasswordLength)
 	content, _ := harness.guest.file(relayPath)
-	requireRelay(t, "state_sha256", harness.text(t, applied.NewState, "sha256") == relayHash(content))
+	requireRelay(
+		t,
+		"state_sha256",
+		harness.text(t, applied.NewState, "sha256") == relayHash(content),
+	)
 	requireRelay(t, "state_path", harness.text(t, applied.NewState, "path") == relayPath)
 }
 
@@ -635,7 +748,11 @@ func TestMailRelayHigherVersionRotatesPasswordOnce(t *testing.T) {
 	harness.requireGuestFile(t)
 	requireRelay(t, "password_changed", harness.mail.user(relayUsername).Generated != firstPassword)
 	firstWriteID := harness.text(t, applied.NewState, "write_id")
-	requireRelay(t, "write_id_changed", harness.text(t, rotated.NewState, "write_id") != firstWriteID)
+	requireRelay(
+		t,
+		"write_id_changed",
+		harness.text(t, rotated.NewState, "write_id") != firstWriteID,
+	)
 
 	second := harness.read(t, rotated.NewState, rotated.Private)
 	plan := harness.plan(t, second.NewState, second.Private, 2)
@@ -649,7 +766,11 @@ func TestMailRelayLowerVersionFailsPlan(t *testing.T) {
 	plan := harness.plan(t, applied.NewState, applied.Private, 0)
 
 	requireRelayCount(t, "diagnostics", len(plan.Diagnostics), 1)
-	requireRelay(t, "error_severity", plan.Diagnostics[0].Severity == tfprotov6.DiagnosticSeverityError)
+	requireRelay(
+		t,
+		"error_severity",
+		plan.Diagnostics[0].Severity == tfprotov6.DiagnosticSeverityError,
+	)
 	harness.requireCounts(t, 1, 0, 1)
 }
 
@@ -662,7 +783,11 @@ func TestMailRelayDriftedFileRunsCreatePath(t *testing.T) {
 	read := harness.read(t, applied.NewState, applied.Private)
 	requireNoLocaleDiagnostics(t, read.Diagnostics)
 	driftedHash := relayHash([]byte(relayDriftedFile))
-	requireRelay(t, "read_stores_guest_hash", harness.text(t, read.NewState, "sha256") == driftedHash)
+	requireRelay(
+		t,
+		"read_stores_guest_hash",
+		harness.text(t, read.NewState, "sha256") == driftedHash,
+	)
 	harness.planAndApply(t, read.NewState, read.Private, 1)
 
 	harness.requireCounts(t, 1, 1, 2)
