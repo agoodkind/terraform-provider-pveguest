@@ -941,6 +941,7 @@ func removeRelayUser(t *testing.T, apiKey string, username string) {
 			"the removal verification response for SMTP2GO user %s does not contain data.results",
 			username,
 		)
+
 		return
 	}
 

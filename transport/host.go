@@ -53,6 +53,7 @@ func (client *Client) kernelModulesCall(
 	if !found {
 		return KernelModules{}, fmt.Errorf("node %q is not in the provider nodes map", node)
 	}
+
 	request := apiRequest{
 		method: method,
 		path:   "/api2/json/nodes/" + url.PathEscape(connection.nodeName) + "/kernel-modules",
@@ -62,20 +63,25 @@ func (client *Client) kernelModulesCall(
 		if err != nil {
 			return KernelModules{}, fmt.Errorf("node %q: %w", node, err)
 		}
+
 		request.body = document
 	}
+
 	data, err := connection.call(ctx, host, request)
 	if err != nil {
 		return KernelModules{}, err
 	}
+
 	var parsed kernelModulesData
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		slog.ErrorContext(ctx, "kernel-modules response is malformed", "node", node, "err", err)
 		return KernelModules{}, fmt.Errorf("node %q: parse kernel-modules response: %w", node, err)
 	}
+
 	loaded := make(map[string]bool, len(parsed.Loaded))
 	for name, state := range parsed.Loaded {
 		loaded[name] = bool(state)
 	}
+
 	return KernelModules{Modules: parsed.Modules, Loaded: loaded}, nil
 }

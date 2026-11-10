@@ -146,6 +146,7 @@ func (r *sysrepoModuleResource) ModifyPlan(
 			"Invalid module file name",
 			err.Error(),
 		)
+
 		return
 	}
 

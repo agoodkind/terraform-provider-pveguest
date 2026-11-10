@@ -162,6 +162,7 @@ func (r *sysrepoDataResource) Read(
 			"Read sysrepo data",
 			commandFailure(guest, exportCommand, result).Error(),
 		)
+
 		return
 	}
 
@@ -172,6 +173,7 @@ func (r *sysrepoDataResource) Read(
 			"Read sysrepo data",
 			"The export of sysrepocfg is not valid XML: "+err.Error(),
 		)
+
 		return
 	}
 
@@ -181,6 +183,7 @@ func (r *sysrepoDataResource) Read(
 			"Read sysrepo data",
 			"The content in state is not valid XML: "+err.Error(),
 		)
+
 		return
 	}
 
@@ -250,6 +253,7 @@ func (r *sysrepoDataResource) replace(ctx context.Context, plan sysrepoDataModel
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("the content is not valid XML: %w", err)
 	}
 

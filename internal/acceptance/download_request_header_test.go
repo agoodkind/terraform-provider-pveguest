@@ -482,6 +482,7 @@ resource "pveguest_download" "test" {
 
 func newHeaderWorkspace(t *testing.T) *tofuWorkspace {
 	t.Helper()
+
 	return &tofuWorkspace{
 		t:         t,
 		directory: t.TempDir(),

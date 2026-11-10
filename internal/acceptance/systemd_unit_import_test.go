@@ -222,6 +222,7 @@ func (g *testGuest) dependencyConfig(content string) string {
 		importFileAddress: g.importFileID(),
 		importUnitAddress: g.importUnitID(),
 	}
+
 	return g.installedImportConfig(imports) + g.dependencyResources(content)
 }
 

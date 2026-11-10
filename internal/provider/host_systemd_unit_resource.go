@@ -136,6 +136,7 @@ func (r *hostSystemdUnitResource) ImportState(
 			hostUnitImportSummary,
 			importIDError(req.ID, hostUnitImportFormat),
 		)
+
 		return
 	}
 
@@ -321,6 +322,7 @@ func (target hostUnitTarget) readUnit(ctx context.Context, name string) (unitSta
 			"err",
 			err,
 		)
+
 		return unitStatus{}, fmt.Errorf("on %s, read unit %s: %w", target.location(), name, err)
 	}
 
@@ -366,6 +368,7 @@ func (target hostUnitTarget) runUnitAction(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf(
 			"on %s, systemctl %s for unit %s: %w",
 			target.location(),

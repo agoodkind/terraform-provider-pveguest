@@ -476,6 +476,7 @@ func TestAccHostArtifact(t *testing.T) {
 
 func (h *hostArtifactTest) newWorkspace() *tofuWorkspace {
 	h.t.Helper()
+
 	return &tofuWorkspace{
 		t:         h.t,
 		directory: h.t.TempDir(),

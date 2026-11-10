@@ -35,6 +35,7 @@ func TestQuoteCommandPassesArgumentsThroughShell(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run quoted command: %v", err)
 	}
+
 	received := strings.Split(strings.TrimSuffix(string(output), "\x00"), "\x00")
 	if !reflect.DeepEqual(received, argv) {
 		t.Fatalf("arguments changed in the shell:\n got %q\nwant %q", received, argv)

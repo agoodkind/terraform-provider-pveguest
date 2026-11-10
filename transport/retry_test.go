@@ -30,6 +30,7 @@ func (api *resettingAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 	if shouldReset {
 		api.resetDone = true
 	}
+
 	api.mutex.Unlock()
 
 	if shouldReset {
@@ -38,10 +39,12 @@ func (api *resettingAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 			http.Error(writer, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
 		_ = connection.Close()
 		if api.afterReset != nil {
 			api.afterReset()
 		}
+
 		return
 	}
 
@@ -61,6 +64,7 @@ func (api *resettingAPI) ServeHTTP(writer http.ResponseWriter, request *http.Req
 func (api *resettingAPI) receivedRequests() []string {
 	api.mutex.Lock()
 	defer api.mutex.Unlock()
+
 	return append([]string(nil), api.requests...)
 }
 
@@ -80,18 +84,22 @@ func runAgainstResettingAPI(
 	if err != nil {
 		t.Fatalf("the NewClient call returned an error: %v", err)
 	}
+
 	guest := transport.Guest{Node: testNode, VMID: testVMID, Kind: transport.KindQEMU}
 	_, err = client.Run(ctx, guest, transport.Command{Argv: []string{"true"}})
+
 	return err
 }
 
 func countRequests(requests []string, wanted string) int {
 	count := 0
+
 	for _, received := range requests {
 		if received == wanted {
 			count++
 		}
 	}
+
 	return count
 }
 
@@ -100,6 +108,7 @@ func TestRunRetriesExecStatusAfterConnectionReset(t *testing.T) {
 	if err := runAgainstResettingAPI(t, context.Background(), api); err != nil {
 		t.Fatalf("the Run call returned an error after the retry: %v", err)
 	}
+
 	if got := countRequests(api.receivedRequests(), qemuStatusRequest); got != 2 {
 		t.Fatalf("the client sent %d exec-status requests, want 2", got)
 	}
@@ -111,9 +120,11 @@ func TestRunDoesNotRetryExecStartAfterConnectionReset(t *testing.T) {
 	if err == nil {
 		t.Fatal("the Run call succeeded after the exec request lost its connection")
 	}
+
 	if !strings.Contains(err.Error(), "guest command may have started") {
 		t.Fatalf("the error does not state that the command may have started: %v", err)
 	}
+
 	requests := api.receivedRequests()
 	if len(requests) != 1 {
 		t.Fatalf("the client sent %d requests, want 1: %v", len(requests), requests)
@@ -129,6 +140,7 @@ func TestRunStopsRetryingWhenContextIsCanceled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("the Run call did not return the context error: %v", err)
 	}
+
 	if got := countRequests(api.receivedRequests(), qemuStatusRequest); got != 1 {
 		t.Fatalf("the client sent %d exec-status requests, want 1", got)
 	}

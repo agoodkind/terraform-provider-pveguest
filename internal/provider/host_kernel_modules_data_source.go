@@ -92,6 +92,7 @@ func (d *hostKernelModulesDataSource) Read(
 			"Unconfigured provider",
 			"Configure the provider before reading host kernel modules.",
 		)
+
 		return
 	}
 

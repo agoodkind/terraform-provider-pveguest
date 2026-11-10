@@ -705,6 +705,7 @@ func (s *hostSecretTest) setUnrelatedSecret() {
 // report an empty value.
 func (s *hostSecretTest) unitInvocation(unit string) string {
 	s.t.Helper()
+
 	return strings.TrimSpace(
 		s.hostMustRun("systemctl", "show", "--property=InvocationID", "--value", "--", unit),
 	)
@@ -777,6 +778,7 @@ func (s *hostSecretTest) fixtureSnapshot() map[string]string {
 
 func (s *hostSecretTest) unrelatedSnapshot() map[string]string {
 	s.t.Helper()
+
 	return s.secretSnapshot(
 		s.unrelatedTarget,
 		unrelatedFixtureDirectory,
