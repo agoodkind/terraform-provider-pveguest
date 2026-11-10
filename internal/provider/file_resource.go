@@ -482,6 +482,7 @@ func fileContent(
 			"Missing file content",
 			"The apply needs a value for content or content_wo.",
 		)
+
 		return nil, diagnostics
 	}
 

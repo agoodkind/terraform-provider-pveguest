@@ -179,6 +179,7 @@ func (api *relayGuestAPI) hash(filePath string) localeExecStatus {
 	content, found := api.files[filePath]
 	if !found {
 		message := "sha256sum: " + filePath + ": No such file or directory"
+
 		return localeExecStatus{
 			Exited:   1,
 			ExitCode: 1,

@@ -112,6 +112,7 @@ func (api *localeGuestAPI) run(command string) localeExecStatus {
 	switch command {
 	case listLocalesCommand:
 		output := strings.Join(api.archive, "\n") + "\n"
+
 		return localeExecStatus{
 			Exited:  1,
 			OutData: base64.StdEncoding.EncodeToString([]byte(output)),

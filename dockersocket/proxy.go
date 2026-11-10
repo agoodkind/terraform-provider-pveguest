@@ -291,6 +291,7 @@ func relay(writer http.ResponseWriter, request *http.Request, output []byte) int
 	response, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(output)), request)
 	if err != nil {
 		slog.Error("guest response is not an HTTP response", "err", err)
+
 		return reject(
 			writer,
 			request,
@@ -303,6 +304,7 @@ func relay(writer http.ResponseWriter, request *http.Request, output []byte) int
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
 		slog.Error("read guest response body failed", "err", err)
+
 		return reject(
 			writer,
 			request,

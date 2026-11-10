@@ -113,6 +113,7 @@ func (r *containerPowerResource) ImportState(
 			"Import container power",
 			fmt.Sprintf("the import ID %q must have the form <node>/<vmid>", req.ID),
 		)
+
 		return
 	}
 
@@ -216,6 +217,7 @@ func (r *containerPowerResource) apply(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("read status: %w", err)
 	}
 
@@ -240,6 +242,7 @@ func (r *containerPowerResource) apply(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("change run state: %w", err)
 	}
 
@@ -255,6 +258,7 @@ func (r *containerPowerResource) apply(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("read status: %w", err)
 	}
 
@@ -280,6 +284,7 @@ func (r *containerPowerResource) restart(ctx context.Context, node string, vmid 
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("start after shutdown: %w", err)
 	}
 
@@ -315,6 +320,7 @@ func (r *containerPowerResource) halt(ctx context.Context, node string, vmid int
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("read status after shutdown: %w", err)
 	}
 

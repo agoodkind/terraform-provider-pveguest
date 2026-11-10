@@ -585,6 +585,7 @@ resource "pveguest_apt_packages" "test" {
 
 func (g *testGuest) packageVersion(name string) string {
 	g.t.Helper()
+
 	return strings.TrimSpace(
 		g.mustRun("dpkg-query", "--show", "--showformat", "${Version}", "--", name),
 	)
@@ -892,6 +893,7 @@ resource "pveguest_systemd_unit" "timer" {
 			"--",
 			testTimer,
 		)
+
 		return strings.TrimSpace(output)
 	}
 	expectEnabledAndActive := checkGuest(func() error {

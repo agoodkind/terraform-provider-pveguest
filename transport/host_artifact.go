@@ -267,6 +267,7 @@ func (client *Client) StageHostArtifactProgram(
 				"err",
 				readErr,
 			)
+
 			return "", fmt.Errorf("node %q target %s: read the %s: %w", node, target, kind, readErr)
 		}
 
@@ -369,6 +370,7 @@ func (client *Client) stageChunk(
 			"err",
 			err,
 		)
+
 		return 0, "", fmt.Errorf("node %q target %s: parse stage response: %w", node, target, err)
 	}
 
@@ -384,6 +386,7 @@ func (client *Client) stageChunk(
 			"err",
 			err,
 		)
+
 		return 0, "", fmt.Errorf("node %q target %s: parse stage length: %w", node, target, err)
 	}
 
@@ -420,6 +423,7 @@ func (client *Client) InstallHostArtifact(
 			"err",
 			err,
 		)
+
 		return "", fmt.Errorf("node %q target %s: parse task identifier: %w", node, target, err)
 	}
 

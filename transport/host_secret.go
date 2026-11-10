@@ -88,6 +88,7 @@ func (client *Client) SetHostSecret(
 			"err",
 			err,
 		)
+
 		return "", fmt.Errorf(
 			"node %q target %s field %s: parse task identifier: %w",
 			node,

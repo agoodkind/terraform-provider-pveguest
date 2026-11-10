@@ -149,6 +149,7 @@ func (r *guestOptionsResource) ImportState(
 			r.summary("Import %s options"),
 			fmt.Sprintf("the import ID %q must have the form <node>/<vmid>", req.ID),
 		)
+
 		return
 	}
 

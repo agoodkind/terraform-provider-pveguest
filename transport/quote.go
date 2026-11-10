@@ -17,5 +17,6 @@ func QuoteCommand(argv []string) string {
 	for _, argument := range argv {
 		quotedArguments = append(quotedArguments, Quote(argument))
 	}
+
 	return strings.Join(quotedArguments, " ")
 }

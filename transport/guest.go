@@ -371,6 +371,7 @@ func (connection *nodeConnection) waitForExit(
 				"err",
 				err,
 			)
+
 			return execStatus{}, fmt.Errorf("%s: parse exec-status response: %w", guest, err)
 		}
 

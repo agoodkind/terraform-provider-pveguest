@@ -279,6 +279,7 @@ func (client *smtp2goClient) failure(
 	password string,
 ) error {
 	visibleText := redactSecret(redactSecret(errorText, client.apiKey), password)
+
 	return fmt.Errorf(
 		"SMTP2GO API request to %s returned unexpected HTTP status %d: %s",
 		apiPath,

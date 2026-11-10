@@ -195,6 +195,7 @@ func (r *systemdUnitResource) ImportState(
 			systemdUnitImportSummary,
 			importIDError(req.ID, systemdUnitImportFormat),
 		)
+
 		return
 	}
 

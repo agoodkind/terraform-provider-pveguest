@@ -33,6 +33,7 @@ func (registry *commandRegistry) remove(command *exec.Cmd) {
 func (registry *commandRegistry) killAll() {
 	registry.mutex.Lock()
 	defer registry.mutex.Unlock()
+
 	for command := range registry.commands {
 		if command.Process != nil {
 			_ = command.Process.Kill()

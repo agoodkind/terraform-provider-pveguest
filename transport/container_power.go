@@ -80,6 +80,7 @@ func (client *Client) GetContainerStatus(
 			"err",
 			err,
 		)
+
 		return "", fmt.Errorf("node %q container %d: parse status response: %w", node, vmid, err)
 	}
 
@@ -113,6 +114,7 @@ func (client *Client) ShutdownContainer(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf("node %q container %d: %w", node, vmid, err)
 	}
 
@@ -150,6 +152,7 @@ func (client *Client) runContainerTask(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf(
 			"node %q container %d: %s: parse task identifier: %w",
 			node,
@@ -211,6 +214,7 @@ func (client *Client) WaitTaskWithin(
 				"err",
 				waitCtx.Err(),
 			)
+
 			return fmt.Errorf(
 				"node %q task %s: wait for the task to stop: %w",
 				node,
@@ -247,6 +251,7 @@ func (client *Client) GetTaskStatus(
 			"err",
 			err,
 		)
+
 		return TaskStatus{}, fmt.Errorf(
 			"node %q task %s: parse status response: %w",
 			node,
@@ -295,6 +300,7 @@ func (client *Client) taskFailure(
 	data, err := client.taskCall(ctx, node, upid, "log", query)
 	if err != nil {
 		slog.ErrorContext(ctx, "read task log failed", "node", node, "upid", upid, "err", err)
+
 		return fmt.Errorf(
 			"node %q task %s ended with exit status %q; reading the task log failed: %w",
 			node,
@@ -316,6 +322,7 @@ func (client *Client) taskFailure(
 			"err",
 			err,
 		)
+
 		return fmt.Errorf(
 			"node %q task %s ended with exit status %q; parse task log: %w",
 			node,

@@ -65,6 +65,7 @@ func (client *Client) GetHostUnit(
 			"err",
 			err,
 		)
+
 		return HostUnitState{}, fmt.Errorf(
 			"node %q target %s unit %s: parse unit response: %w",
 			node,
@@ -123,6 +124,7 @@ func (client *Client) StartHostUnitAction(
 			"err",
 			err,
 		)
+
 		return "", fmt.Errorf(
 			"node %q target %s unit %s: parse task identifier: %w",
 			node,

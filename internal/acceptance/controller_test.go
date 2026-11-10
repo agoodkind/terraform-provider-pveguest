@@ -174,6 +174,7 @@ func TestAccDownloadControllerTransfer(t *testing.T) {
 								len(payload),
 								time.Since(started),
 							)
+
 							return guest.expectFileHash(path, hash)()
 						}),
 					),
