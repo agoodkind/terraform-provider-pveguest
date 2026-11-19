@@ -84,6 +84,8 @@ type (
 		MTU       types.Int64  `tfsdk:"mtu"`
 		Autostart types.Bool   `tfsdk:"autostart"`
 		Comments  types.String `tfsdk:"comments"`
+		Method    types.String `tfsdk:"method"`
+		Method6   types.String `tfsdk:"method6"`
 		ChangeID  types.String `tfsdk:"change_id"`
 	}
 )
@@ -112,20 +114,20 @@ func (r *hostEthernetResource) Schema(
 	resp.Schema = schema.Schema{
 		Description: "Stages Ethernet settings for the node network applier. Import existing stanzas before changing them.",
 		Attributes: map[string]schema.Attribute{
+			"method": schema.StringAttribute{
+				Computed:    true,
+				Description: "Staged IPv4 configuration method derived by Proxmox.",
+			},
+			"method6": schema.StringAttribute{
+				Computed:    true,
+				Description: "Staged IPv6 configuration method derived by Proxmox.",
+			},
 			nodeAttributeName: guestAttributes()[nodeAttributeName],
 			networkNameField:  interfaceNameAttribute(),
-			"cidr": schema.StringAttribute{
-				Optional:    true,
-				Description: "Static IPv4 address with prefix length.",
-			},
-			"cidr6": schema.StringAttribute{
-				Optional:    true,
-				Description: "Static IPv6 address with prefix length.",
-			},
-			"gateway": schema.StringAttribute{
-				Optional: true,
-			},
-			"gateway6": schema.StringAttribute{Optional: true},
+			"cidr":            optionalEthernetText("Static IPv4 address with prefix length."),
+			"cidr6":           optionalEthernetText("Static IPv6 address with prefix length."),
+			"gateway":         optionalEthernetText("Static IPv4 default gateway."),
+			"gateway6":        optionalEthernetText("Static IPv6 default gateway."),
 			"mtu": schema.Int64Attribute{
 				Optional: true,
 				Validators: []validator.Int64{
@@ -135,13 +137,57 @@ func (r *hostEthernetResource) Schema(
 			"autostart": schema.BoolAttribute{
 				Required: true,
 			},
-			"comments": schema.StringAttribute{Optional: true},
+			"comments": optionalEthernetText("Interface comments."),
 			"change_id": schema.StringAttribute{
 				Computed:    true,
 				Description: "Changes after each staged write. Use this value in proxmox_network_applier triggers.",
 			},
 		},
 	}
+}
+
+func optionalEthernetText(description string) schema.StringAttribute {
+	return schema.StringAttribute{
+		Optional:    true,
+		Description: description,
+		Validators:  []validator.String{stringvalidator.LengthAtLeast(1)},
+	}
+}
+
+func desiredEthernetMethod(cidr types.String) types.String {
+	if cidr.IsUnknown() {
+		return types.StringUnknown()
+	}
+
+	if cidr.IsNull() {
+		return types.StringValue("manual")
+	}
+
+	return types.StringValue("static")
+}
+
+func (r *hostEthernetResource) ModifyPlan(
+	ctx context.Context,
+	req resource.ModifyPlanRequest,
+	resp *resource.ModifyPlanResponse,
+) {
+	if req.Plan.Raw.IsNull() {
+		return
+	}
+
+	var model hostEthernetModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &model)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	v4, v6 := desiredEthernetMethod(model.CIDR), desiredEthernetMethod(model.CIDR6)
+	if !model.Method.Equal(v4) || !model.Method6.Equal(v6) {
+		model.ChangeID = types.StringUnknown()
+	}
+
+	model.Method, model.Method6 = v4, v6
+	resp.Diagnostics.Append(resp.Plan.Set(ctx, &model)...)
 }
 
 func (r *hostEthernetResource) ImportState(
@@ -230,7 +276,10 @@ func optionalNetworkString(value string) types.String {
 	return types.StringValue(value)
 }
 
-func (m *hostEthernetModel) observe(settings transport.EthernetSettings) {
+func (m *hostEthernetModel) observe(port transport.EthernetPort) {
+	settings := port.Settings
+	m.Method = types.StringValue(port.Method)
+	m.Method6 = types.StringValue(port.Method6)
 	m.CIDR = optionalNetworkString(settings.CIDR)
 	m.CIDR6 = optionalNetworkString(settings.CIDR6)
 	m.Gateway = optionalNetworkString(settings.Gateway)
@@ -268,7 +317,7 @@ func (r *hostEthernetResource) Read(
 		return
 	}
 
-	state.observe(current.Settings)
+	state.observe(current)
 	if state.ChangeID.IsNull() {
 		state.ChangeID = types.StringValue("imported")
 	}
@@ -360,7 +409,7 @@ func (r *hostEthernetResource) stage(
 		return
 	}
 
-	model.observe(current.Settings)
+	model.observe(current)
 	model.ChangeID = types.StringValue(rand.Text())
 	diags.Append(state.Set(ctx, &model)...)
 }

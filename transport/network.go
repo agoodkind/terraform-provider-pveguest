@@ -27,6 +27,8 @@ type EthernetSettings struct {
 // EthernetPort reports whether a physical port has an iface stanza.
 type EthernetPort struct {
 	Settings     EthernetSettings
+	Method       string
+	Method6      string
 	Configured   bool
 	ipv4Options  bool
 	ipv6Options  bool
@@ -58,6 +60,8 @@ func (client *Client) ReadEthernet(ctx context.Context, node, name string) (Ethe
 	}
 
 	var port struct {
+		Method     string      `json:"method"`
+		Method6    string      `json:"method6"`
 		Options    []string    `json:"options"`
 		Options6   []string    `json:"options6"`
 		Broadcast  string      `json:"broadcast"`
@@ -125,6 +129,8 @@ func (client *Client) ReadEthernet(ctx context.Context, node, name string) (Ethe
 	}
 
 	return EthernetPort{
+		Method:       port.Method,
+		Method6:      port.Method6,
 		ipv4Options:  len(port.Options) > 0 || port.Broadcast != "",
 		ipv6Options:  len(port.Options6) > 0 || port.Broadcast6 != "",
 		otherOptions: len(fields) > 0,

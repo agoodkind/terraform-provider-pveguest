@@ -2,10 +2,14 @@ package acceptance_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
 	"testing"
+
+	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
+	"github.com/hashicorp/terraform-plugin-go/tftypes"
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
 
@@ -38,7 +42,9 @@ func TestAccEthernetAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !original.Configured || original.Settings.CIDR != "" || original.Settings.CIDR6 != "" ||
+	if !original.Configured || original.Method != "manual" || original.Method6 != "manual" ||
+		original.Settings.CIDR != "" ||
+		original.Settings.CIDR6 != "" ||
 		original.Settings.Gateway != "" ||
 		original.Settings.Gateway6 != "" {
 		t.Fatal("The dedicated port must have an existing addressless Ethernet stanza.")
@@ -90,7 +96,9 @@ resource "pveguest_host_network_interface" "port" {
 		t.Fatal(err)
 	}
 
-	if current.Settings.CIDR != "192.0.2.30/27" || current.Settings.CIDR6 != "fd00:1::30/64" {
+	if current.Method != "static" || current.Method6 != "static" ||
+		current.Settings.CIDR != "192.0.2.30/27" ||
+		current.Settings.CIDR6 != "fd00:1::30/64" {
 		t.Fatalf("unexpected staged settings: %+v", current.Settings)
 	}
 
@@ -115,7 +123,8 @@ resource "pveguest_host_network_interface" "port" {
 		t.Fatal(err)
 	}
 
-	if current.Settings.CIDR != "" || current.Settings.CIDR6 != "" ||
+	if current.Method != "manual" || current.Method6 != "manual" || current.Settings.CIDR != "" ||
+		current.Settings.CIDR6 != "" ||
 		current.Settings.Comments != "" {
 		t.Fatalf("optional fields remain after update: %+v", current.Settings)
 	}
@@ -150,4 +159,98 @@ data "pveguest_host_sriov" "absent" {
 			},
 		},
 	)
+}
+
+func TestEthernetMethodPlan(t *testing.T) {
+	server, err := protoV6ProviderFactories["pveguest"]()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const resource = "pveguest_host_network_interface"
+	schema, err := server.GetProviderSchema(t.Context(), &tfprotov6.GetProviderSchemaRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	typ := schema.ResourceSchemas[resource].ValueType()
+	values := map[string]any{
+		"node":      "test",
+		"name":      "eno2",
+		"autostart": true,
+		"cidr":      nil,
+		"cidr6":     nil,
+		"gateway":   nil,
+		"gateway6":  nil,
+		"comments":  nil,
+		"mtu":       nil,
+		"change_id": nil,
+		"method":    nil,
+		"method6":   nil,
+	}
+	config := func() *tfprotov6.DynamicValue {
+		b, err := json.Marshal(values)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		return &tfprotov6.DynamicValue{JSON: b}
+	}
+	validate := func(wantError bool) {
+		t.Helper()
+		resp, err := server.ValidateResourceConfig(
+			t.Context(),
+			&tfprotov6.ValidateResourceConfigRequest{TypeName: resource, Config: config()},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if (len(resp.Diagnostics) > 0) != wantError {
+			t.Fatalf("validation diagnostics: %v", resp.Diagnostics)
+		}
+	}
+	validate(false)
+
+	for _, field := range []string{"cidr", "cidr6", "gateway", "gateway6", "comments"} {
+		values[field] = ""
+		validate(true)
+		values[field] = nil
+	}
+
+	declaration := config()
+	values["change_id"] = "before"
+	values["method6"] = "manual"
+
+	for _, method := range []string{"dhcp", "manual"} {
+		values["method"] = method
+		observed := config()
+		plan, err := server.PlanResourceChange(
+			t.Context(),
+			&tfprotov6.PlanResourceChangeRequest{
+				TypeName:         resource,
+				PriorState:       observed,
+				ProposedNewState: observed,
+				Config:           declaration,
+			},
+		)
+		if err != nil || len(plan.Diagnostics) != 0 {
+			t.Fatalf("plan: %v %v", err, plan.Diagnostics)
+		}
+
+		data, err := plan.PlannedState.Unmarshal(typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		var fields map[string]tftypes.Value
+		if err := data.As(&fields); err != nil {
+			t.Fatal(err)
+		}
+
+		if !fields["method"].Equal(tftypes.NewValue(tftypes.String, "manual")) ||
+			fields["change_id"].IsKnown() != (method == "manual") {
+			t.Fatalf("plan for %s: %s", method, data.String())
+		}
+	}
 }
