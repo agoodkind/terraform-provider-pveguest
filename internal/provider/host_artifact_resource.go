@@ -83,7 +83,7 @@ func hostArtifactPinAttributes() map[string]schema.Attribute {
 	}
 
 	return map[string]schema.Attribute{
-		"node": schema.StringAttribute{
+		nodeAttributeName: schema.StringAttribute{
 			Description:   "The node value must be a key in the provider's nodes map. Changing node replaces the resource.",
 			Required:      true,
 			PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

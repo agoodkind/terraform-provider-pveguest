@@ -65,7 +65,7 @@ func (r *containerPowerResource) Schema(
 	resp.Schema = schema.Schema{
 		Description: containerPowerDescription,
 		Attributes: map[string]schema.Attribute{
-			"node": schema.StringAttribute{
+			nodeAttributeName: schema.StringAttribute{
 				Description:   containerPowerNodeDescription,
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

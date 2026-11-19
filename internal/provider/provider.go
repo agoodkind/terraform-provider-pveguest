@@ -357,6 +357,9 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 		newSysrepoModuleResource,
 		newSysrepoDataResource,
 		newHostKernelModulesResource,
+		func() resource.Resource { return &hostEthernetResource{} },
+		func() resource.Resource { return &hostSRIOVResource{} },
+		func() resource.Resource { return &guestNetworkResource{} },
 		newHostArtifactResource,
 		newHostSecretResource,
 		newHostSystemdUnitResource,
@@ -369,5 +372,6 @@ func (p *pveguestProvider) Resources(_ context.Context) []func() resource.Resour
 func (p *pveguestProvider) DataSources(_ context.Context) []func() datasource.DataSource {
 	return []func() datasource.DataSource{
 		newHostKernelModulesDataSource,
+		func() datasource.DataSource { return &sriovDataSource{} },
 	}
 }
