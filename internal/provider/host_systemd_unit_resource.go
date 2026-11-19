@@ -71,7 +71,7 @@ func (r *hostSystemdUnitResource) Schema(
 			"through the overlay host artifact API. The target policy of the workspace must list the unit file " +
 			"/etc/systemd/system/<name>, and the committed installed artifact must contain a matching unit file.",
 		Attributes: map[string]schema.Attribute{
-			"node": schema.StringAttribute{
+			nodeAttributeName: schema.StringAttribute{
 				Required:      true,
 				Description:   "The node value must be a key in the provider's nodes map. Changing node replaces the resource.",
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

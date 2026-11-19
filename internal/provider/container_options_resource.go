@@ -99,7 +99,7 @@ func (r *guestOptionsResource) Schema(
 	resp.Schema = schema.Schema{
 		Description: r.definition.description,
 		Attributes: map[string]schema.Attribute{
-			"node": schema.StringAttribute{
+			nodeAttributeName: schema.StringAttribute{
 				Description:   guestOptionsNodeDescription,
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

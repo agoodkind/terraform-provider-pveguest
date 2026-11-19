@@ -580,6 +580,87 @@ a representation compatible with the export.
 | `module` | string | yes | The installed YANG module must define the content. A change replaces the resource. |
 | `content` | string | yes | Supply the complete module configuration as XML. |
 
+## Host and guest network interfaces
+
+`pveguest_host_network_interface` stages configuration for one existing physical Ethernet port. Import a port with an existing interface stanza using `<node>:<name>`. OpenTofu creates a stanza for a detected port without one. The node API needs `Sys.Audit` for reads and `Sys.Modify` for writes on `/nodes/<node>`.
+
+```hcl
+resource "proxmox_network_applier" "finalizer" {
+  node_name = "suburban"
+  on_create = false
+}
+
+resource "pveguest_host_network_interface" "uplink" {
+  node      = "suburban"
+  name      = "eno2"
+  autostart = true
+  mtu       = 1500
+
+  depends_on = [proxmox_network_applier.finalizer]
+}
+
+resource "proxmox_network_applier" "node" {
+  node_name  = "suburban"
+  on_destroy = false
+  triggers   = { uplink = pveguest_host_network_interface.uplink.change_id }
+}
+```
+
+Use optional strings `cidr` and `cidr6` for one static address per family. Each gateway (`gateway` or `gateway6`) requires a CIDR of the same family. Omit both CIDRs for a manual, addressless port. Optional fields include numeric `mtu` and string `comments`. Removing an optional value clears it in the pending node configuration. The resource refuses an update if Proxmox would drop an address family with unrelated interface options. Destroy stages removal of the stanza, or clears its managed fields when unrelated options require the stanza. The node network applier activates pending changes.
+
+`pveguest_host_sriov` manages the enabled VF count and assignments on one physical function. Each map key is a decimal VF index, starting at zero. Assignments require distinct lowercase nonzero unicast MAC addresses and a PCI driver. A native driver accepts an optional host interface name. Import a saved declaration using `<node>:<ifname>`. Destroy calls the node's ownership-checked DELETE. The node needs the SR-IOV API with the `in_container` observation, `Sys.SRIOV.Audit` for reads and `Sys.SRIOV.Modify` for writes on `/nodes/<node>`.
+
+```hcl
+resource "pveguest_host_sriov" "pool" {
+  node   = "suburban"
+  ifname = "eno2"
+  numvfs = 4
+  vfs = {
+    "0" = { mac = "02:00:00:00:01:01", driver = "vfio-pci" }
+    "1" = { mac = "02:00:00:00:01:02", driver = "iavf", ifname = "guestvf1" }
+  }
+}
+```
+
+The resource and read-only data source expose `totalvfs` and `actual_vfs`. Each observed index contains `pci`, `mac`, `driver`, `ifname` and `in_container`. The driver and interface name can be null. The data source returns the current `numvfs`. Read the map by index in a separate guest root to require an enabled VF. The resource also reports `reconciled`. It compares the count, MAC, driver and explicit host names with the saved declaration. A VF that Proxmox identifies in a container may use its guest interface name.
+
+```hcl
+data "pveguest_host_sriov" "pool" {
+  node   = "suburban"
+  ifname = "eno2"
+}
+
+output "vm_pci" {
+  value = data.pveguest_host_sriov.pool.actual_vfs["0"].pci
+}
+```
+
+`pveguest_network_interface` uses the guest command API to adopt a stable name and assigned MAC. Choose `netplan` for netplan with the networkd renderer, `networkd` for a direct networkd configuration, or `ifupdown` for Debian networking.service. The guest must provide Perl with JSON::PP, iproute2 and the selected manager. Direct networkd and netplan require enabled systemd-networkd.service. Netplan also requires netplan.io. Ifupdown requires enabled networking.service, ifupdown and procps. Install isc-dhcp-client for DHCPv4 and resolvconf for explicit ifupdown DNS. Declare these packages before the interface resource.
+
+```hcl
+resource "pveguest_network_interface" "guest" {
+  node        = "suburban"
+  vmid        = 224
+  kind        = "qemu"
+  name        = "eth0"
+  mac         = "02:00:00:00:01:01"
+  backend     = "netplan"
+  phase       = "staged"
+  dhcp4       = true
+  slaac       = true
+  addresses   = ["192.0.2.24/24", "2001:db8:1::24/64"]
+  mtu         = 1500
+  dns_servers = ["192.0.2.53"]
+  dns_search  = ["example.net"]
+}
+```
+
+`addresses` accepts an optional set of additional static CIDRs. `dns_servers` and `dns_search` accept optional ordered lists. DHCPv4 and IPv6 router advertisements can operate alongside these static addresses. The guest retains its forwarding setting.
+
+Apply `phase = "staged"` before replacing the guest device. The resource reads and updates persistent configuration without requiring the new device to exist. It removes the adopted interface's old static addressing and default gateways. Netplan preserves unrelated definitions and nondefault routes. Networkd and ifupdown reject unfamiliar directives on the adopted interface when they cannot preserve them. Remove old guest device and cloud-init gateway declarations from the hypervisor configuration during migration. The ifupdown backend retains a per-interface source directive. The networkd backends install persistent MAC-matched link and network units that sort before regenerated netplan or Proxmox units.
+
+After the controlled guest restart, apply `phase = "active"`. The resource verifies the interface name and MAC before asking the selected manager to configure it. It checks the live addresses, MTU, automatic addressing and default routes. Read compares generated persistent configuration in both phases and live state in the active phase. A mismatch sets `reconciled` to false and schedules another apply. Destroy removes owned persistent definitions. A reboot or a separate manager action determines when the live link stops using those settings.
+
 ## pveguest_host_kernel_modules
 
 This resource replaces the node's complete kernel module list. Apply loads
@@ -1028,6 +1109,10 @@ make testacc \
 | `PVEGUEST_ACC_KIND` | `lxc` or `qemu`. |
 | `PVEGUEST_ACC_INSECURE` | `true` skips TLS certificate verification. The default is `false`. |
 | `PVEGUEST_ACC_KERNEL_MODULE` | Module from the node allowlist to use in the acceptance test. The test skips when unset. |
+| `PVEGUEST_ACC_ETHERNET` | Dedicated physical Ethernet port with an existing addressless stanza for the staged changes test. |
+| `PVEGUEST_ACC_SRIOV_PF` | Unmanaged, unused SR-IOV physical function with zero enabled VFs and capacity for two. The test binds VF 1 to vfio-pci and uses `PVEGUEST_ACC_HOST_SSH` to change its MAC for the drift check. |
+| `PVEGUEST_ACC_GUEST_IFNAME`, `PVEGUEST_ACC_GUEST_MAC`, `PVEGUEST_ACC_GUEST_BACKEND` | Dedicated test guest interface, assigned MAC and enabled manager for the staging, activation and repair test. |
+| `PVEGUEST_ACC_NETWORK_ERRORS` | Set to 1 on a test node to verify that an unavailable SR-IOV interface returns an API error. |
 | `PVEGUEST_ACC_HOSTNIC_LINK` | Host interface to use in the acceptance test. The test skips when unset. |
 | `PVEGUEST_ACC_VM_VMID` | ID of a stopped test VM on `PVEGUEST_ACC_NODE`. The token needs `VM.Audit`, `VM.Config.Vsock`, and `VM.PowerMgmt` on `/vms/<vmid>`. The test sets and deletes `vsock`, starts and stops the VM, and restores the earlier `vsock` value at the end. The test fails if `TF_ACC` is set and this variable is unset. |
 | `PVEGUEST_ACC_UNLISTED_KERNEL_MODULE` | The acceptance test uses a module that exists for the node kernel and is absent from the node allowlist. The test skips when unset. |
