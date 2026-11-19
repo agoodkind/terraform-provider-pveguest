@@ -326,9 +326,22 @@ func exerciseManager(t *testing.T, backend netconfig.Backend) {
 		t.Fatal("activation did not verify the live interface")
 	}
 
-	if !bytes.Contains(runtime("status"), []byte(`"ready":true`)) {
-		t.Fatal("runtime status differs from the applied configuration")
+	expectStatus := func(reason string) {
+		t.Helper()
+		output := runtime("status")
+		var status struct {
+			Ready  *bool  `json:"ready"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(output, &status); err != nil {
+			t.Fatal(err)
+		}
+
+		if status.Ready == nil || *status.Ready != (reason == "") || status.Reason != reason {
+			t.Fatalf("expected ready=%t and reason %q, got %s", reason == "", reason, output)
+		}
 	}
+	expectStatus("")
 
 	if backend != netconfig.Ifupdown {
 		if bytes.Contains(
@@ -343,7 +356,13 @@ func exerciseManager(t *testing.T, backend netconfig.Backend) {
 		expectRestartRequired(t, backend, settings)
 		settings.DNS = []string{}
 		fileCall("write", jsonBytes(t, inspect(false)))
+		command(t, nil, "systemctl", "restart", "systemd-networkd.service")
+		if output := runtime("activate"); !bytes.Contains(output, []byte(`"ready":true`)) {
+			t.Fatalf("activation after restoring the networkd configuration: %s", output)
+		}
 	}
+
+	expectStatus("")
 
 	if output := command(t, nil, "sysctl", "-n", "net.ipv6.conf.all.forwarding"); strings.TrimSpace(
 		string(output),
@@ -365,9 +384,7 @@ func exerciseManager(t *testing.T, backend netconfig.Backend) {
 		"metric",
 		"987",
 	)
-	if !bytes.Contains(runtime("status"), []byte(`"ready":false`)) {
-		t.Fatal("an unexpected default gateway did not produce runtime drift")
-	}
+	expectStatus("Unexpected default route on " + port + " via 192.0.2.1 (boot)")
 
 	command(
 		t,
@@ -383,10 +400,9 @@ func exerciseManager(t *testing.T, backend netconfig.Backend) {
 		"metric",
 		"987",
 	)
+	expectStatus("")
 	command(t, nil, "ip", "address", "delete", settings.Addresses[0], "dev", port)
-	if !bytes.Contains(runtime("status"), []byte(`"ready":false`)) {
-		t.Fatal("removing a configured live address did not produce runtime drift")
-	}
+	expectStatus("Missing configured addresses on " + port + ": " + settings.Addresses[0])
 }
 
 func expectRestartRequired(t *testing.T, backend netconfig.Backend, settings netconfig.Settings) {
