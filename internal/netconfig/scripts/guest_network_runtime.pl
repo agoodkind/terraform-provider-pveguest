@@ -1,6 +1,8 @@
 use strict;
 use warnings;
 use JSON::PP qw(decode_json encode_json);
+use Socket qw(AF_INET6 inet_ntop);
+use Time::HiRes qw(stat);
 my ($operation,$backend) = @ARGV;
 my $settings = decode_json(do {local $/; <STDIN>});
 my $name = $settings->{name};
@@ -63,6 +65,23 @@ sub dhcp4_lease {
     }
     return ($address,\%gateways);
 }
+sub loaded_network {
+    my ($info)=@_;
+    my $base="/etc/systemd/network/05-pveguest-$name";
+    return 0 unless ($info->{NetworkFile}//'') eq "$base.network";
+    # A matching filename alone cannot prove that networkd read the current
+    # settings. Require the managed files to predate this networkd process.
+    my $start=capture('busctl','get-property','org.freedesktop.systemd1',
+        '/org/freedesktop/systemd1/unit/systemd_2dnetworkd_2eservice',
+        'org.freedesktop.systemd1.Service','ExecMainStartTimestamp');
+    $start =~ /^t ([1-9][0-9]*)\s*$/ or die "Cannot read the networkd start time: $start";
+    my $started=$1/1_000_000;
+    for my $path ("$base.network","$base.link") {
+        my @metadata=stat($path);
+        return 0 unless @metadata && $metadata[10] < $started;
+    }
+    return 1;
+}
 sub status {
     my ($link,$error) = link_for_mac();
     return $error if defined $error;
@@ -71,6 +90,15 @@ sub status {
     my $data = decode_json(capture('ip','-j','address','show','dev',$name));
     my %wanted = map { $_=>1 } @{$settings->{addresses}};
     my ($ipv4,$ipv6) = (0,0);
+    my $info;
+    if ($backend ne 'ifupdown') { $info=decode_json(capture('networkctl','status','--json=short',$name)); }
+    my %ndisc;
+    if ($info) {
+        for my $entry (@{$info->{Addresses} // []}) {
+            next unless ($entry->{ConfigSource}//'') eq 'NDisc' && $entry->{Family}==AF_INET6;
+            $ndisc{inet_ntop(AF_INET6,pack('C*',@{$entry->{Address}}))}=1;
+        }
+    }
     my ($lease_address,$lease_gateways) = dhcp4_lease() if $backend eq 'ifupdown' && $settings->{dhcp4};
     for my $address (@{$data->[0]->{addr_info}}) {
         next if $address->{tentative} || $address->{dadfailed};
@@ -78,7 +106,7 @@ sub status {
         next if delete $wanted{$cidr};
         next unless ($address->{scope} // '') eq 'global';
         $ipv4 = 1 if $address->{family} eq 'inet' && ($backend ne 'ifupdown' || ($lease_address // '') eq $address->{local});
-        $ipv6 = 1 if $address->{family} eq 'inet6' && ($address->{dynamic} || ($address->{valid_life_time} // 4294967295) < 4294967295);
+        $ipv6 = 1 if $address->{family} eq 'inet6' && ($info ? $ndisc{$address->{local}} : ($address->{protocol} // '') eq 'kernel_ra');
     }
     return "Missing configured addresses on $name: ".join(', ',sort keys %wanted) if %wanted;
     return "Waiting for a DHCP IPv4 address on $name" if $settings->{dhcp4} && !$ipv4;
@@ -99,11 +127,9 @@ sub status {
         }
     }
     if ($backend ne 'ifupdown') {
-        my $info = decode_json(capture('networkctl','status','--json=short',$name));
         my $from_dhcp = grep { ($_->{ConfigSource} // '') eq 'DHCPv4' } @{$info->{Addresses} // []};
         return "Waiting for a networkd DHCPv4 lease on $name" if $settings->{dhcp4} && !$from_dhcp;
-        my $file = $info->{NetworkFile} // '';
-        return "networkd has not selected the managed configuration for $name ($file)" unless $file =~ m{/05-pveguest-\Q$name\E\.network$};
+        return "Restart the guest to load the staged networkd configuration for $name" unless loaded_network($info);
     }
     return undef;
 }
@@ -121,7 +147,8 @@ if ($operation eq 'activate') {
         capture('ifdown',$name) if $code==0;
         capture('ifup',$name);
     } else {
-        capture('networkctl','reload');
+        my $info=decode_json(capture('networkctl','status','--json=short',$name));
+        die "Restart the guest to load the staged networkd configuration for $name before activation.\n" unless loaded_network($info);
         capture('networkctl','reconfigure',$name);
     }
     for (1..30) {

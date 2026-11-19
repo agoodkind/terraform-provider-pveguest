@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -52,12 +53,53 @@ func yamlString(mapping *yaml.Node, key string) string {
 	return value.Value
 }
 
-func targetNetplan(definitionID string, definition *yaml.Node, settings Settings) bool {
-	match := yamlField(definition, "match")
+// Netplan merges definitions with the same ID in filename order. With an
+// explicit match, the ID is an opaque label rather than an interface name.
+type netplanMatch struct {
+	complex           bool
+	explicit          bool
+	mac, name, rename string
+}
 
-	return definitionID == settings.Name || yamlString(definition, "set-name") == settings.Name ||
-		strings.EqualFold(yamlString(match, "macaddress"), settings.MAC) ||
-		yamlString(match, "name") == settings.Name
+func (m *netplanMatch) merge(def *yaml.Node) {
+	if match := yamlField(def, "match"); match != nil {
+		m.explicit = true
+
+		for index := 0; index < len(match.Content); index += yamlMappingPair {
+			key := match.Content[index].Value
+			if key != "macaddress" && key != "name" {
+				m.complex = true
+			}
+		}
+
+		if v := yamlField(match, "macaddress"); v != nil {
+			m.mac = v.Value
+		}
+
+		if v := yamlField(match, "name"); v != nil {
+			m.name = v.Value
+		}
+	}
+
+	if rename := yamlField(def, "set-name"); rename != nil {
+		m.rename = rename.Value
+	}
+}
+
+func (m *netplanMatch) selects(definitionID string, settings Settings) bool {
+	if m.mac != "" {
+		return strings.EqualFold(m.mac, settings.MAC)
+	}
+
+	if m.rename != "" {
+		return m.rename == settings.Name
+	}
+
+	if m.explicit {
+		return m.name == settings.Name
+	}
+
+	return definitionID == settings.Name
 }
 
 func netplanDocuments(
@@ -65,9 +107,16 @@ func netplanDocuments(
 	settings Settings,
 ) (map[string]*yaml.Node, string, error) {
 	docs := map[string]*yaml.Node{}
-	ids := map[string]bool{}
+	selectors := map[string]netplanMatch{}
+	// scan already resolves equal basenames according to netplan directory precedence.
+	filenames := slices.Sorted(maps.Keys(files))
+	slices.SortFunc(
+		filenames,
+		func(a, b string) int { return strings.Compare(path.Base(a), path.Base(b)) },
+	)
 
-	for filename, content := range files {
+	for _, filename := range filenames {
+		content := files[filename]
 		var doc yaml.Node
 		if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
 			slog.Error("parse netplan YAML", "path", filename, "err", err)
@@ -97,16 +146,51 @@ func netplanDocuments(
 
 		for index := 0; index < len(entries.Content); index += 2 {
 			definitionID := entries.Content[index].Value
-			if targetNetplan(definitionID, entries.Content[index+1], settings) {
-				ids[definitionID] = true
-			}
+			m := selectors[definitionID]
+			m.merge(entries.Content[index+1])
+			selectors[definitionID] = m
 		}
+	}
+
+	id, err := selectNetplanID(selectors, settings)
+
+	return docs, id, err
+}
+
+func selectNetplanID(selectors map[string]netplanMatch, settings Settings) (string, error) {
+	ids := []string{}
+
+	for definitionID, selector := range selectors {
+		if selector.mac != "" && !strings.EqualFold(selector.mac, settings.MAC) &&
+			selector.rename == settings.Name {
+			return "", fmt.Errorf(
+				"%w: netplan assigns %s to another MAC in %s",
+				errNetworkConfig,
+				settings.Name,
+				definitionID,
+			)
+		}
+
+		if !selector.selects(definitionID, settings) {
+			continue
+		}
+
+		if selector.complex || strings.ContainsAny(selector.name, "*?[") ||
+			selector.name != "" && selector.name != settings.Name && selector.mac != "" {
+			return "", fmt.Errorf(
+				"%w: cannot verify all match conditions for netplan definition %s before adoption",
+				errNetworkConfig,
+				definitionID,
+			)
+		}
+
+		ids = append(ids, definitionID)
 	}
 
 	if len(ids) > 1 {
 		slog.Error("ambiguous netplan interface", "name", settings.Name, "err", errNetworkConfig)
 
-		return nil, "", fmt.Errorf(
+		return "", fmt.Errorf(
 			"%w: several netplan Ethernet definitions match %s or %s",
 			errNetworkConfig,
 			settings.Name,
@@ -114,11 +198,19 @@ func netplanDocuments(
 		)
 	}
 
-	for definitionID := range ids {
-		return docs, definitionID, nil
+	if len(ids) == 1 {
+		return ids[0], nil
 	}
 
-	return docs, settings.Name, nil
+	if _, exists := selectors[settings.Name]; exists {
+		return "", fmt.Errorf(
+			"%w: netplan ID %s already selects another interface; choose a different ID for that definition",
+			errNetworkConfig,
+			settings.Name,
+		)
+	}
+
+	return settings.Name, nil
 }
 
 func encodeNetplan(value *yaml.Node) (string, error) {

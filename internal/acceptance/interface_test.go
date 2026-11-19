@@ -47,6 +47,10 @@ resource "pveguest_network_interface" "port" {
 	workspace.mustRun("apply", "-auto-approve", "-no-color")
 	t.Cleanup(func() { workspace.mustRun("destroy", "-auto-approve", "-no-color") })
 	workspace.mustRun("plan", "-detailed-exitcode", "-no-color")
+	if backend != "ifupdown" {
+		guest.mustRun("systemctl", "restart", "systemd-networkd.service")
+	}
+
 	workspace.writeConfig(fmt.Sprintf(config, "active"))
 	workspace.mustRun("apply", "-auto-approve", "-no-color")
 	workspace.mustRun("plan", "-detailed-exitcode", "-no-color")

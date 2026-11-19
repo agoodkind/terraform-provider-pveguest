@@ -116,6 +116,30 @@ func TestNetplanAdoption(t *testing.T) {
 	}
 }
 
+func TestNetplanLogicalID(t *testing.T) {
+	const owner = "/etc/netplan/50-port.yaml"
+	const unrelated = "network:\n  version: 2\n  ethernets:\n    eth0:\n      match: {macaddress: '02:00:00:00:00:02'}\n      set-name: lan0\n      addresses: [192.0.2.9/24]\n"
+	settings := netconfig.Settings{Name: "eth0", MAC: "02:00:00:00:00:01"}
+	files := map[string]string{owner: unrelated}
+	if edits, err := settings.Plan(netconfig.Netplan, files, false); err == nil || len(edits) > 0 {
+		t.Fatalf(
+			"expected an occupied netplan ID error before changing the other port: %v %v",
+			edits,
+			err,
+		)
+	}
+
+	files["/etc/netplan/60-guest.yaml"] = "network:\n  version: 2\n  ethernets:\n    guest:\n      match: {macaddress: '02:00:00:00:00:01'}\n      set-name: eth0\n      addresses: [192.0.2.10/24]\n"
+	edits, err := settings.Plan(netconfig.Netplan, files, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, changed := edits[owner]; changed {
+		t.Fatalf("adoption edited a different MAC: %v", edits)
+	}
+}
+
 // TestLinuxManagers runs only in a disposable Linux guest with both managers
 // installed. It adopts a dedicated interface, verifies activation, and checks
 // that a stale cloud-init source cannot replace the selected networkd unit.
@@ -265,12 +289,60 @@ func exerciseManager(t *testing.T, backend netconfig.Backend) {
 			string(backend),
 		)
 	}
+	if backend != netconfig.Ifupdown {
+		expectRestartRequired(t, backend, settings)
+		command(t, nil, "systemctl", "restart", "systemd-networkd.service")
+		stageSecondPort(t)
+	}
+
+	command(t, nil, "ip", "link", "set", port, "up", "mtu", "1470")
+	command(t, nil, "ip", "address", "replace", settings.Addresses[0], "dev", port)
+	command(
+		t,
+		nil,
+		"ip",
+		"address",
+		"add",
+		"fd88:1234::1/64",
+		"dev",
+		port,
+		"nodad",
+		"valid_lft",
+		"600",
+		"preferred_lft",
+		"300",
+	)
+	settings.DHCP4 = false
+	if output := runtime("status"); !bytes.Contains(
+		output,
+		[]byte("Waiting for a SLAAC IPv6 address"),
+	) {
+		t.Fatalf("finite-lifetime static IPv6 without router advertisements: %s", output)
+	}
+
+	settings.DHCP4 = true
+	startRouter(t)
 	if !bytes.Contains(runtime("activate"), []byte(`"ready":true`)) {
 		t.Fatal("activation did not verify the live interface")
 	}
 
 	if !bytes.Contains(runtime("status"), []byte(`"ready":true`)) {
 		t.Fatal("runtime status differs from the applied configuration")
+	}
+
+	if backend != netconfig.Ifupdown {
+		if bytes.Contains(
+			command(t, nil, "ip", "-j", "addr", "show", "dev", "accpending"),
+			[]byte("192.0.2.77"),
+		) {
+			t.Fatal("activating one interface configured a second staged interface")
+		}
+
+		settings.DNS = []string{"192.0.2.53"}
+		fileCall("write", jsonBytes(t, inspect(false)))
+		expectRestartRequired(t, backend, settings)
+		settings.DNS = []string{}
+		fileCall("write", jsonBytes(t, inspect(false)))
 	}
 
 	if output := command(t, nil, "sysctl", "-n", "net.ipv6.conf.all.forwarding"); strings.TrimSpace(
@@ -315,6 +387,54 @@ func exerciseManager(t *testing.T, backend netconfig.Backend) {
 	if !bytes.Contains(runtime("status"), []byte(`"ready":false`)) {
 		t.Fatal("removing a configured live address did not produce runtime drift")
 	}
+}
+
+func expectRestartRequired(t *testing.T, backend netconfig.Backend, settings netconfig.Settings) {
+	t.Helper()
+	cmd := exec.CommandContext(
+		t.Context(),
+		"perl",
+		"-e",
+		netconfig.RuntimeScript,
+		"--",
+		"activate",
+		string(backend),
+	)
+	cmd.Stdin = bytes.NewReader(jsonBytes(t, settings))
+	output, err := cmd.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte("Restart the guest")) {
+		t.Fatalf("activation before loading staged units: %v %s", err, output)
+	}
+}
+
+func stageSecondPort(t *testing.T) {
+	t.Helper()
+	const port = "accpending"
+	settings := netconfig.Settings{
+		Name:      port,
+		MAC:       "02:00:00:00:00:77",
+		Addresses: []string{"192.0.2.77/32"},
+	}
+	command(t, nil, "ip", "link", "add", port, "type", "dummy")
+	t.Cleanup(func() { command(t, nil, "ip", "link", "delete", port) })
+	command(t, nil, "ip", "link", "set", port, "address", settings.MAC, "up")
+	write := func(deleting bool) {
+		argv := []string{"-e", netconfig.FileScript, "--", "networkd", "read", port}
+		var current map[string]string
+		if err := json.Unmarshal(command(t, nil, "perl", argv...), &current); err != nil {
+			t.Fatal(err)
+		}
+
+		edits, err := settings.Plan(netconfig.Networkd, current, deleting)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		argv[4] = "write"
+		command(t, jsonBytes(t, edits), "perl", argv...)
+	}
+	write(false)
+	t.Cleanup(func() { write(true) })
 }
 
 func fixtureSource(backend netconfig.Backend, name, mac string) (string, string) {
@@ -368,6 +488,12 @@ func routerPeer(t *testing.T, port string) {
 		peer,
 		"nodad",
 	)
+}
+
+func startRouter(t *testing.T) {
+	t.Helper()
+	const namespace = "pveguest-router"
+	const peer = "accrouter"
 	pidFile := filepath.Join(t.TempDir(), "dnsmasq.pid")
 	command(
 		t,

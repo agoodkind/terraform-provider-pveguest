@@ -78,8 +78,11 @@ func (r *guestNetworkResource) Schema(
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},
 			},
 			"phase": schema.StringAttribute{
-				Required:   true,
-				Validators: []validator.String{stringvalidator.OneOf("staged", string(unitActive))},
+				Description: "Stage or activate this link. Restart networkd guests after staging changes and before activation.",
+				Required:    true,
+				Validators: []validator.String{
+					stringvalidator.OneOf("staged", string(unitActive)),
+				},
 			},
 			"dhcp4": schema.BoolAttribute{
 				Required: true,
