@@ -56,6 +56,7 @@ func parseSRIOVInteger(number *json.Number) (int64, bool) {
 	}
 
 	value, err := number.Int64()
+
 	return value, err == nil
 }
 

@@ -19,9 +19,11 @@ const sriovResponse = `{
 func TestSetSRIOVDecodesProxmoxInventory(t *testing.T) {
 	assignment := transport.VFDeclaration{Index: 0, MAC: "02:01:02:03:04:05", Driver: "iavf"}
 	declaration := transport.SRIOVDeclaration{NumVFs: 1, VFs: []transport.VFDeclaration{assignment}}
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPut || request.URL.Path != "/api2/json/nodes/"+testNode+"/sriov/eno2" {
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPut ||
+			request.URL.Path != "/api2/json/nodes/"+testNode+"/sriov/eno2" {
 			http.NotFound(writer, request)
+
 			return
 		}
 
@@ -30,6 +32,7 @@ func TestSetSRIOVDecodesProxmoxInventory(t *testing.T) {
 			sent.NumVFs != declaration.NumVFs || len(sent.VFs) != 1 || sent.VFs[0] != assignment {
 			t.Errorf("the PUT request did not contain the numeric declaration: %+v, %v", sent, err)
 			http.Error(writer, "invalid SR-IOV declaration", http.StatusBadRequest)
+
 			return
 		}
 
@@ -37,7 +40,8 @@ func TestSetSRIOVDecodesProxmoxInventory(t *testing.T) {
 		if _, err := writer.Write([]byte(`{"data":` + sriovResponse + `}`)); err != nil {
 			t.Error(err)
 		}
-	}))
+	})
+	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	client, err := transport.NewClient(
 		map[string]transport.NodeConfig{testNode: {Endpoint: server.URL, APIToken: testAPIToken}},
@@ -52,22 +56,30 @@ func TestSetSRIOVDecodesProxmoxInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if state.NumVFs != 1 || state.TotalVFs != 64 || state.Desired == nil || state.Desired.NumVFs != 1 ||
-		len(state.Desired.VFs) != 1 || state.Desired.VFs[0] != assignment || len(state.VFs) != 1 ||
-		state.VFs[0].VFDeclaration != assignment || state.VFs[0].PCI != "0000:03:00.1" || state.VFs[0].InContainer {
+	if state.NumVFs != 1 || state.TotalVFs != 64 || state.Desired == nil ||
+		state.Desired.NumVFs != 1 ||
+		len(state.Desired.VFs) != 1 ||
+		state.Desired.VFs[0] != assignment ||
+		len(state.VFs) != 1 ||
+		state.VFs[0].VFDeclaration != assignment ||
+		state.VFs[0].PCI != "0000:03:00.1" ||
+		state.VFs[0].InContainer {
 		t.Fatalf("the PUT response did not decode to the observed inventory: %+v", state)
 	}
 }
 
 func TestSRIOVResponseRejectsInvalidIntegers(t *testing.T) {
 	for _, count := range []string{`null`, `"invalid"`, `"1.0"`, `1e0`, `"9223372036854775808"`} {
-		t.Run(count, func(t *testing.T) {
-			document := strings.Replace(sriovResponse, `"numvfs":"1"`, `"numvfs":`+count, 1)
-			var state transport.SRIOVState
-			if err := json.Unmarshal([]byte(document), &state); err == nil {
-				t.Fatal("the SR-IOV response accepted an invalid VF count")
-			}
-		})
+		t.Run(
+			count,
+			func(t *testing.T) {
+				document := strings.Replace(sriovResponse, `"numvfs":"1"`, `"numvfs":`+count, 1)
+				var state transport.SRIOVState
+				if err := json.Unmarshal([]byte(document), &state); err == nil {
+					t.Fatal("the SR-IOV response accepted an invalid VF count")
+				}
+			},
+		)
 	}
 }
 
