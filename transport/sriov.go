@@ -42,12 +42,21 @@ type SRIOVState struct {
 var errSRIOVInventory = errors.New("incompatible SR-IOV API response")
 
 type runtimeVF struct {
-	Index       *int64 `json:"index"`
-	MAC         string `json:"mac"`
-	Driver      string `json:"driver"`
-	Ifname      string `json:"ifname"`
-	PCI         string `json:"pci"`
-	InContainer *flag  `json:"in_container"`
+	Index       *json.Number `json:"index"`
+	MAC         string       `json:"mac"`
+	Driver      string       `json:"driver"`
+	Ifname      string       `json:"ifname"`
+	PCI         string       `json:"pci"`
+	InContainer *flag        `json:"in_container"`
+}
+
+func parseSRIOVInteger(number *json.Number) (int64, bool) {
+	if number == nil {
+		return 0, false
+	}
+
+	value, err := number.Int64()
+	return value, err == nil
 }
 
 // UnmarshalJSON decodes the saved declaration and observed hardware.
@@ -58,11 +67,11 @@ type runtimeVF struct {
 //	err := json.Unmarshal(document, &state)
 func (state *SRIOVState) UnmarshalJSON(data []byte) error {
 	var wire struct {
-		NumVFs   *int64 `json:"numvfs"`
-		TotalVFs *int64 `json:"totalvfs"`
+		NumVFs   *json.Number `json:"numvfs"`
+		TotalVFs *json.Number `json:"totalvfs"`
 		Desired  *struct {
-			NumVFs *int64      `json:"numvfs"`
-			VFs    []runtimeVF `json:"vfs"`
+			NumVFs *json.Number `json:"numvfs"`
+			VFs    []runtimeVF  `json:"vfs"`
 		} `json:"desired"`
 		VFs []runtimeVF `json:"vfs"`
 	}
@@ -70,22 +79,24 @@ func (state *SRIOVState) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("%w: %w", errSRIOVInventory, err)
 	}
 
-	if wire.NumVFs == nil || wire.TotalVFs == nil || wire.VFs == nil ||
-		*wire.NumVFs > *wire.TotalVFs ||
-		int64(len(wire.VFs)) != *wire.NumVFs {
+	numVFs, validCount := parseSRIOVInteger(wire.NumVFs)
+	totalVFs, validTotal := parseSRIOVInteger(wire.TotalVFs)
+	if !validCount || !validTotal || wire.VFs == nil || numVFs > totalVFs ||
+		int64(len(wire.VFs)) != numVFs {
 		return fmt.Errorf("%w: invalid or missing numvfs, totalvfs, or vfs", errSRIOVInventory)
 	}
 
 	decoded := SRIOVState{
-		NumVFs:   *wire.NumVFs,
-		TotalVFs: *wire.TotalVFs,
+		NumVFs:   numVFs,
+		TotalVFs: totalVFs,
 		VFs:      make([]VFState, len(wire.VFs)),
 	}
 	seen := map[int64]bool{}
 
 	for position, function := range wire.VFs {
-		if function.Index == nil || *function.Index < 0 || *function.Index >= decoded.NumVFs ||
-			seen[*function.Index] ||
+		index, valid := parseSRIOVInteger(function.Index)
+		if !valid || index < 0 || index >= decoded.NumVFs ||
+			seen[index] ||
 			function.MAC == "" ||
 			function.PCI == "" ||
 			function.InContainer == nil {
@@ -96,9 +107,9 @@ func (state *SRIOVState) UnmarshalJSON(data []byte) error {
 			)
 		}
 
-		seen[*function.Index] = true
+		seen[index] = true
 		decoded.VFs[position] = VFState{
-			Index:       *function.Index,
+			Index:       index,
 			MAC:         function.MAC,
 			Driver:      function.Driver,
 			Ifname:      function.Ifname,
@@ -108,27 +119,29 @@ func (state *SRIOVState) UnmarshalJSON(data []byte) error {
 	}
 
 	if saved := wire.Desired; saved != nil {
-		if saved.NumVFs == nil || saved.VFs == nil {
+		desiredVFs, valid := parseSRIOVInteger(saved.NumVFs)
+		if !valid || saved.VFs == nil {
 			return fmt.Errorf("%w: incomplete desired configuration", errSRIOVInventory)
 		}
 
 		decoded.Desired = &SRIOVDeclaration{
-			NumVFs: *saved.NumVFs,
+			NumVFs: desiredVFs,
 			VFs:    make([]VFDeclaration, len(saved.VFs)),
 		}
 		clear(seen)
 
 		for position, function := range saved.VFs {
-			if function.Index == nil || *function.Index < 0 || *function.Index >= *saved.NumVFs ||
-				seen[*function.Index] ||
+			index, valid := parseSRIOVInteger(function.Index)
+			if !valid || index < 0 || index >= desiredVFs ||
+				seen[index] ||
 				function.MAC == "" ||
 				function.Driver == "" {
 				return fmt.Errorf("%w: incomplete desired VF %d", errSRIOVInventory, position)
 			}
 
-			seen[*function.Index] = true
+			seen[index] = true
 			decoded.Desired.VFs[position] = VFDeclaration{
-				Index:  *function.Index,
+				Index:  index,
 				MAC:    function.MAC,
 				Driver: function.Driver,
 				Ifname: function.Ifname,
