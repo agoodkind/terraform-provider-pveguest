@@ -21,6 +21,7 @@ import (
 )
 
 const (
+	nodeAttributeName       = "node"
 	maximumErrorOutputBytes = 4000
 	maximumStdoutTailBytes  = 1000
 )
@@ -29,7 +30,7 @@ const (
 // attributes forces replacement of the resource.
 func guestAttributes() map[string]schema.Attribute {
 	return map[string]schema.Attribute{
-		"node": schema.StringAttribute{
+		nodeAttributeName: schema.StringAttribute{
 			Required:      true,
 			Description:   "Key of the hypervisor in the provider nodes map.",
 			PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

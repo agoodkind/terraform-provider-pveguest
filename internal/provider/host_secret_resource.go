@@ -87,7 +87,7 @@ func (r *hostSecretResource) Schema(
 			"through the overlay host artifact API. The node validates the value against the target policy " +
 			"and restarts the consumer units when the storage file content changes. OpenTofu does not store the value in plans or state.",
 		Attributes: map[string]schema.Attribute{
-			"node": schema.StringAttribute{
+			nodeAttributeName: schema.StringAttribute{
 				Description:   "The node value must be a key in the provider's nodes map. Changing node replaces the resource.",
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

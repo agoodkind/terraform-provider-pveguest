@@ -48,7 +48,7 @@ func (r *hostKernelModulesResource) Schema(
 	resp.Schema = schema.Schema{
 		Description: "The resource manages a node's kernel module list. The resource never unloads modules. The destroy operation empties the node's module list.",
 		Attributes: map[string]schema.Attribute{
-			"node": schema.StringAttribute{
+			nodeAttributeName: schema.StringAttribute{
 				Description:   "The node value must be a key in the provider's nodes map. Changing node replaces the resource.",
 				Required:      true,
 				PlanModifiers: []planmodifier.String{stringplanmodifier.RequiresReplace()},

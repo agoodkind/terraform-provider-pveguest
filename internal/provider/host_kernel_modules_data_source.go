@@ -35,7 +35,7 @@ func (d *hostKernelModulesDataSource) Schema(
 	resp.Schema = schema.Schema{
 		Description: "Reads the node's persistent kernel module list and each listed module's load state without changing the node.",
 		Attributes: map[string]schema.Attribute{
-			"node": schema.StringAttribute{
+			nodeAttributeName: schema.StringAttribute{
 				Description: "Select a key in the provider's nodes map.",
 				Required:    true,
 				Validators:  []validator.String{stringvalidator.LengthAtLeast(1)},
