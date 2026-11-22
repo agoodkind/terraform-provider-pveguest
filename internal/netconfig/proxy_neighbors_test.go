@@ -203,6 +203,9 @@ func TestLinuxIfupdownProxyNeighbors(t *testing.T) {
 	expectNeighbors(false, true)
 	runtime("remove-proxy-neighbors")
 	expectNeighbors(false, true)
+	settings.ObsoleteProxyNeighbors = nil
+	runtime("activate")
+	expectNeighbors(false, true)
 }
 
 func expectIfupFailure(t *testing.T, settings netconfig.Settings) {

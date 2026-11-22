@@ -56,7 +56,6 @@ sub proxy_neighbors {
 }
 sub unmanaged_proxy_neighbors {
     my @managed = (@{$settings->{ipv6_proxy_neighbors} // []}, @{$settings->{obsolete_proxy_neighbors} // []});
-    return () unless @managed;
     my %present = proxy_neighbors();
     delete @present{map { proxy_neighbor_key($_) } @managed};
     return sort values %present;
