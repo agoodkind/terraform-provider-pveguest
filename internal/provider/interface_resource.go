@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/agoodkind/terraform-provider-pveguest/internal/netconfig"
@@ -27,20 +28,21 @@ import (
 )
 
 type guestNetworkModel struct {
-	Node       types.String `tfsdk:"node"`
-	VMID       types.Int64  `tfsdk:"vmid"`
-	Kind       types.String `tfsdk:"kind"`
-	Name       types.String `tfsdk:"name"`
-	MAC        types.String `tfsdk:"mac"`
-	Backend    types.String `tfsdk:"backend"`
-	Phase      types.String `tfsdk:"phase"`
-	DHCP4      types.Bool   `tfsdk:"dhcp4"`
-	SLAAC      types.Bool   `tfsdk:"slaac"`
-	MTU        types.Int64  `tfsdk:"mtu"`
-	Addresses  types.Set    `tfsdk:"addresses"`
-	DNS        types.List   `tfsdk:"dns_servers"`
-	Search     types.List   `tfsdk:"dns_search"`
-	Reconciled types.Bool   `tfsdk:"reconciled"`
+	Node           types.String `tfsdk:"node"`
+	VMID           types.Int64  `tfsdk:"vmid"`
+	Kind           types.String `tfsdk:"kind"`
+	Name           types.String `tfsdk:"name"`
+	MAC            types.String `tfsdk:"mac"`
+	Backend        types.String `tfsdk:"backend"`
+	Phase          types.String `tfsdk:"phase"`
+	DHCP4          types.Bool   `tfsdk:"dhcp4"`
+	SLAAC          types.Bool   `tfsdk:"slaac"`
+	MTU            types.Int64  `tfsdk:"mtu"`
+	Addresses      types.Set    `tfsdk:"addresses"`
+	ProxyNeighbors types.Set    `tfsdk:"ipv6_proxy_neighbors"`
+	DNS            types.List   `tfsdk:"dns_servers"`
+	Search         types.List   `tfsdk:"dns_search"`
+	Reconciled     types.Bool   `tfsdk:"reconciled"`
 }
 type guestNetworkResource struct{ data *providerData }
 
@@ -94,17 +96,40 @@ func (r *guestNetworkResource) Schema(
 					int64validator.Between(minimumNetworkMTU, maximumGuestMTU),
 				},
 			},
-			"addresses": schema.SetAttribute{Optional: true, ElementType: types.StringType},
+			"addresses": schema.SetAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+			},
+			"ipv6_proxy_neighbors": schema.SetAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+				Description: "Exact IPv6 addresses for which the ifupdown interface answers neighbor discovery.",
+			},
 			"dns_servers": schema.ListAttribute{
 				Optional:    true,
 				ElementType: types.StringType,
 			},
-			"dns_search": schema.ListAttribute{Optional: true, ElementType: types.StringType},
+			"dns_search": schema.ListAttribute{
+				Optional:    true,
+				ElementType: types.StringType,
+			},
 			"reconciled": schema.BoolAttribute{
 				Computed:    true,
 				Description: "Reports whether the persistent settings and requested live state match.",
 			},
 		}),
+	}
+}
+
+func (r *guestNetworkResource) ValidateConfig(
+	ctx context.Context,
+	req resource.ValidateConfigRequest,
+	resp *resource.ValidateConfigResponse,
+) {
+	var config guestNetworkModel
+	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
+	if !resp.Diagnostics.HasError() {
+		config.proxyNeighbors(&resp.Diagnostics)
 	}
 }
 
@@ -123,7 +148,7 @@ func (r *guestNetworkResource) Create(
 	req resource.CreateRequest,
 	resp *resource.CreateResponse,
 ) {
-	r.apply(ctx, req.Plan, &resp.State, &resp.Diagnostics)
+	r.apply(ctx, req.Plan, nil, resp.Private, &resp.State, &resp.Diagnostics)
 }
 
 func (r *guestNetworkResource) Update(
@@ -131,7 +156,10 @@ func (r *guestNetworkResource) Update(
 	req resource.UpdateRequest,
 	resp *resource.UpdateResponse,
 ) {
-	r.apply(ctx, req.Plan, &resp.State, &resp.Diagnostics)
+	owned := readGuestProxyOwnership(ctx, req.Private, &resp.Diagnostics)
+	if !resp.Diagnostics.HasError() {
+		r.apply(ctx, req.Plan, owned, resp.Private, &resp.State, &resp.Diagnostics)
+	}
 }
 
 func (r *guestNetworkResource) Read(
@@ -141,8 +169,9 @@ func (r *guestNetworkResource) Read(
 ) {
 	var model guestNetworkModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &model)...)
+	owned := readGuestProxyOwnership(ctx, req.Private, &resp.Diagnostics)
 	if !resp.Diagnostics.HasError() {
-		r.execute(ctx, &model, &resp.Diagnostics, "read")
+		r.execute(ctx, &model, owned, &resp.Diagnostics, "read")
 	}
 
 	if !resp.Diagnostics.HasError() {
@@ -157,8 +186,9 @@ func (r *guestNetworkResource) Delete(
 ) {
 	var model guestNetworkModel
 	resp.Diagnostics.Append(req.State.Get(ctx, &model)...)
+	owned := readGuestProxyOwnership(ctx, req.Private, &resp.Diagnostics)
 	if !resp.Diagnostics.HasError() {
-		r.execute(ctx, &model, &resp.Diagnostics, deleteNetworkAction)
+		r.execute(ctx, &model, owned, &resp.Diagnostics, deleteNetworkAction)
 	}
 }
 
@@ -171,14 +201,15 @@ func (m guestNetworkModel) settings(
 	diags *diag.Diagnostics,
 ) netconfig.Settings {
 	settings := netconfig.Settings{
-		Name:      m.Name.ValueString(),
-		MAC:       m.MAC.ValueString(),
-		DHCP4:     m.DHCP4.ValueBool(),
-		SLAAC:     m.SLAAC.ValueBool(),
-		MTU:       m.MTU.ValueInt64(),
-		DNS:       []string{},
-		Search:    []string{},
-		Addresses: []string{},
+		Name:               m.Name.ValueString(),
+		MAC:                m.MAC.ValueString(),
+		DHCP4:              m.DHCP4.ValueBool(),
+		SLAAC:              m.SLAAC.ValueBool(),
+		MTU:                m.MTU.ValueInt64(),
+		DNS:                []string{},
+		Search:             []string{},
+		Addresses:          []string{},
+		IPv6ProxyNeighbors: m.proxyNeighbors(diags),
 	}
 	if !m.Addresses.IsNull() {
 		var d diag.Diagnostics
@@ -228,6 +259,76 @@ func (m guestNetworkModel) settings(
 	return settings
 }
 
+const guestProxyOwnershipKey = "guest_ipv6_proxy_neighbors"
+
+type privateGetter interface {
+	GetKey(ctx context.Context, key string) ([]byte, diag.Diagnostics)
+}
+
+func readGuestProxyOwnership(
+	ctx context.Context,
+	private privateGetter,
+	diags *diag.Diagnostics,
+) []string {
+	data, diagnostics := private.GetKey(ctx, guestProxyOwnershipKey)
+	diags.Append(diagnostics...)
+	if len(data) == 0 || diags.HasError() {
+		return nil
+	}
+
+	var owned []string
+	if err := json.Unmarshal(data, &owned); err != nil {
+		diags.AddError("Read guest IPv6 proxy neighbor ownership", err.Error())
+	}
+
+	return owned
+}
+
+func (m guestNetworkModel) proxyNeighbors(diags *diag.Diagnostics) []string {
+	attributePath := path.Root("ipv6_proxy_neighbors")
+	if len(m.ProxyNeighbors.Elements()) == 0 {
+		return nil
+	}
+
+	if !m.Backend.IsUnknown() && m.Backend.ValueString() != string(netconfig.Ifupdown) {
+		diags.AddAttributeError(
+			attributePath,
+			"Unsupported guest network backend",
+			"Use the ifupdown backend for IPv6 proxy neighbors.",
+		)
+
+		return nil
+	}
+
+	addresses := map[string]struct{}{}
+
+	for _, element := range m.ProxyNeighbors.Elements() {
+		value, _ := element.(types.String)
+		if value.IsUnknown() {
+			continue
+		}
+
+		address, err := netip.ParseAddr(value.ValueString())
+		if err != nil || !address.Is6() || address.Is4In6() || address.Zone() != "" ||
+			address.IsUnspecified() || address.IsMulticast() || address.IsLoopback() {
+			diags.AddAttributeError(
+				attributePath,
+				"Invalid IPv6 proxy neighbor",
+				fmt.Sprintf(
+					"Use an exact IPv6 unicast address without a prefix or zone. Got %q.",
+					value.ValueString(),
+				),
+			)
+
+			continue
+		}
+
+		addresses[address.String()] = struct{}{}
+	}
+
+	return slices.Sorted(maps.Keys(addresses))
+}
+
 var errGuestNetwork = errors.New("guest interface operation failed")
 
 type guestNetworkSession struct {
@@ -240,9 +341,10 @@ type guestNetworkSession struct {
 func (r *guestNetworkResource) execute(
 	ctx context.Context,
 	model *guestNetworkModel,
+	owned []string,
 	diags *diag.Diagnostics,
 	action string,
-) {
+) []string {
 	session := guestNetworkSession{
 		r.data.client,
 		guestOf(model.Node, model.VMID, model.Kind),
@@ -250,17 +352,28 @@ func (r *guestNetworkResource) execute(
 		model.settings(ctx, diags),
 	}
 	if diags.HasError() {
-		return
+		return nil
+	}
+
+	wanted := session.settings.IPv6ProxyNeighbors
+	session.settings.ObsoleteProxyNeighbors = difference(owned, wanted)
+	if action == deleteNetworkAction {
+		session.settings.ObsoleteProxyNeighbors = append(
+			session.settings.ObsoleteProxyNeighbors,
+			wanted...,
+		)
 	}
 
 	ready, err := session.reconcile(ctx, action, model.Phase.ValueString() == string(unitActive))
 	if err != nil {
 		diags.AddError("Configure guest network interface", err.Error())
 
-		return
+		return nil
 	}
 
 	model.Reconciled = types.BoolValue(ready)
+
+	return wanted
 }
 
 func (s guestNetworkSession) helper(
@@ -409,6 +522,18 @@ func (s guestNetworkSession) reconcile(
 		return false, nil
 	}
 
+	if action == deleteNetworkAction && len(s.settings.ObsoleteProxyNeighbors) > 0 {
+		if _, err := s.helper(
+			ctx,
+			netconfig.RuntimeScript,
+			[]string{"remove-proxy-neighbors", s.backend},
+			payload,
+			false,
+		); err != nil {
+			return false, err
+		}
+	}
+
 	if len(edits) > 0 {
 		if err := s.writeChanges(ctx, edits, action == deleteNetworkAction); err != nil {
 			return false, err
@@ -450,18 +575,42 @@ func (s guestNetworkSession) reconcile(
 func (r *guestNetworkResource) apply(
 	ctx context.Context,
 	plan tfsdk.Plan,
+	owned []string,
+	private privateSetter,
 	state *tfsdk.State,
 	diags *diag.Diagnostics,
 ) {
 	var model guestNetworkModel
 	diags.Append(plan.Get(ctx, &model)...)
-	if !diags.HasError() {
-		r.execute(ctx, &model, diags, "apply")
+	if diags.HasError() {
+		return
 	}
 
-	if !diags.HasError() {
-		diags.Append(state.Set(ctx, &model)...)
+	wanted := r.execute(ctx, &model, owned, diags, "apply")
+	if diags.HasError() {
+		return
 	}
+
+	if model.Phase.ValueString() != string(unitActive) {
+		wanted = append(wanted, difference(owned, wanted)...)
+	}
+
+	if len(owned) > 0 || len(wanted) > 0 {
+		var data []byte
+		if len(wanted) > 0 {
+			var err error
+			data, err = json.Marshal(wanted)
+			if err != nil {
+				diags.AddError("Save guest IPv6 proxy neighbor ownership", err.Error())
+
+				return
+			}
+		}
+
+		diags.Append(private.SetKey(ctx, guestProxyOwnershipKey, data)...)
+	}
+
+	diags.Append(state.Set(ctx, &model)...)
 }
 
 func (s guestNetworkSession) writeChanges(

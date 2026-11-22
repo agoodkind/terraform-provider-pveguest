@@ -36,12 +36,60 @@ sub verify_backend {
         check_program('networkctl','systemd');
     }
 }
-sub link_for_mac {
+sub links_for_mac {
     my $links = decode_json(capture('ip','-j','link','show'));
-    my @matches = grep { lc($_->{address} // '') eq $mac } @$links;
+    return grep { lc($_->{address} // '') eq $mac } @$links;
+}
+sub link_for_mac {
+    my @matches = links_for_mac();
     return (undef,"Expected one interface with MAC $mac; found ".scalar(@matches)) unless @matches == 1;
     return (undef,"MAC $mac belongs to $matches[0]->{ifname}, expected $name") if $matches[0]->{ifname} ne $name;
     return ($matches[0],undef);
+}
+sub proxy_neighbors {
+    my $entries = decode_json(capture('ip','-j','-6','neigh','show','proxy','dev',$name));
+    return map { $_->{dst} => 1 } @$entries;
+}
+sub unmanaged_proxy_neighbors {
+    my @managed = (@{$settings->{ipv6_proxy_neighbors} // []}, @{$settings->{obsolete_proxy_neighbors} // []});
+    return () unless @managed;
+    my %present = proxy_neighbors();
+    delete @present{@managed};
+    return sort keys %present;
+}
+sub restore_proxy_neighbors {
+    my (@addresses) = @_;
+    return unless @addresses;
+    my %present = proxy_neighbors();
+    for my $address (@addresses) {
+        capture('ip','-6','neigh','replace','proxy',$address,'dev',$name) unless $present{$address};
+    }
+}
+sub remove_obsolete_proxy_neighbors {
+    my $obsolete = $settings->{obsolete_proxy_neighbors} // [];
+    return unless @$obsolete;
+    my @links = links_for_mac();
+    return unless @links;
+    die "Expected one interface named $name with MAC $mac before removing proxy neighbors\n"
+        unless @links == 1 && $links[0]->{ifname} eq $name;
+    my %present = proxy_neighbors();
+    for my $address (@$obsolete) {
+        capture('ip','-6','neigh','del','proxy',$address,'dev',$name) if $present{$address};
+    }
+}
+sub check_proxy_neighbors {
+    my $wanted = $settings->{ipv6_proxy_neighbors} // [];
+    return undef unless @$wanted || @{$settings->{obsolete_proxy_neighbors} // []};
+    my %present = proxy_neighbors();
+    my @missing = grep { !$present{$_} } @$wanted;
+    return "Missing IPv6 proxy neighbors on $name: ".join(', ',@missing) if @missing;
+    my @obsolete = grep { $present{$_} } @{$settings->{obsolete_proxy_neighbors} // []};
+    return "Obsolete IPv6 proxy neighbors on $name: ".join(', ',@obsolete) if @obsolete;
+    if (@$wanted) {
+        my $enabled = capture('sysctl','-n',"net/ipv6/conf/$name/proxy_ndp");
+        return "IPv6 proxy NDP is disabled on $name" unless $enabled =~ /^1$/m;
+    }
+    return undef;
 }
 sub dhcp4_lease {
     my $path = "/var/lib/dhcp/dhclient.$name.leases";
@@ -87,6 +135,8 @@ sub status {
     return $error if defined $error;
     return "Interface $name is down" unless grep { $_ eq 'UP' } @{$link->{flags}};
     return "MTU on $name differs from $settings->{mtu}" if $settings->{mtu} && $link->{mtu} != $settings->{mtu};
+    my $proxy_error = check_proxy_neighbors();
+    return $proxy_error if defined $proxy_error;
     my $data = decode_json(capture('ip','-j','address','show','dev',$name));
     my %wanted = map { $_=>1 } @{$settings->{addresses}};
     my ($ipv4,$ipv6) = (0,0);
@@ -133,12 +183,18 @@ sub status {
     }
     return undef;
 }
+if ($operation eq 'remove-proxy-neighbors') {
+    remove_obsolete_proxy_neighbors();
+    exit;
+}
 verify_backend();
 if ($operation eq 'prerequisites') {exit;}
 if ($operation eq 'activate') {
     my ($link,$error) = link_for_mac();
     die "$error\n" if defined $error;
+    remove_obsolete_proxy_neighbors();
     if ($backend eq 'ifupdown') {
+        my @unmanaged = unmanaged_proxy_neighbors();
         open(my $probe,'-|','ifquery','--state',$name) or die "Run ifquery: $!\n";
         { local $/; <$probe>; }
         close($probe);
@@ -146,6 +202,7 @@ if ($operation eq 'activate') {
         die "ifquery --state $name failed: $code\n" if $code>1;
         capture('ifdown',$name) if $code==0;
         capture('ifup',$name);
+        restore_proxy_neighbors(@unmanaged);
     } else {
         my $info=decode_json(capture('networkctl','status','--json=short',$name));
         die "Restart the guest to load the staged networkd configuration for $name before activation.\n" unless loaded_network($info);

@@ -218,5 +218,13 @@ func (s Settings) ifupdownStanza() string {
 		autoconf,
 	)
 
+	if len(s.IPv6ProxyNeighbors) > 0 {
+		fmt.Fprintf(&out, "    pre-up sysctl -qw net/ipv6/conf/%s/proxy_ndp=1\n", s.Name)
+	}
+
+	for _, address := range s.IPv6ProxyNeighbors {
+		fmt.Fprintf(&out, "    up ip -6 neigh replace proxy %s dev %s\n", address, s.Name)
+	}
+
 	return out.String()
 }

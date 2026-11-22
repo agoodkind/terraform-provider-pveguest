@@ -21,14 +21,16 @@ var RuntimeScript string
 
 // Settings declares addresses and per-interface DNS for a stable guest name.
 type Settings struct {
-	Name      string   `json:"name"`
-	MAC       string   `json:"mac"`
-	DHCP4     bool     `json:"dhcp4"`
-	SLAAC     bool     `json:"slaac"`
-	MTU       int64    `json:"mtu"`
-	Addresses []string `json:"addresses"`
-	DNS       []string `json:"dns"`
-	Search    []string `json:"search"`
+	Name                   string   `json:"name"`
+	MAC                    string   `json:"mac"`
+	DHCP4                  bool     `json:"dhcp4"`
+	SLAAC                  bool     `json:"slaac"`
+	MTU                    int64    `json:"mtu"`
+	Addresses              []string `json:"addresses"`
+	DNS                    []string `json:"dns"`
+	Search                 []string `json:"search"`
+	IPv6ProxyNeighbors     []string `json:"ipv6_proxy_neighbors,omitempty"`
+	ObsoleteProxyNeighbors []string `json:"obsolete_proxy_neighbors,omitempty"`
 }
 
 // Edit compares the original contents before replacing or removing a file.
@@ -62,6 +64,13 @@ func (s Settings) Plan(
 	files map[string]string,
 	removing bool,
 ) (map[string]Edit, error) {
+	if len(s.IPv6ProxyNeighbors) > 0 && backend != Ifupdown {
+		return nil, fmt.Errorf(
+			"%w: ipv6_proxy_neighbors requires the ifupdown backend",
+			errNetworkConfig,
+		)
+	}
+
 	switch backend {
 	case Netplan:
 		return s.netplanEdits(files, removing)
