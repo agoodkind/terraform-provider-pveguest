@@ -1,7 +1,7 @@
 use strict;
 use warnings;
 use JSON::PP qw(decode_json encode_json);
-use Socket qw(AF_INET6 inet_ntop);
+use Socket qw(AF_INET6 inet_ntop inet_pton);
 use Time::HiRes qw(stat);
 my ($operation,$backend) = @ARGV;
 my $settings = decode_json(do {local $/; <STDIN>});
@@ -46,23 +46,30 @@ sub link_for_mac {
     return (undef,"MAC $mac belongs to $matches[0]->{ifname}, expected $name") if $matches[0]->{ifname} ne $name;
     return ($matches[0],undef);
 }
+sub proxy_neighbor_key {
+    my ($address) = @_;
+    return inet_pton(AF_INET6,$address) // die "Invalid IPv6 proxy neighbor address $address\n";
+}
 sub proxy_neighbors {
     my $entries = decode_json(capture('ip','-j','-6','neigh','show','proxy','dev',$name));
-    return map { $_->{dst} => 1 } @$entries;
+    return map { proxy_neighbor_key($_->{dst}) => $_->{dst} } @$entries;
 }
 sub unmanaged_proxy_neighbors {
     my @managed = (@{$settings->{ipv6_proxy_neighbors} // []}, @{$settings->{obsolete_proxy_neighbors} // []});
     return () unless @managed;
     my %present = proxy_neighbors();
-    delete @present{@managed};
-    return sort keys %present;
+    delete @present{map { proxy_neighbor_key($_) } @managed};
+    return sort values %present;
 }
 sub restore_proxy_neighbors {
     my (@addresses) = @_;
     return unless @addresses;
+    my (undef,$error) = link_for_mac();
+    die "$error\n" if defined $error;
     my %present = proxy_neighbors();
     for my $address (@addresses) {
-        capture('ip','-6','neigh','replace','proxy',$address,'dev',$name) unless $present{$address};
+        capture('ip','-6','neigh','replace','proxy',$address,'dev',$name)
+            unless exists $present{proxy_neighbor_key($address)};
     }
 }
 sub remove_obsolete_proxy_neighbors {
@@ -74,22 +81,42 @@ sub remove_obsolete_proxy_neighbors {
         unless @links == 1 && $links[0]->{ifname} eq $name;
     my %present = proxy_neighbors();
     for my $address (@$obsolete) {
-        capture('ip','-6','neigh','del','proxy',$address,'dev',$name) if $present{$address};
+        capture('ip','-6','neigh','del','proxy',$address,'dev',$name)
+            if exists $present{proxy_neighbor_key($address)};
     }
 }
 sub check_proxy_neighbors {
     my $wanted = $settings->{ipv6_proxy_neighbors} // [];
     return undef unless @$wanted || @{$settings->{obsolete_proxy_neighbors} // []};
     my %present = proxy_neighbors();
-    my @missing = grep { !$present{$_} } @$wanted;
+    my @missing = grep { !exists $present{proxy_neighbor_key($_)} } @$wanted;
     return "Missing IPv6 proxy neighbors on $name: ".join(', ',@missing) if @missing;
-    my @obsolete = grep { $present{$_} } @{$settings->{obsolete_proxy_neighbors} // []};
+    my @obsolete = grep { exists $present{proxy_neighbor_key($_)} } @{$settings->{obsolete_proxy_neighbors} // []};
     return "Obsolete IPv6 proxy neighbors on $name: ".join(', ',@obsolete) if @obsolete;
     if (@$wanted) {
         my $enabled = capture('sysctl','-n',"net/ipv6/conf/$name/proxy_ndp");
         return "IPv6 proxy NDP is disabled on $name" unless $enabled =~ /^1$/m;
     }
     return undef;
+}
+sub activate_ifupdown {
+    my @unmanaged = unmanaged_proxy_neighbors();
+    open(my $probe,'-|','ifquery','--state',$name) or die "Run ifquery: $!\n";
+    { local $/; <$probe>; }
+    close($probe);
+    my $code=$? >> 8;
+    die "ifquery --state $name failed: $code\n" if $code>1;
+
+    eval {
+        capture('ifdown',$name) if $code==0;
+        capture('ifup',$name);
+    };
+    my $activation_error = $@;
+
+    eval { restore_proxy_neighbors(@unmanaged); };
+    my $restore_error = $@;
+    die "${activation_error}Restore unmanaged IPv6 proxy neighbors on $name: $restore_error" if $restore_error;
+    die $activation_error if $activation_error;
 }
 sub dhcp4_lease {
     my $path = "/var/lib/dhcp/dhclient.$name.leases";
@@ -194,15 +221,7 @@ if ($operation eq 'activate') {
     die "$error\n" if defined $error;
     remove_obsolete_proxy_neighbors();
     if ($backend eq 'ifupdown') {
-        my @unmanaged = unmanaged_proxy_neighbors();
-        open(my $probe,'-|','ifquery','--state',$name) or die "Run ifquery: $!\n";
-        { local $/; <$probe>; }
-        close($probe);
-        my $code=$? >> 8;
-        die "ifquery --state $name failed: $code\n" if $code>1;
-        capture('ifdown',$name) if $code==0;
-        capture('ifup',$name);
-        restore_proxy_neighbors(@unmanaged);
+        activate_ifupdown();
     } else {
         my $info=decode_json(capture('networkctl','status','--json=short',$name));
         die "Restart the guest to load the staged networkd configuration for $name before activation.\n" unless loaded_network($info);

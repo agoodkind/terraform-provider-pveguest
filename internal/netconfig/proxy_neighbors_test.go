@@ -3,7 +3,10 @@ package netconfig_test
 import (
 	"bytes"
 	"encoding/json"
+	"net/netip"
 	"os"
+	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,7 +14,7 @@ import (
 )
 
 const (
-	proxyAddress = "2001:db8:10::92"
+	proxyAddress = "::c000:22a"
 	otherProxy   = "2001:db8:10::93"
 )
 
@@ -126,8 +129,24 @@ func TestLinuxIfupdownProxyNeighbors(t *testing.T) {
 	expectNeighbors := func(wantManaged, wantUnrelated bool) {
 		t.Helper()
 		observed := command(t, nil, "ip", "-j", "-6", "neigh", "show", "proxy", "dev", port)
-		if bytes.Contains(observed, []byte(proxyAddress)) != wantManaged ||
-			bytes.Contains(observed, []byte(otherProxy)) != wantUnrelated {
+
+		type entry struct {
+			Address netip.Addr `json:"dst"`
+		}
+
+		var entries []entry
+		if err := json.Unmarshal(observed, &entries); err != nil {
+			t.Fatal(err)
+		}
+
+		if slices.Contains(
+			entries,
+			entry{Address: netip.MustParseAddr(proxyAddress)},
+		) != wantManaged ||
+			slices.Contains(
+				entries,
+				entry{Address: netip.MustParseAddr(otherProxy)},
+			) != wantUnrelated {
 			t.Fatalf(
 				"expected managed=%t and unrelated=%t, got %s",
 				wantManaged,
@@ -158,6 +177,11 @@ func TestLinuxIfupdownProxyNeighbors(t *testing.T) {
 
 	expectNeighbors(true, true)
 
+	expectIfupFailure(t, settings)
+	expectNeighbors(false, true)
+	runtime("activate")
+	expectNeighbors(true, true)
+
 	settings.IPv6ProxyNeighbors = nil
 	settings.ObsoleteProxyNeighbors = []string{proxyAddress}
 	configure(false)
@@ -179,4 +203,41 @@ func TestLinuxIfupdownProxyNeighbors(t *testing.T) {
 	expectNeighbors(false, true)
 	runtime("remove-proxy-neighbors")
 	expectNeighbors(false, true)
+}
+
+func expectIfupFailure(t *testing.T, settings netconfig.Settings) {
+	t.Helper()
+	filename := "/etc/network/pveguest/" + settings.Name
+	contents, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	restore := func() {
+		t.Helper()
+		if err := os.WriteFile(filename, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer restore()
+
+	broken := string(contents) + "    pre-up /bin/false\n"
+	if err := os.WriteFile(filename, []byte(broken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	process := exec.CommandContext(
+		t.Context(),
+		"perl",
+		"-e",
+		netconfig.RuntimeScript,
+		"--",
+		"activate",
+		"ifupdown",
+	)
+	process.Stdin = bytes.NewReader(jsonBytes(t, settings))
+	output, err := process.CombinedOutput()
+	if err == nil || !bytes.Contains(output, []byte("ifup "+settings.Name+" exited with status")) {
+		t.Fatalf("activation did not preserve the ifup failure: %v\n%s", err, output)
+	}
 }

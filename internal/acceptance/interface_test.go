@@ -17,6 +17,11 @@ func TestAccGuestNetwork(t *testing.T) {
 	name := requireVariable(t, "PVEGUEST_ACC_GUEST_IFNAME")
 	mac := requireVariable(t, "PVEGUEST_ACC_GUEST_MAC")
 	backend := requireVariable(t, "PVEGUEST_ACC_GUEST_BACKEND")
+	proxyNeighbors := "[]"
+	if backend == "ifupdown" {
+		proxyNeighbors = `["2001:0DB8:0010:0000:0000:0000:0000:0092"]`
+	}
+
 	workspace := tofuWorkspace{
 		t:         t,
 		directory: t.TempDir(),
@@ -35,13 +40,16 @@ resource "pveguest_network_interface" "port" {
  dhcp4 = false
  slaac = false
  addresses = ["192.0.2.10/24"]
+ ipv6_proxy_neighbors = %s
  mtu = 1470
 }
 `,
 		name,
 		mac,
 		backend,
+		proxyNeighbors,
 	)
+
 	workspace.writeConfig(fmt.Sprintf(config, "staged"))
 	workspace.mustRun("init", "-no-color")
 	workspace.mustRun("apply", "-auto-approve", "-no-color")
