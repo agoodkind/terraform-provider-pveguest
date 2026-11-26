@@ -103,6 +103,21 @@ func TestBondMigration(t *testing.T) {
 				apply(false)
 				s.Bond = bond
 				apply(false)
+				const clientConfig = "/etc/dhcp/pveguest-65746830.conf"
+				if backend == netconfig.Ifupdown && files[clientConfig] == "" {
+					t.Fatal("missing per-interface DHCP configuration under /etc/dhcp")
+				}
+
+				if backend == netconfig.Ifupdown {
+					const previousConfig = "/etc/network/pveguest-bonds/65746830.conf"
+					files[previousConfig] = files[clientConfig]
+					delete(files, clientConfig)
+					apply(false)
+					if _, exists := files[previousConfig]; exists || files[clientConfig] == "" {
+						t.Fatal("failed to migrate the per-interface DHCP configuration")
+					}
+				}
+
 				if !strings.Contains(files[source], "other0") {
 					t.Fatal("unrelated interface removed")
 				}
@@ -121,6 +136,10 @@ func TestBondMigration(t *testing.T) {
 				}
 
 				apply(true)
+				if _, exists := files[clientConfig]; exists {
+					t.Fatal("DHCP configuration remains after removal")
+				}
+
 				if changed := apply(true); len(changed) > 0 {
 					t.Fatalf("repeated removal: %v", changed)
 				}

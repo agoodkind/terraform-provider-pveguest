@@ -15,6 +15,10 @@ func (s Settings) bondPath() string {
 	return "/etc/network/pveguest-bonds/" + hex.EncodeToString([]byte(s.Name))
 }
 
+func (s Settings) dhclientConfigPath() string {
+	return "/etc/dhcp/pveguest-" + hex.EncodeToString([]byte(s.Name)) + ".conf"
+}
+
 func (s Settings) ifupdownBondFiles(
 	changes map[string]Edit,
 	files map[string]string,
@@ -26,7 +30,8 @@ func (s Settings) ifupdownBondFiles(
 		absent     bool
 	}{
 		{s.bondPath() + ".pl", ifupdownBondScript, removing || s.Bond == nil},
-		{s.bondPath() + ".conf", config, removing || s.Bond == nil || !s.DHCP4},
+		{s.dhclientConfigPath(), config, removing || s.Bond == nil || !s.DHCP4},
+		{s.bondPath() + ".conf", "", true},
 	} {
 		if err := ownedNetworkFile(changes, files, file.name, file.body, file.absent); err != nil {
 			return err
@@ -83,8 +88,8 @@ func (s Settings) ifupdownBondSetup(out *strings.Builder) {
 
 func (s Settings) ifupdownBondDHCP(out *strings.Builder) {
 	args := fmt.Sprintf(
-		"-4 -cf %s.conf -pf /run/dhclient.%s.pid -lf /var/lib/dhcp/dhclient.%s.leases %s",
-		s.bondPath(),
+		"-4 -cf %s -pf /run/dhclient.%s.pid -lf /var/lib/dhcp/dhclient.%s.leases %s",
+		s.dhclientConfigPath(),
 		s.Name,
 		s.Name,
 		s.Name,

@@ -51,7 +51,7 @@ func (s Settings) ifupdownEdits(files map[string]string, removing bool) (map[str
 	}
 
 	for filename, original := range files {
-		if filename == owner || filename == hook ||
+		if filename == owner || filename == hook || filename == s.dhclientConfigPath() ||
 			strings.HasPrefix(filename, "/etc/network/pveguest-bonds/") ||
 			strings.HasPrefix(filename, "/etc/systemd/network/") {
 			continue

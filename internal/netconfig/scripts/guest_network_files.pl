@@ -13,6 +13,7 @@ my $main = '/etc/network/interfaces';
 my $owner = "/etc/network/pveguest/$name";
 my $managed = "/etc/netplan/90-pveguest-$name.yaml";
 my $unit_base = "/etc/systemd/network/05-pveguest-$name";
+my $bond_dhcp = '/etc/dhcp/pveguest-' . unpack('H*', $name) . '.conf';
 my $bond_base = '/etc/network/pveguest-bonds/' . unpack('H*', $name);
 my $member_base = '/etc/systemd/network/05-pveguest-member-' . unpack('H*', $name) . '-';
 my $netdev = "/etc/systemd/network/10-netplan-$name.netdev";
@@ -73,7 +74,9 @@ sub scan {
         read_interfaces($main);
         $files{$dhclient_hook} = read_file($dhclient_hook) if -f $dhclient_hook;
         $files{$owner} = read_file($owner) if -e $owner;
-        for my $path ("$bond_base.pl", "$bond_base.conf", bsd_glob("$member_base*.link")) {
+        for my $path (
+            "$bond_base.pl", "$bond_base.conf", $bond_dhcp, bsd_glob("$member_base*.link"),
+        ) {
             $files{$path} = read_file($path) if -f $path;
         }
     } else {
@@ -203,8 +206,7 @@ if ($backend eq 'netplan') {
 }
 my $edits = decode_json(do { local $/; <STDIN> });
 for my $path (keys %$edits) {
-    my $bond_file =
-        $backend eq 'ifupdown' && ($path eq "$bond_base.pl" || $path eq "$bond_base.conf");
+    my $bond_file = $backend eq 'ifupdown' && ($path eq "$bond_base.pl" || $path eq $bond_dhcp);
     my $bond_unit = $backend eq 'netplan'
         && ($path eq $netdev || $path =~ /^\Q$member_base\E[0-9a-f]+\.network$/);
     $bond_unit = 1 if $backend ne 'networkd' && $path =~ /^\Q$member_base\E[0-9a-f]+\.link$/;
