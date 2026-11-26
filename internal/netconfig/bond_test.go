@@ -218,6 +218,7 @@ func TestLinuxBond(t *testing.T) {
 	}
 
 	s := bondSettings()
+	s.MAC = "02:00:00:00:00:ab"
 
 	for _, backend := range []netconfig.Backend{netconfig.Ifupdown, netconfig.Netplan} {
 		t.Run(
@@ -284,9 +285,9 @@ func exerciseBondFailover(t *testing.T, s netconfig.Settings, backend netconfig.
 	}
 
 	t.Cleanup(func() { command(t, nil, "ip", "link", "del", s.Name) })
-	waitReady := func(active string) {
+	waitReady := func(active, slaac string) {
 		t.Helper()
-		var status []byte
+		var status, addresses []byte
 
 		for range 40 {
 			status = command(
@@ -299,7 +300,9 @@ func exerciseBondFailover(t *testing.T, s netconfig.Settings, backend netconfig.
 				"status",
 				string(backend),
 			)
-			if bytes.Contains(status, []byte(`"ready":true`)) {
+			addresses = command(t, nil, "ip", "-j", "addr", "show", s.Name)
+			if bytes.Contains(status, []byte(`"ready":true`)) &&
+				bytes.Contains(addresses, []byte(slaac)) {
 				break
 			}
 
@@ -315,16 +318,25 @@ func exerciseBondFailover(t *testing.T, s netconfig.Settings, backend netconfig.
 			t.Fatalf("unexpected active member: %s", state)
 		}
 
-		addrs := command(t, nil, "ip", "-j", "addr", "show", s.Name)
-		if !bytes.Contains(addrs, []byte("fd99:1234::ff:fe00:1")) {
-			t.Fatalf("missing stable SLAAC address: %s", addrs)
+		if !bytes.Contains(addresses, []byte(slaac)) {
+			t.Fatalf("missing SLAAC address %s: %s", slaac, addresses)
 		}
 	}
-	waitReady("vf0")
+	waitReady("vf0", "fd99:1234::ff:fe00:ab")
+	expectedID := "01:" + s.MAC
+	if backend == netconfig.Netplan {
+		expectedID = "ff:00:00:00:ab:00:03:00:01:" + s.MAC
+	}
+
 	identity := leaseIdentity(t, leaseFile, s.Bond.Members[1].MAC)
+	if identity != expectedID {
+		t.Fatalf("primary DHCP client identifier = %q, want %q", identity, expectedID)
+	}
+
 	command(t, nil, "ip", "-n", ns, "link", "set", "peervf0", "down")
 	time.Sleep(time.Second)
-	waitReady("vf1")
+	command(t, nil, "ip", "-n", ns, "addr", "add", "fd99:5678::1/64", "dev", "accrouter", "nodad")
+	waitReady("vf1", "fd99:5678::ff:fe00:ab")
 	if backend == netconfig.Netplan {
 		command(t, nil, "networkctl", "renew", s.Name)
 	} else {
@@ -351,13 +363,13 @@ func exerciseBondFailover(t *testing.T, s netconfig.Settings, backend netconfig.
 		time.Sleep(time.Second)
 	}
 
-	if identity == "" || renewed != identity {
+	if renewed != expectedID {
 		t.Fatalf("DHCP client identity before and after failover: %q %q", identity, renewed)
 	}
 
 	command(t, nil, "ip", "-n", ns, "link", "set", "peervf0", "up")
 	time.Sleep(time.Second)
-	waitReady("vf1")
+	waitReady("vf1", "fd99:5678::ff:fe00:ab")
 	if backend == netconfig.Ifupdown {
 		command(t, nil, "ifdown", s.Name)
 	}
@@ -378,4 +390,35 @@ func leaseIdentity(t *testing.T, leaseFile, mac string) string {
 	}
 
 	return ""
+}
+
+func TestLinuxBondProxyRemoval(t *testing.T) {
+	if os.Getenv("PVEGUEST_ACC_DISPOSABLE_BOND") != "1" {
+		t.Skip("requires a disposable Linux network namespace")
+	}
+
+	settings := bondSettings()
+	const owned = "2001:db8::50"
+	settings.ObsoleteProxyNeighbors = []string{owned}
+	command(t, nil, "ip", "link", "add", settings.Name, "type", "bond", "mode", "active-backup")
+	t.Cleanup(func() { command(t, nil, "ip", "link", "delete", settings.Name) })
+
+	for _, address := range []string{owned, otherProxy} {
+		command(t, nil, "ip", "-6", "neigh", "add", "proxy", address, "dev", settings.Name)
+	}
+
+	command(
+		t,
+		jsonBytes(t, settings),
+		"perl",
+		"-e",
+		netconfig.RuntimeScript,
+		"--",
+		"remove-proxy-neighbors",
+		"ifupdown",
+	)
+	remaining := command(t, nil, "ip", "-j", "-6", "neigh", "show", "proxy", "dev", settings.Name)
+	if bytes.Contains(remaining, []byte(owned)) || !bytes.Contains(remaining, []byte(otherProxy)) {
+		t.Fatalf("unexpected proxy neighbors on inactive bond: %s", remaining)
+	}
 }

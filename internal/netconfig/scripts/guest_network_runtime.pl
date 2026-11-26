@@ -133,11 +133,10 @@ sub remove_obsolete_proxy_neighbors {
         my $links = decode_json(capture('ip', '-j', '-d', 'link', 'show'));
         my ($named) = grep { $_->{ifname} eq $name } @$links;
         return unless $named;
-        # A staged migration can still have the original Ethernet interface.
-        if (($named->{linkinfo}->{info_kind} // '') eq 'bond' || $named->{address} ne $mac) {
-            my (undef, $error) = bond_link($links);
-            die "$error\n" if defined $error;
-        }
+        # Removal uses the logical bond name even before a staged member change takes effect.
+        # Before the first restart the same name can still identify the original Ethernet MAC.
+        die "Expected bond $name or original Ethernet MAC $mac before removing proxy neighbors\n"
+            unless ($named->{linkinfo}->{info_kind} // '') eq 'bond' || $named->{address} eq $mac;
     } else {
         my @links = links_for_mac();
         return unless @links;
