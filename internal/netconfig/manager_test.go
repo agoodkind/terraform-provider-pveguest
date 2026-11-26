@@ -116,6 +116,27 @@ func TestNetplanAdoption(t *testing.T) {
 	}
 }
 
+func TestNetplanExistingEthernet(t *testing.T) {
+	const path = "/etc/netplan/90-pveguest-eth0.yaml"
+	original, err := os.ReadFile("testdata/ethernet.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settings := netconfig.Settings{Name: "eth0", MAC: "02:00:00:00:00:01", DHCP4: true}
+	files := map[string]string{path: string(original)}
+	edits, err := settings.Plan(netconfig.Netplan, files, false)
+	if err != nil || len(edits) != 0 {
+		t.Fatalf("existing Ethernet configuration requires edits: %v, %v", edits, err)
+	}
+
+	settings.SLAAC = true
+	edits, err = settings.Plan(netconfig.Netplan, files, false)
+	if err != nil || edits[path].After == nil {
+		t.Fatalf("missing Ethernet router advertisement update: %v, %v", edits, err)
+	}
+}
+
 func TestNetplanLogicalID(t *testing.T) {
 	const owner = "/etc/netplan/50-port.yaml"
 	const unrelated = "network:\n  version: 2\n  ethernets:\n    eth0:\n      match: {macaddress: '02:00:00:00:00:02'}\n      set-name: lan0\n      addresses: [192.0.2.9/24]\n"
