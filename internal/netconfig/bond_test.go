@@ -2,7 +2,6 @@ package netconfig_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -161,40 +160,14 @@ func guestBondEdits(
 	remove bool,
 ) map[string]netconfig.Edit {
 	t.Helper()
-	argv := []string{"-e", netconfig.FileScript, "--", string(backend), "read", s.Name, s.MAC}
-	var files map[string]string
-	if err := json.Unmarshal(command(t, nil, "perl", argv...), &files); err != nil {
-		t.Fatal(err)
-	}
+	read := func(args []string, input []byte) ([]byte, error) {
+		argv := append([]string{"-e", netconfig.FileScript, "--"}, args...)
 
-	edits, err := s.Plan(backend, files, remove)
+		return command(t, input, "perl", argv...), nil
+	}
+	edits, err := s.GuestEdits(t.Context(), backend, remove, read)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if backend == netconfig.Netplan {
-		argv[4] = "render"
-		if remove {
-			argv[4] = "unrender"
-		}
-
-		if s.Bond != nil {
-			for _, member := range s.Bond.Members {
-				argv = append(argv, member.Name, member.MAC)
-			}
-		}
-
-		var overrides map[string]netconfig.Edit
-		if err := json.Unmarshal(
-			command(t, jsonBytes(t, edits), "perl", argv...),
-			&overrides,
-		); err != nil {
-			t.Fatal(err)
-		}
-
-		for path, edit := range overrides {
-			edits[path] = edit
-		}
 	}
 
 	return edits

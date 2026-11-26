@@ -160,10 +160,10 @@ sub generated_edits {
     }
     for my $suffix (qw(link network)) {
         my $path = "$unit_base.$suffix";
-        my $before = -f $path ? read_file($path) : undef;
-        my $header = "# Managed by pveguest_network_interface\n";
-        die "Conflicting networkd unit $path\n" if defined $before && index($before, $header) != 0;
-        if ($remove) { $edits{$path} = { before => $before } if defined $before; next; }
+        if ($remove) {
+            planned_unit(\%edits, $path, undef);
+            next;
+        }
         my @matches;
         for my $file (bsd_glob("$root/run/systemd/network/*.$suffix")) {
             my $content = read_file($file);
@@ -176,9 +176,7 @@ sub generated_edits {
             unless @matches == 1;
         my $selected = $matches[0];
         $selected =~ s/^PermanentMACAddress=\Q$mac\E$/MACAddress=$mac/mi;
-        my $after = $header . $selected;
-        $edits{$path} = { before => $before, after => $after }
-            if !defined($before) || $before ne $after;
+        planned_unit(\%edits, $path, $selected);
     }
     return \%edits;
 }

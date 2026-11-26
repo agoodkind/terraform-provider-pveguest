@@ -437,69 +437,18 @@ func (s guestNetworkSession) edits(
 	ctx context.Context,
 	removing bool,
 ) (map[string]netconfig.Edit, error) {
-	raw, err := s.helper(
-		ctx,
-		netconfig.FileScript,
-		[]string{s.backend, "read", s.settings.Name},
-		nil,
-		true,
-	)
+	read := func(args []string, body []byte) ([]byte, error) {
+		return s.helper(ctx, netconfig.FileScript, args, body, true)
+	}
+
+	edits, err := s.settings.GuestEdits(ctx, netconfig.Backend(s.backend), removing, read)
 	if err != nil {
-		return nil, err
+		slog.ErrorContext(ctx, "plan guest interface edits", "guest", s.guest, "err", err)
+
+		return nil, fmt.Errorf("plan interface %s on %s: %w", s.settings.Name, s.guest, err)
 	}
 
-	var files map[string]string
-	if err := json.Unmarshal(raw, &files); err != nil {
-		slog.ErrorContext(ctx, "parse guest network configuration", "err", err)
-
-		return nil, fmt.Errorf("read guest network files: %w", err)
-	}
-
-	changes, err := s.settings.Plan(netconfig.Backend(s.backend), files, removing)
-	if err != nil {
-		slog.ErrorContext(ctx, "plan guest network settings", "err", err)
-
-		return nil, fmt.Errorf("plan %s: %w", s.backend, err)
-	}
-
-	if s.backend != string(netconfig.Netplan) {
-		return changes, nil
-	}
-
-	body, err := json.Marshal(changes)
-	if err != nil {
-		slog.ErrorContext(ctx, "encode netplan sources", "err", err)
-
-		return nil, fmt.Errorf("encode netplan sources: %w", err)
-	}
-
-	action := "render"
-	if removing {
-		action = "unrender"
-	}
-
-	args := []string{s.backend, action, s.settings.Name, s.settings.MAC}
-	if s.settings.Bond != nil {
-		for _, member := range s.settings.Bond.Members {
-			args = append(args, member.Name, member.MAC)
-		}
-	}
-
-	rendered, err := s.helper(ctx, netconfig.FileScript, args, body, true)
-	if err != nil {
-		return nil, err
-	}
-
-	var overrides map[string]netconfig.Edit
-	if err := json.Unmarshal(rendered, &overrides); err != nil {
-		slog.ErrorContext(ctx, "decode generated networkd units", "err", err)
-
-		return nil, fmt.Errorf("decode generated networkd units: %w", err)
-	}
-
-	maps.Copy(changes, overrides)
-
-	return changes, nil
+	return edits, nil
 }
 
 func (s guestNetworkSession) reconcile(
