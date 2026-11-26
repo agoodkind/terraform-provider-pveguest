@@ -33,6 +33,7 @@ type guestNetworkModel struct {
 	Kind           types.String `tfsdk:"kind"`
 	Name           types.String `tfsdk:"name"`
 	MAC            types.String `tfsdk:"mac"`
+	Bond           types.Object `tfsdk:"bond"`
 	Backend        types.String `tfsdk:"backend"`
 	Phase          types.String `tfsdk:"phase"`
 	DHCP4          types.Bool   `tfsdk:"dhcp4"`
@@ -72,6 +73,7 @@ func (r *guestNetworkResource) Schema(
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			networkNameField: interfaceNameAttribute(),
 			networkMACField:  schema.StringAttribute{Required: true},
+			"bond":           bondAttribute(),
 			"backend": schema.StringAttribute{
 				Required: true,
 				Validators: []validator.String{
@@ -130,6 +132,7 @@ func (r *guestNetworkResource) ValidateConfig(
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if !resp.Diagnostics.HasError() {
 		config.proxyNeighbors(&resp.Diagnostics)
+		config.bondSettings(ctx, &resp.Diagnostics)
 	}
 }
 
@@ -203,6 +206,7 @@ func (m guestNetworkModel) settings(
 	settings := netconfig.Settings{
 		Name:               m.Name.ValueString(),
 		MAC:                m.MAC.ValueString(),
+		Bond:               m.bondSettings(ctx, diags),
 		DHCP4:              m.DHCP4.ValueBool(),
 		SLAAC:              m.SLAAC.ValueBool(),
 		MTU:                m.MTU.ValueInt64(),
@@ -211,6 +215,14 @@ func (m guestNetworkModel) settings(
 		Addresses:          []string{},
 		IPv6ProxyNeighbors: m.proxyNeighbors(diags),
 	}
+	if !m.Bond.IsNull() && settings.Bond == nil && !diags.HasError() {
+		diags.AddAttributeError(
+			path.Root("bond"),
+			"Unknown guest bond",
+			"Resolve all bond options and member identities before configuring the guest.",
+		)
+	}
+
 	if !m.Addresses.IsNull() {
 		var d diag.Diagnostics
 		settings.Addresses, d = stringValues(ctx, m.Addresses)
@@ -466,13 +478,14 @@ func (s guestNetworkSession) edits(
 		action = "unrender"
 	}
 
-	rendered, err := s.helper(
-		ctx,
-		netconfig.FileScript,
-		[]string{s.backend, action, s.settings.Name, s.settings.MAC},
-		body,
-		true,
-	)
+	args := []string{s.backend, action, s.settings.Name, s.settings.MAC}
+	if s.settings.Bond != nil {
+		for _, member := range s.settings.Bond.Members {
+			args = append(args, member.Name, member.MAC)
+		}
+	}
+
+	rendered, err := s.helper(ctx, netconfig.FileScript, args, body, true)
 	if err != nil {
 		return nil, err
 	}

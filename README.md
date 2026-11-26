@@ -659,6 +659,34 @@ resource "pveguest_network_interface" "guest" {
 
 For ifupdown, `ipv6_proxy_neighbors` accepts a set of exact IPv6 unicast addresses. The managed interface enables IPv6 proxy neighbor discovery and restores those entries at startup. Active applies check for missing entries and remove entries that the resource previously declared. Destroy removes the entries that the resource owns.
 
+Netplan and ifupdown support an optional active-backup bond. Add the following
+attribute to the interface resource. Set `primary` to a member name and
+`miimon` to the link monitoring interval in milliseconds. Set
+`fail_over_mac = "active"` to retain each member's assigned MAC. Choose
+`primary_reselect` from `always`, `better`, or `failure`. With `failure`,
+the secondary stays active when the primary recovers.
+
+```hcl
+bond = {
+  members = [
+    { name = "vf0", mac = "02:00:00:00:01:01" },
+    { name = "vf1", mac = "02:00:00:00:02:01" },
+  ]
+  primary          = "vf0"
+  miimon           = 100
+  fail_over_mac    = "active"
+  primary_reselect = "failure"
+}
+```
+
+The bond uses the outer interface name for addresses, routes, and proxy
+neighbors. The outer MAC determines the DHCP client identifier and the SLAAC
+interface identifier. The bond uses the active member's MAC on the wire.
+Stage changes to the bond topology before restarting the guest. For LXC
+physical interfaces, assign each configured member name when the container
+starts. The host kernel must support bonding. The ifupdown helper uses
+iproute2 to configure the bond without writing to sysfs.
+
 Apply `phase = "staged"` before replacing the guest device. The resource reads and updates persistent configuration without requiring the new device to exist. It removes the adopted interface's old static addressing and default gateways. Netplan preserves unrelated definitions and nondefault routes. Networkd and ifupdown reject unfamiliar directives on the adopted interface when they cannot preserve them. Remove old guest device and cloud-init gateway declarations from the hypervisor configuration during migration. The ifupdown backend retains a per-interface source directive. The networkd backends install persistent MAC-matched link and network units that sort before regenerated netplan or Proxmox units. Netplan treats an explicitly matched definition ID as a label and refuses to replace an ID that already selects another device.
 
 Restart the guest after staging networkd or netplan changes. Apply `phase = "active"` after startup. Networkd must select the managed unit and start after the last change to its persistent link or network file. An active update that changes either file requires another controlled restart. Activation reconfigures only the selected interface. The resource verifies the interface name and MAC before asking the selected manager to configure it. It checks the live addresses, MTU, automatic addressing and default routes. Read compares generated persistent configuration in both phases and live state in the active phase. A mismatch sets `reconciled` to false and schedules another apply. Destroy removes owned persistent definitions. A reboot or a separate manager action determines when the live link stops using those settings.

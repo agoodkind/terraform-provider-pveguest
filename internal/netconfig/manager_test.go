@@ -506,11 +506,12 @@ func routerPeer(t *testing.T, port string) {
 	)
 }
 
-func startRouter(t *testing.T) {
+func startRouter(t *testing.T) string {
 	t.Helper()
 	const namespace = "pveguest-router"
 	const peer = "accrouter"
 	pidFile := filepath.Join(t.TempDir(), "dnsmasq.pid")
+	leaseFile := filepath.Join(t.TempDir(), "leases")
 	command(
 		t,
 		nil,
@@ -529,7 +530,7 @@ func startRouter(t *testing.T) {
 		"--dhcp-range=198.51.100.100,198.51.100.150,255.255.255.0,10m",
 		"--dhcp-range=::,constructor:"+peer+",ra-only,64,10m",
 		"--ra-param="+peer+",5,90",
-		"--dhcp-leasefile="+filepath.Join(t.TempDir(), "leases"),
+		"--dhcp-leasefile="+leaseFile,
 		"--pid-file="+pidFile,
 	)
 	pidText, err := os.ReadFile(pidFile)
@@ -547,4 +548,6 @@ func startRouter(t *testing.T) {
 			t.Error(err)
 		}
 	})
+
+	return leaseFile
 }

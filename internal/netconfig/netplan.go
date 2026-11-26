@@ -18,6 +18,20 @@ const (
 	netplanVersion  = 2
 )
 
+var ownedNetplanOptions = []string{
+	"addresses",
+	"gateway4",
+	"gateway6",
+	"dhcp4",
+	"dhcp6",
+	"accept-ra",
+	"match",
+	"set-name",
+	"mtu",
+	"nameservers",
+	"renderer",
+}
+
 func yamlField(mapping *yaml.Node, key string) *yaml.Node {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
 		return nil
@@ -230,12 +244,21 @@ func (s Settings) netplanEdits(
 	files map[string]string,
 	removing bool,
 ) (map[string]Edit, error) {
-	docs, definitionID, err := netplanDocuments(files, s)
+	if s.Bond != nil {
+		return s.netplanBondEdits(files, removing)
+	}
+
+	managed := path.Join("/etc/netplan", "90-pveguest-"+s.Name+".yaml")
+	sources, err := netplanEthernetSources(files, managed, s.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	managed := path.Join("/etc/netplan", "90-pveguest-"+s.Name+".yaml")
+	docs, definitionID, err := netplanDocuments(sources, s)
+	if err != nil {
+		return nil, err
+	}
+
 	updates := map[string]Edit{}
 	// Keep unrelated route and link options in their original definition. Both
 	// source files use the same ID, which netplan merges before generating units.
@@ -252,19 +275,7 @@ func (s Settings) netplanEdits(
 
 		changed := false
 
-		for _, key := range []string{
-			"addresses",
-			"gateway4",
-			"gateway6",
-			"dhcp4",
-			"dhcp6",
-			"accept-ra",
-			"match",
-			"set-name",
-			"mtu",
-			"nameservers",
-			"renderer",
-		} {
+		for _, key := range ownedNetplanOptions {
 			if removeYAMLField(target, key) {
 				changed = true
 			}
