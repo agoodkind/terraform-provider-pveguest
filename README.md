@@ -659,8 +659,8 @@ resource "pveguest_network_interface" "guest" {
 
 For ifupdown, `ipv6_proxy_neighbors` accepts a set of exact IPv6 unicast addresses. The managed interface enables IPv6 proxy neighbor discovery and restores those entries at startup. Active applies check for missing entries and remove entries that the resource previously declared. Destroy removes the entries that the resource owns.
 
-Netplan and ifupdown support an optional active-backup bond. Add the following
-attribute to the interface resource. Set `primary` to a member name and
+Netplan and ifupdown support an optional active-backup bond.
+Set `primary` to a member name and
 `miimon` to the link monitoring interval in milliseconds. Set
 `fail_over_mac = "active"` to retain each member's assigned MAC. Choose
 `primary_reselect` from `always`, `better`, or `failure`. With `failure`,
