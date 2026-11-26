@@ -2,9 +2,12 @@ package netconfig_test
 
 import (
 	"bytes"
+	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,7 +87,15 @@ func exerciseBondFailover(t *testing.T, s netconfig.Settings, backend netconfig.
 		command(t, nil, "systemctl", "enable", "systemd-networkd")
 		command(t, nil, "systemctl", "restart", "systemd-networkd")
 	} else {
-		command(t, nil, "ifup", s.Name)
+		command(
+			t,
+			nil,
+			"sysctl",
+			"-qw",
+			"net.ipv6.conf.all.forwarding=1",
+			"net.ipv6.conf.default.accept_ra=2",
+		)
+		ifupWithPendingDHCP(t, s.Name, leaseFile)
 	}
 
 	t.Cleanup(func() { command(t, nil, "ip", "link", "del", s.Name) })
@@ -186,6 +197,93 @@ func exerciseBondFailover(t *testing.T, s netconfig.Settings, backend netconfig.
 	if backend == netconfig.Ifupdown {
 		command(t, nil, "ifdown", s.Name)
 	}
+}
+
+//go:embed testdata/dhclient_startup.sh
+var dhclientStartupHook string
+
+// Hold the real DHCP client's PREINIT hook until the bond forms its first SLAAC address.
+func ifupWithPendingDHCP(t *testing.T, name, leaseFile string) {
+	t.Helper()
+	fifo := filepath.Join(t.TempDir(), "resume")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	gate, err := os.OpenFile(fifo, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := gate.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	const hook = "/etc/dhcp/dhclient-enter-hooks.d/pveguest-test-startup"
+	if err := os.WriteFile(
+		hook,
+		[]byte(fmt.Sprintf(dhclientStartupHook, fifo)),
+		0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := os.Remove(hook); err != nil {
+			t.Error(err)
+		}
+	}()
+	events := watchBondEvents(t, leaseFile, netconfig.Ifupdown)
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	ifup := exec.CommandContext(ctx, "ifup", name)
+	var output bytes.Buffer
+	ifup.Stdout = &output
+	ifup.Stderr = &output
+	if err := ifup.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if _, err := gate.WriteString("resume\n"); err != nil {
+			t.Error(err)
+		}
+
+		if err := ifup.Wait(); err != nil {
+			t.Errorf("ifup: %v: %s", err, &output)
+		}
+	}()
+	waitForBondEvent(
+		t,
+		events,
+		func() string {
+			output := command(
+				t,
+				nil,
+				"ip",
+				"-o",
+				"-6",
+				"addr",
+				"show",
+				"to",
+				"fd99:1234::/64",
+				"-tentative",
+			)
+			addresses := strings.TrimSpace(string(output))
+			if addresses == "" {
+				return "waiting for the first global SLAAC address before DHCP"
+			}
+
+			fields := strings.Fields(addresses)
+			if strings.Contains(addresses, "\n") || len(fields) < 4 || fields[1] != name ||
+				fields[3] != "fd99:1234::ff:fe00:ab/64" {
+				t.Fatalf("unexpected SLAAC addresses before DHCP: %s", addresses)
+			}
+
+			return ""
+		},
+	)
 }
 
 func leaseIdentity(t *testing.T, leaseFile, mac string) string {

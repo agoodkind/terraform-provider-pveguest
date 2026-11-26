@@ -199,6 +199,7 @@ func (s Settings) ifupdownStanza() string {
 	fmt.Fprintf(&out, "iface %s inet %s\n", s.Name, method)
 	if s.Bond != nil {
 		s.ifupdownBondSetup(&out)
+		s.ifupdownIPv6(&out)
 	} else {
 		fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
 	}
@@ -226,22 +227,31 @@ func (s Settings) ifupdownStanza() string {
 		fmt.Fprintf(&out, "    up ip address replace %s dev %s\n", address, s.Name)
 	}
 
+	if s.Bond == nil {
+		fmt.Fprintf(&out, "iface %s inet6 manual\n", s.Name)
+		fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
+		s.ifupdownIPv6(&out)
+	}
+
+	for _, address := range s.IPv6ProxyNeighbors {
+		fmt.Fprintf(&out, "    up ip -6 neigh replace proxy %s dev %s\n", address, s.Name)
+	}
+
 	if s.Bond != nil && s.DHCP4 {
 		s.ifupdownBondDHCP(&out)
 	}
 
-	fmt.Fprintf(&out, "iface %s inet6 manual\n", s.Name)
-	if s.Bond == nil {
-		fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
-	}
+	return out.String()
+}
 
+func (s Settings) ifupdownIPv6(out *strings.Builder) {
 	acceptRA, autoconf := 0, 0
 	if s.SLAAC {
 		acceptRA, autoconf = 2, 1
 	}
 
 	fmt.Fprintf(
-		&out,
+		out,
 		"    pre-up sysctl -qw net/ipv6/conf/%s/accept_ra=%d net/ipv6/conf/%s/autoconf=%d\n",
 		s.Name,
 		acceptRA,
@@ -250,17 +260,11 @@ func (s Settings) ifupdownStanza() string {
 	)
 
 	if len(s.IPv6ProxyNeighbors) > 0 {
-		fmt.Fprintf(&out, "    pre-up sysctl -qw net/ipv6/conf/%s/proxy_ndp=1\n", s.Name)
+		fmt.Fprintf(out, "    pre-up sysctl -qw net/ipv6/conf/%s/proxy_ndp=1\n", s.Name)
 	}
 
 	if s.SLAAC && s.Bond != nil {
 		token, _ := slaacToken(s.MAC) // Plan validated the outer MAC.
-		fmt.Fprintf(&out, "    pre-up ip token set %s dev %s\n", token, s.Name)
+		fmt.Fprintf(out, "    pre-up ip token set %s dev %s\n", token, s.Name)
 	}
-
-	for _, address := range s.IPv6ProxyNeighbors {
-		fmt.Fprintf(&out, "    up ip -6 neigh replace proxy %s dev %s\n", address, s.Name)
-	}
-
-	return out.String()
 }
