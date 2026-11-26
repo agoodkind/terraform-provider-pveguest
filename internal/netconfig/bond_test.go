@@ -108,16 +108,6 @@ func TestBondMigration(t *testing.T) {
 					t.Fatal("missing per-interface DHCP configuration under /etc/dhcp")
 				}
 
-				if backend == netconfig.Ifupdown {
-					const previousConfig = "/etc/network/pveguest-bonds/65746830.conf"
-					files[previousConfig] = files[clientConfig]
-					delete(files, clientConfig)
-					apply(false)
-					if _, exists := files[previousConfig]; exists || files[clientConfig] == "" {
-						t.Fatal("failed to migrate the per-interface DHCP configuration")
-					}
-				}
-
 				if !strings.Contains(files[source], "other0") {
 					t.Fatal("unrelated interface removed")
 				}

@@ -31,7 +31,6 @@ func (s Settings) ifupdownBondFiles(
 	}{
 		{s.bondPath() + ".pl", ifupdownBondScript, removing || s.Bond == nil},
 		{s.dhclientConfigPath(), config, removing || s.Bond == nil || !s.DHCP4},
-		{s.bondPath() + ".conf", "", true},
 	} {
 		if err := ownedNetworkFile(changes, files, file.name, file.body, file.absent); err != nil {
 			return err

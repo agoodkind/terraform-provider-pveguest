@@ -74,9 +74,7 @@ sub scan {
         read_interfaces($main);
         $files{$dhclient_hook} = read_file($dhclient_hook) if -f $dhclient_hook;
         $files{$owner} = read_file($owner) if -e $owner;
-        for my $path (
-            "$bond_base.pl", "$bond_base.conf", $bond_dhcp, bsd_glob("$member_base*.link"),
-        ) {
+        for my $path ("$bond_base.pl", $bond_dhcp, bsd_glob("$member_base*.link")) {
             $files{$path} = read_file($path) if -f $path;
         }
     } else {
