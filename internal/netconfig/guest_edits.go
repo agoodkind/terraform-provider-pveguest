@@ -12,7 +12,13 @@ import (
 //
 // The read callback runs FileScript in the guest without changing its files.
 //
-//	changes, err := settings.GuestEdits(ctx, Netplan, false, read)
+// For example, a VM with two VFs can prefer the second port at startup.
+// Its Netplan bond parameters change from primary: vf0 to this setting.
+//
+//	primary: vf1
+//
+// GuestEdits returns the YAML edit and the matching networkd edits.
+// Comparing the files does not switch the active port.
 func (s Settings) GuestEdits(
 	ctx context.Context,
 	backend Backend,

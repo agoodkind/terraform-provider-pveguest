@@ -45,9 +45,13 @@ func ethernetMAC(value string) (net.HardwareAddr, error) {
 
 // Validate checks the bond options and identifies ambiguous member assignments.
 //
-// The guest can stage declarations before all physical members exist.
+// A guest can stage the bond before either port is attached. For example,
+// these two assignments would identify both ports by the same MAC.
 //
-//	err := bond.Validate("eth0")
+//	vf0 = 02:00:00:00:00:01
+//	vf1 = 02:00:00:00:00:01
+//
+// Validate rejects the duplicate before the guest changes its network.
 func (b Bond) Validate(name string) error {
 	if len(b.Members) < 2 || b.MIIMon <= 0 || b.MIIMon > math.MaxInt32 ||
 		b.FailOverMAC != "active" ||

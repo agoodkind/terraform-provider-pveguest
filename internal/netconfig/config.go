@@ -59,7 +59,10 @@ var errNetworkConfig = errors.New("invalid guest network configuration")
 // Only files that require a change appear in the result. An absent After
 // value requests removal. The writer compares Before before changing a file.
 //
-//	changes, err := settings.Plan(Netplan, files, false)
+// For example, a Debian container may lack the include for eth0. Plan
+// then returns an edit to /etc/network/interfaces that adds this line.
+//
+//	source /etc/network/pveguest/eth0
 func (s Settings) Plan(
 	backend Backend,
 	files map[string]string,
