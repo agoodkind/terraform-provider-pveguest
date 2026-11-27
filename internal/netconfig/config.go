@@ -23,6 +23,7 @@ var RuntimeScript string
 type Settings struct {
 	Name                   string   `json:"name"`
 	MAC                    string   `json:"mac"`
+	Bond                   *Bond    `json:"bond,omitempty"`
 	DHCP4                  bool     `json:"dhcp4"`
 	SLAAC                  bool     `json:"slaac"`
 	MTU                    int64    `json:"mtu"`
@@ -58,12 +59,29 @@ var errNetworkConfig = errors.New("invalid guest network configuration")
 // Only files that require a change appear in the result. An absent After
 // value requests removal. The writer compares Before before changing a file.
 //
-//	changes, err := settings.Plan(Netplan, files, false)
+// For example, a Debian container may lack the include for eth0. Plan
+// then returns an edit to /etc/network/interfaces that adds this line.
+//
+//	source /etc/network/pveguest/eth0
 func (s Settings) Plan(
 	backend Backend,
 	files map[string]string,
 	removing bool,
 ) (map[string]Edit, error) {
+	if s.Bond != nil {
+		if err := s.Bond.Validate(s.Name); err != nil {
+			return nil, err
+		}
+
+		if _, err := ethernetMAC(s.MAC); err != nil {
+			return nil, err
+		}
+
+		if backend == Networkd {
+			return nil, fmt.Errorf("%w: use netplan or ifupdown for a bond", errNetworkConfig)
+		}
+	}
+
 	if len(s.IPv6ProxyNeighbors) > 0 && backend != Ifupdown {
 		return nil, fmt.Errorf(
 			"%w: ipv6_proxy_neighbors requires the ifupdown backend",

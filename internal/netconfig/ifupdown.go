@@ -31,6 +31,10 @@ var ownedIfupdownOptions = []string{
 func (s Settings) ifupdownEdits(files map[string]string, removing bool) (map[string]Edit, error) {
 	owner := path.Join("/etc/network/pveguest", s.Name)
 	changes := map[string]Edit{}
+	if err := s.ifupdownBondFiles(changes, files, removing); err != nil {
+		return nil, err
+	}
+
 	hook := "/etc/dhcp/dhclient-enter-hooks.d/pveguest-" + hex.EncodeToString([]byte(s.Name))
 	if err := ownedNetworkFile(
 		changes,
@@ -47,7 +51,9 @@ func (s Settings) ifupdownEdits(files map[string]string, removing bool) (map[str
 	}
 
 	for filename, original := range files {
-		if filename == owner || filename == hook {
+		if filename == owner || filename == hook || filename == s.dhclientConfigPath() ||
+			strings.HasPrefix(filename, "/etc/network/pveguest-bonds/") ||
+			strings.HasPrefix(filename, "/etc/systemd/network/") {
 			continue
 		}
 
@@ -56,6 +62,9 @@ func (s Settings) ifupdownEdits(files map[string]string, removing bool) (map[str
 			source:   "source " + owner,
 			main:     filename == interfacesMain,
 			removing: removing,
+		}
+		if s.Bond != nil {
+			editor.members = s.Bond.memberNames()
 		}
 
 		for line := range strings.SplitAfterSeq(original, "\n") {
@@ -76,6 +85,7 @@ func (s Settings) ifupdownEdits(files map[string]string, removing bool) (map[str
 }
 
 type interfacesEditor struct {
+	members                              []string
 	target, source                       string
 	removing, main, inTarget, keptSource bool
 	out                                  strings.Builder
@@ -114,7 +124,8 @@ func (editor *interfacesEditor) line(line string) error {
 		editor.inTarget = false
 	}
 
-	if directive == "iface" && len(fields) > 1 && fields[1] == editor.target {
+	if directive == "iface" && len(fields) > 1 &&
+		(fields[1] == editor.target || slices.Contains(editor.members, fields[1])) {
 		editor.inTarget = true
 
 		return nil
@@ -143,10 +154,18 @@ func (editor *interfacesEditor) line(line string) error {
 		return nil
 	}
 
-	if boot && slices.Contains(fields[1:], editor.target) {
+	if boot &&
+		slices.ContainsFunc(
+			fields[1:],
+			func(name string) bool {
+				return name == editor.target || slices.Contains(editor.members, name)
+			},
+		) {
 		remaining := slices.DeleteFunc(
 			fields[1:],
-			func(name string) bool { return name == editor.target },
+			func(name string) bool {
+				return name == editor.target || slices.Contains(editor.members, name)
+			},
 		)
 		if len(remaining) > 0 {
 			fmt.Fprintf(&editor.out, "%s %s\n", directive, strings.Join(remaining, " "))
@@ -173,12 +192,18 @@ func (s Settings) ifupdownStanza() string {
 	var out strings.Builder
 	fmt.Fprintf(&out, "auto %s\n", s.Name)
 	method := "manual"
-	if s.DHCP4 {
+	if s.DHCP4 && s.Bond == nil {
 		method = "dhcp"
 	}
 
 	fmt.Fprintf(&out, "iface %s inet %s\n", s.Name, method)
-	fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
+	if s.Bond != nil {
+		s.ifupdownBondSetup(&out)
+		s.ifupdownIPv6(&out)
+	} else {
+		fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
+	}
+
 	fmt.Fprintf(&out, "    pre-up ip link set dev %s up\n", s.Name)
 	if s.MTU != 0 {
 		fmt.Fprintf(
@@ -202,15 +227,31 @@ func (s Settings) ifupdownStanza() string {
 		fmt.Fprintf(&out, "    up ip address replace %s dev %s\n", address, s.Name)
 	}
 
-	fmt.Fprintf(&out, "iface %s inet6 manual\n", s.Name)
-	fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
+	if s.Bond == nil {
+		fmt.Fprintf(&out, "iface %s inet6 manual\n", s.Name)
+		fmt.Fprintf(&out, "    pre-up grep -Fxi -- %s /sys/class/net/%s/address\n", s.MAC, s.Name)
+		s.ifupdownIPv6(&out)
+	}
+
+	for _, address := range s.IPv6ProxyNeighbors {
+		fmt.Fprintf(&out, "    up ip -6 neigh replace proxy %s dev %s\n", address, s.Name)
+	}
+
+	if s.Bond != nil && s.DHCP4 {
+		s.ifupdownBondDHCP(&out)
+	}
+
+	return out.String()
+}
+
+func (s Settings) ifupdownIPv6(out *strings.Builder) {
 	acceptRA, autoconf := 0, 0
 	if s.SLAAC {
 		acceptRA, autoconf = 2, 1
 	}
 
 	fmt.Fprintf(
-		&out,
+		out,
 		"    pre-up sysctl -qw net/ipv6/conf/%s/accept_ra=%d net/ipv6/conf/%s/autoconf=%d\n",
 		s.Name,
 		acceptRA,
@@ -219,12 +260,11 @@ func (s Settings) ifupdownStanza() string {
 	)
 
 	if len(s.IPv6ProxyNeighbors) > 0 {
-		fmt.Fprintf(&out, "    pre-up sysctl -qw net/ipv6/conf/%s/proxy_ndp=1\n", s.Name)
+		fmt.Fprintf(out, "    pre-up sysctl -qw net/ipv6/conf/%s/proxy_ndp=1\n", s.Name)
 	}
 
-	for _, address := range s.IPv6ProxyNeighbors {
-		fmt.Fprintf(&out, "    up ip -6 neigh replace proxy %s dev %s\n", address, s.Name)
+	if s.SLAAC && s.Bond != nil {
+		token, _ := slaacToken(s.MAC) // Plan validated the outer MAC.
+		fmt.Fprintf(out, "    pre-up ip token set %s dev %s\n", token, s.Name)
 	}
-
-	return out.String()
 }

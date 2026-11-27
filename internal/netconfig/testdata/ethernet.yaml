@@ -1,0 +1,12 @@
+# Managed by pveguest_network_interface
+network:
+    version: 2
+    ethernets:
+        eth0:
+            renderer: networkd
+            match:
+                macaddress: "02:00:00:00:00:01"
+            set-name: eth0
+            dhcp4: true
+            dhcp6: false
+            accept-ra: false

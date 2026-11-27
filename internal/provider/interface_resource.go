@@ -33,6 +33,7 @@ type guestNetworkModel struct {
 	Kind           types.String `tfsdk:"kind"`
 	Name           types.String `tfsdk:"name"`
 	MAC            types.String `tfsdk:"mac"`
+	Bond           types.Object `tfsdk:"bond"`
 	Backend        types.String `tfsdk:"backend"`
 	Phase          types.String `tfsdk:"phase"`
 	DHCP4          types.Bool   `tfsdk:"dhcp4"`
@@ -72,6 +73,7 @@ func (r *guestNetworkResource) Schema(
 		Attributes: withGuestAttributes(map[string]schema.Attribute{
 			networkNameField: interfaceNameAttribute(),
 			networkMACField:  schema.StringAttribute{Required: true},
+			"bond":           bondAttribute(),
 			"backend": schema.StringAttribute{
 				Required: true,
 				Validators: []validator.String{
@@ -130,6 +132,7 @@ func (r *guestNetworkResource) ValidateConfig(
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if !resp.Diagnostics.HasError() {
 		config.proxyNeighbors(&resp.Diagnostics)
+		config.bondSettings(ctx, &resp.Diagnostics)
 	}
 }
 
@@ -203,6 +206,7 @@ func (m guestNetworkModel) settings(
 	settings := netconfig.Settings{
 		Name:               m.Name.ValueString(),
 		MAC:                m.MAC.ValueString(),
+		Bond:               m.bondSettings(ctx, diags),
 		DHCP4:              m.DHCP4.ValueBool(),
 		SLAAC:              m.SLAAC.ValueBool(),
 		MTU:                m.MTU.ValueInt64(),
@@ -211,6 +215,14 @@ func (m guestNetworkModel) settings(
 		Addresses:          []string{},
 		IPv6ProxyNeighbors: m.proxyNeighbors(diags),
 	}
+	if !m.Bond.IsNull() && settings.Bond == nil && !diags.HasError() {
+		diags.AddAttributeError(
+			path.Root("bond"),
+			"Unknown guest bond",
+			"Resolve all bond options and member identities before configuring the guest.",
+		)
+	}
+
 	if !m.Addresses.IsNull() {
 		var d diag.Diagnostics
 		settings.Addresses, d = stringValues(ctx, m.Addresses)
@@ -425,68 +437,18 @@ func (s guestNetworkSession) edits(
 	ctx context.Context,
 	removing bool,
 ) (map[string]netconfig.Edit, error) {
-	raw, err := s.helper(
-		ctx,
-		netconfig.FileScript,
-		[]string{s.backend, "read", s.settings.Name},
-		nil,
-		true,
-	)
+	read := func(args []string, body []byte) ([]byte, error) {
+		return s.helper(ctx, netconfig.FileScript, args, body, true)
+	}
+
+	edits, err := s.settings.GuestEdits(ctx, netconfig.Backend(s.backend), removing, read)
 	if err != nil {
-		return nil, err
+		slog.ErrorContext(ctx, "plan guest interface edits", "guest", s.guest, "err", err)
+
+		return nil, fmt.Errorf("plan interface %s on %s: %w", s.settings.Name, s.guest, err)
 	}
 
-	var files map[string]string
-	if err := json.Unmarshal(raw, &files); err != nil {
-		slog.ErrorContext(ctx, "parse guest network configuration", "err", err)
-
-		return nil, fmt.Errorf("read guest network files: %w", err)
-	}
-
-	changes, err := s.settings.Plan(netconfig.Backend(s.backend), files, removing)
-	if err != nil {
-		slog.ErrorContext(ctx, "plan guest network settings", "err", err)
-
-		return nil, fmt.Errorf("plan %s: %w", s.backend, err)
-	}
-
-	if s.backend != string(netconfig.Netplan) {
-		return changes, nil
-	}
-
-	body, err := json.Marshal(changes)
-	if err != nil {
-		slog.ErrorContext(ctx, "encode netplan sources", "err", err)
-
-		return nil, fmt.Errorf("encode netplan sources: %w", err)
-	}
-
-	action := "render"
-	if removing {
-		action = "unrender"
-	}
-
-	rendered, err := s.helper(
-		ctx,
-		netconfig.FileScript,
-		[]string{s.backend, action, s.settings.Name, s.settings.MAC},
-		body,
-		true,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	var overrides map[string]netconfig.Edit
-	if err := json.Unmarshal(rendered, &overrides); err != nil {
-		slog.ErrorContext(ctx, "decode generated networkd units", "err", err)
-
-		return nil, fmt.Errorf("decode generated networkd units: %w", err)
-	}
-
-	maps.Copy(changes, overrides)
-
-	return changes, nil
+	return edits, nil
 }
 
 func (s guestNetworkSession) reconcile(

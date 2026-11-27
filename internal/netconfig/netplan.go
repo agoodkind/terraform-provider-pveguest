@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 
+	netplan "github.com/moznion/go-netplan-types/v2"
+	value "github.com/moznion/go-yaml-nillable"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -17,6 +19,20 @@ const (
 	netplanIndent   = 2
 	netplanVersion  = 2
 )
+
+var ownedNetplanOptions = []string{
+	"addresses",
+	"gateway4",
+	"gateway6",
+	"dhcp4",
+	"dhcp6",
+	"accept-ra",
+	"match",
+	"set-name",
+	"mtu",
+	"nameservers",
+	"renderer",
+}
 
 func yamlField(mapping *yaml.Node, key string) *yaml.Node {
 	if mapping == nil || mapping.Kind != yaml.MappingNode {
@@ -104,8 +120,9 @@ func (m *netplanMatch) selects(definitionID string, settings Settings) bool {
 
 func netplanDocuments(
 	files map[string]string,
-	settings Settings,
-) (map[string]*yaml.Node, string, error) {
+	managed string,
+	name string,
+) (map[string]*yaml.Node, map[string]netplanMatch, error) {
 	docs := map[string]*yaml.Node{}
 	selectors := map[string]netplanMatch{}
 	// scan already resolves equal basenames according to netplan directory precedence.
@@ -121,7 +138,7 @@ func netplanDocuments(
 		if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
 			slog.Error("parse netplan YAML", "path", filename, "err", err)
 
-			return nil, "", fmt.Errorf("parse %s: %w", filename, err)
+			return nil, nil, fmt.Errorf("parse %s: %w", filename, err)
 		}
 
 		if len(doc.Content) == 0 {
@@ -129,7 +146,12 @@ func netplanDocuments(
 		}
 
 		docs[filename] = &doc
-		entries := yamlField(yamlField(doc.Content[0], "network"), "ethernets")
+		network := yamlField(doc.Content[0], "network")
+		if filename == managed && yamlField(yamlField(network, "bonds"), name) != nil {
+			continue
+		}
+
+		entries := yamlField(network, "ethernets")
 		if entries == nil {
 			continue
 		}
@@ -137,7 +159,7 @@ func netplanDocuments(
 		if entries.Kind != yaml.MappingNode {
 			slog.Error("unsupported netplan source", "path", filename, "err", errNetworkConfig)
 
-			return nil, "", fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%w: %s: ethernets must be a mapping",
 				errNetworkConfig,
 				filename,
@@ -152,9 +174,7 @@ func netplanDocuments(
 		}
 	}
 
-	id, err := selectNetplanID(selectors, settings)
-
-	return docs, id, err
+	return docs, selectors, nil
 }
 
 func selectNetplanID(selectors map[string]netplanMatch, settings Settings) (string, error) {
@@ -230,48 +250,42 @@ func (s Settings) netplanEdits(
 	files map[string]string,
 	removing bool,
 ) (map[string]Edit, error) {
-	docs, definitionID, err := netplanDocuments(files, s)
+	managed := path.Join("/etc/netplan", "90-pveguest-"+s.Name+".yaml")
+	updates := map[string]Edit{}
+	if removing && s.Bond != nil {
+		return updates, ownedNetworkFile(updates, files, managed, "", true)
+	}
+
+	docs, selectors, err := netplanDocuments(files, managed, s.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	managed := path.Join("/etc/netplan", "90-pveguest-"+s.Name+".yaml")
-	updates := map[string]Edit{}
-	// Keep unrelated route and link options in their original definition. Both
-	// source files use the same ID, which netplan merges before generating units.
+	definitionID, err := selectNetplanID(selectors, s)
+	if err != nil {
+		return nil, err
+	}
+
+	ids := map[string]bool{definitionID: true}
+	if s.Bond != nil {
+		for _, member := range s.Bond.Members {
+			id, err := selectNetplanID(selectors, Settings{Name: member.Name, MAC: member.MAC})
+			if err != nil {
+				return nil, err
+			}
+
+			ids[id] = true
+		}
+	}
+
 	for filename, doc := range docs {
 		if filename == managed || removing {
 			continue
 		}
 
-		entries := yamlField(yamlField(doc.Content[0], "network"), "ethernets")
-		target := yamlField(entries, definitionID)
-		if target == nil {
-			continue
-		}
-
-		changed := false
-
-		for _, key := range []string{
-			"addresses",
-			"gateway4",
-			"gateway6",
-			"dhcp4",
-			"dhcp6",
-			"accept-ra",
-			"match",
-			"set-name",
-			"mtu",
-			"nameservers",
-			"renderer",
-		} {
-			if removeYAMLField(target, key) {
-				changed = true
-			}
-		}
-
-		if removeMainDefaultRoutes(target) {
-			changed = true
+		changed, err := s.adoptNetplan(yamlField(doc.Content[0], "network"), ids, filename)
+		if err != nil {
+			return nil, err
 		}
 
 		if !changed {
@@ -289,10 +303,6 @@ func (s Settings) netplanEdits(
 			)
 		}
 
-		if len(target.Content) == 0 {
-			removeYAMLField(entries, definitionID)
-		}
-
 		content, err := encodeNetplan(doc)
 		if err != nil {
 			return nil, err
@@ -302,7 +312,18 @@ func (s Settings) netplanEdits(
 		updates[filename] = Edit{Before: &before, After: &content}
 	}
 
-	body, err := s.renderNetplan(definitionID)
+	desired, err := s.renderNetplan(definitionID)
+	if err != nil {
+		return nil, err
+	}
+
+	owned := strings.HasPrefix(files[managed], networkOwnerHeader)
+	if existing := docs[managed]; owned && existing != nil && !removing &&
+		sameNetplan(desired, existing.Content[0]) {
+		return updates, nil
+	}
+
+	body, err := encodeNetplan(desired)
 	if err != nil {
 		return nil, err
 	}
@@ -314,57 +335,163 @@ func (s Settings) netplanEdits(
 	return updates, nil
 }
 
-func (s Settings) renderNetplan(definitionID string) (string, error) {
-	type match struct {
-		MAC string `yaml:"macaddress"`
-	}
-	type dns struct {
-		Addresses []string `yaml:"addresses,omitempty"`
-		Search    []string `yaml:"search,omitempty"`
-	}
-	type ethernet struct {
-		DHCP4Overrides map[string]bool `yaml:"dhcp4-overrides,omitempty"`
-		Renderer       string          `yaml:"renderer"`
-		Match          match           `yaml:"match"`
-		Name           string          `yaml:"set-name"`
-		DHCP4          bool            `yaml:"dhcp4"`
-		DHCP6          bool            `yaml:"dhcp6"`
-		RA             bool            `yaml:"accept-ra"`
-		Addresses      []string        `yaml:"addresses,omitempty"`
-		MTU            int64           `yaml:"mtu,omitempty"`
-		DNS            dns             `yaml:"nameservers,omitempty"`
-	}
-	configuration := ethernet{
-		Renderer:  "networkd",
-		Match:     match{MAC: s.MAC},
-		Name:      s.Name,
-		DHCP4:     s.DHCP4,
-		RA:        s.SLAAC,
-		Addresses: s.Addresses,
-		MTU:       s.MTU,
-		DNS:       dns{Addresses: s.DNS, Search: s.Search},
-	}
-	if s.MTU != 0 && s.DHCP4 {
-		configuration.DHCP4Overrides = map[string]bool{"use-mtu": false}
+// Compare YAML tags, values and sequence order. A mapping's key order and
+// whitespace do not change the guest configuration.
+func sameNetplan(desired, existing *yaml.Node) bool {
+	if existing == nil || desired.Kind != existing.Kind || desired.Value != existing.Value {
+		return false
 	}
 
-	type layer struct {
-		Version   int                 `yaml:"version"`
-		Ethernets map[string]ethernet `yaml:"ethernets"`
+	if desired.ShortTag() != existing.ShortTag() || len(desired.Content) != len(existing.Content) {
+		return false
 	}
-	content, err := yaml.Marshal(map[string]layer{
-		"network": {
-			Version:   netplanVersion,
-			Ethernets: map[string]ethernet{definitionID: configuration},
+
+	if desired.Kind == yaml.MappingNode {
+		for i := 0; i < len(desired.Content); i += yamlMappingPair {
+			if !sameNetplan(desired.Content[i+1], yamlField(existing, desired.Content[i].Value)) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	for i, child := range desired.Content {
+		if !sameNetplan(child, existing.Content[i]) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s Settings) renderNetplan(definitionID string) (*yaml.Node, error) {
+	device := netplan.Device{
+		Renderer: netplan.NetworkdRenderer(),
+		DHCP4:    value.BoolOf(s.DHCP4),
+		DHCP6:    value.BoolOf(false),
+		AcceptRA: value.BoolOf(s.SLAAC),
+	}
+	for _, address := range s.Addresses {
+		device.Addresses = append(device.Addresses, &netplan.Address{Address: address})
+	}
+
+	if s.MTU > 0 {
+		device.MTU = value.Uint64Of(uint64(s.MTU))
+		if s.DHCP4 {
+			device.DHCP4Overrides = &netplan.DHCPOverride{UseMTU: value.BoolOf(false)}
+		}
+	}
+
+	if len(s.DNS)+len(s.Search) > 0 {
+		device.NameServers = &netplan.Nameservers{Addresses: s.DNS, Search: s.Search}
+	}
+
+	network := netplan.NetworkConfig{VersionMustBe2: netplanVersion, Ethernets: netplan.Ethernets{}}
+	if s.Bond == nil {
+		network.Ethernets[definitionID] = netplanEthernet(device, s.Name, s.MAC)
+	} else {
+		memberDevice := netplan.Device{
+			Renderer: device.Renderer,
+			MTU:      device.MTU,
+			AcceptRA: value.BoolOf(false),
+		}
+
+		for _, member := range s.Bond.Members {
+			network.Ethernets[member.Name] = netplanEthernet(memberDevice, member.Name, member.MAC)
+		}
+
+		if s.DHCP4 {
+			device.DHCPIdentifier = value.StringOf("duid")
+		}
+
+		network.Bonds = netplan.Bonds{
+			s.Name: {
+				Device:     device,
+				Interfaces: s.Bond.memberNames(),
+				Parameters: &netplan.BondParameters{
+					Mode:              netplan.ActiveBackupBondMode(),
+					FailOverMACPolicy: netplan.ActiveFailOverMACPolicy(),
+					Primary:           value.StringOf(s.Bond.Primary),
+					PrimaryReselectPolicy: map[string]*netplan.PrimaryReselectPolicy{
+						"always":  netplan.AlwaysPrimaryReselectPolicy(),
+						"better":  netplan.BetterPrimaryReselectPolicy(),
+						"failure": netplan.FailurePrimaryReselectPolicy(),
+					}[s.Bond.PrimaryReselect],
+				},
+			},
+		}
+	}
+
+	var doc yaml.Node
+	if err := doc.Encode(map[string]netplan.NetworkConfig{"network": network}); err != nil {
+		slog.Error("render netplan configuration", "err", err)
+
+		return nil, fmt.Errorf("encode netplan configuration: %w", err)
+	}
+
+	if s.Bond != nil {
+		if err := s.netplanBondFields(yamlField(&doc, "network")); err != nil {
+			return nil, err
+		}
+	}
+
+	return &doc, nil
+}
+
+func netplanEthernet(device netplan.Device, name, mac string) *netplan.Ethernet {
+	ethernet := &netplan.Ethernet{Device: device}
+	ethernet.Match = &netplan.Match{MacAddress: value.StringOf(mac)}
+	ethernet.SetName = value.StringOf(name)
+
+	return ethernet
+}
+
+// Netplan requires an explicit empty link-local list on each member. The Go
+// types omit empty lists and do not support a token or a duration with units.
+func (s Settings) netplanBondFields(network *yaml.Node) error {
+	empty := yaml.Node{Kind: yaml.SequenceNode}
+	ethernets := yamlField(network, "ethernets")
+
+	for _, member := range s.Bond.Members {
+		appendNetplanField(yamlField(ethernets, member.Name), "link-local", empty)
+	}
+
+	bond := yamlField(yamlField(network, "bonds"), s.Name)
+	appendNetplanField(
+		yamlField(bond, "parameters"),
+		"mii-monitor-interval",
+		yaml.Node{
+			Kind:  yaml.ScalarNode,
+			Value: fmt.Sprintf("%dms", s.Bond.MIIMon),
 		},
-	})
-	if err != nil {
-		slog.Error("render netplan", "err", err)
-
-		return "", fmt.Errorf("render netplan: %w", err)
+	)
+	if dns := yamlField(bond, "nameservers"); dns != nil {
+		for _, key := range []string{"addresses", "search"} {
+			if yamlField(dns, key) == nil {
+				appendNetplanField(dns, key, empty)
+			}
+		}
 	}
 
-	return string(content), nil
+	if s.SLAAC {
+		token, err := slaacToken(s.MAC)
+		if err != nil {
+			return err
+		}
+
+		appendNetplanField(
+			bond,
+			"ipv6-address-token",
+			yaml.Node{Kind: yaml.ScalarNode, Value: token},
+		)
+	}
+
+	return nil
+}
+
+func appendNetplanField(mapping *yaml.Node, key string, field yaml.Node) {
+	mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, &field)
 }
 
 func removeMainDefaultRoutes(target *yaml.Node) bool {
